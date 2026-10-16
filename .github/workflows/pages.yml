@@ -8,10 +8,8 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Nothing by default; each job grants only what it needs.
+permissions: {}
 
 concurrency:
   group: pages

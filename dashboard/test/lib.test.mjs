@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  canonicalize, computeEventSha, dayPaths, deriveMetrics, formatDuration, heartbeatLevel, isPlanOnly,
-  listSubjects, parseJsonl, stageTimes, subjectLabel, timelineFor, verifyChain,
+  canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, heartbeatLevel, isPlanOnly,
+  listSubjects, parseJsonl, stageTimes, statusSummary, subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, buildFixtureLines } from './make-fixture.mjs';
 
@@ -407,4 +407,48 @@ test('review #4: dry-run dispatch decisions do not resolve needs-you items; obse
   assert.equal(isPlanOnly(mk('human_action', 'x', {}, true)), false);
   assert.equal(isPlanOnly(mk('merged', 'x', {}, true)), false);
   assert.equal(isPlanOnly(mk('dispatched', 'x', {}, false)), false);
+});
+
+// --- header status (follow-up #1) -----------------------------------------------
+
+test('status line never reads as healthy while the heartbeat is late, stale or missing', () => {
+  const events = fixtureEvents();
+  const lastHb = at('2026-10-16T11:00:03Z');
+  const base = { loaded: true, eventCount: events.length, headSha: 'abcdef0123456789abcdef0123456789abcdef01', days: 7 };
+  const hbAt = (min) => deriveMetrics(events, { now: lastHb + min * 60000 }).heartbeat;
+
+  const fresh = statusSummary({ ...base, heartbeat: hbAt(12) });
+  assert.equal(fresh.level, 'ok');
+  assert.equal(fresh.text, 'Data fresh · 46 events · audit head abcdef0 · controller heartbeat ok');
+
+  const late = statusSummary({ ...base, heartbeat: hbAt(75) });
+  assert.equal(late.level, 'warn');
+  assert.match(late.text, /^Data fresh .* · controller heartbeat late \(over 70 min\)$/);
+
+  const stale = statusSummary({ ...base, heartbeat: hbAt(3 * 60 + 5) });
+  assert.equal(stale.level, 'alert');
+  assert.match(stale.text, /^Data fresh .* · controller heartbeat stale \(3 h\)$/);
+  assert.doesNotMatch(stale.text, /Up to date/);
+
+  const none = statusSummary({ ...base, heartbeat: deriveMetrics([], { now: lastHb }).heartbeat });
+  assert.equal(none.level, 'alert');
+  assert.match(none.text, /no controller heartbeat in the last 7 days$/);
+
+  // Fail closed: no heartbeat information at all is not healthy.
+  assert.equal(statusSummary({ ...base, heartbeat: null }).level, 'warn');
+  assert.match(statusSummary({ ...base, heartbeat: null }).text, /controller heartbeat unknown$/);
+
+  assert.equal(statusSummary({ loaded: false }).level, 'info');
+  const noLog = statusSummary({ loaded: true, noLog: true });
+  assert.equal(noLog.level, 'warn');
+  assert.match(noLog.text, /no controller heartbeat/);
+  const err = statusSummary({ ...base, error: 'GitHub API error (HTTP 502).', heartbeat: hbAt(12) });
+  assert.equal(err.level, 'alert');
+  assert.match(err.text, /^Problem: GitHub API error \(HTTP 502\)\. Showing the last data loaded · controller heartbeat ok$/);
+  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 46 events · /);
+
+  assert.equal(formatAge(null), 'unknown');
+  assert.equal(formatAge(119.9), '119 min');
+  assert.equal(formatAge(180), '3 h');
+  assert.equal(formatAge(3 * 1440 + 5), '3 d');
 });

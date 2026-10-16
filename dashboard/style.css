@@ -94,7 +94,17 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .sub { margin: 0.2rem 0 0; }
 .badge, .status, .meta, .sub { overflow-wrap: anywhere; }
 .badges { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
-.status { grid-column: 1 / -1; margin: 0; font-weight: 600; }
+.status {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 600;
+  padding: 0.3rem 0.65rem;
+  border-left: 4px solid var(--border);
+  border-radius: 4px;
+}
+.status--ok { border-left-color: var(--ok); }
+.status--warn { color: var(--warn); background: var(--warn-bg); border-left-color: var(--warn); }
+.status--alert { color: var(--alert); background: var(--alert-bg); border-left-color: var(--alert); }
 .meta { grid-column: 1; margin: 0; font-size: 0.85rem; }
 .controls { grid-column: 2; grid-row: 3 / span 2; display: flex; gap: 0.5rem; align-items: start; justify-content: flex-end; }
 
