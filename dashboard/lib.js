@@ -287,6 +287,22 @@ const RESOLVES_NEEDS_YOU = new Set([
   'human_action', 'merged', 'cancelled', 'accepted', 'rejected',
 ]);
 
+// Controller decisions (as opposed to facts it observed on GitHub).
+const DECISION_TYPES = new Set([
+  'ready', 'picked', 'dispatched', 'repair_dispatched', 'needs_human', 'stale_contract', 'blocked',
+  'cancelled', 'budget_alert', 'budget_pause', 'kill_switch',
+]);
+
+/**
+ * A decision logged in dry-run mode is only a plan: nothing was launched or changed.
+ * Observed facts (human_action, merged, check_result, ...) still count even though
+ * their payload carries dry_run: true, as every v1 event does.
+ */
+export function isPlanOnly(ev) {
+  const p = ev?.payload || {};
+  return p.dry_run === true && (DECISION_TYPES.has(ev.type) || typeof p.effect === 'string');
+}
+
 // ---------------------------------------------------------------------------
 // Metrics
 
@@ -300,12 +316,13 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const prTask = prTaskMap(events);
   const latest = events.length ? events[events.length - 1] : null;
 
+  // Latest heartbeat with a usable timestamp; a malformed one is flagged by verifyChain.
   let lastHeartbeat = null;
-  for (const ev of events) if (ev.type === 'heartbeat') lastHeartbeat = ev;
+  for (const ev of events) if (ev.type === 'heartbeat' && parseTime(ev.timestamp) != null) lastHeartbeat = ev;
   const hbAt = lastHeartbeat ? parseTime(lastHeartbeat.timestamp) : null;
   const ageMin = hbAt == null ? null : Math.max(0, (now - hbAt) / 60000);
   const heartbeat = {
-    at: lastHeartbeat?.timestamp ?? null,
+    at: hbAt == null ? null : lastHeartbeat.timestamp,
     ageMin,
     level: heartbeatLevel(ageMin, opts),
     payload: lastHeartbeat?.payload ?? null,
@@ -318,6 +335,16 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const runs = new Map();
   const finished = [];
   let dryRunPlanned = 0;
+  let retired = 0;
+  const retire = (task, belowAttempt = Infinity) => {
+    for (const [key, r] of runs) {
+      if (r.task === task && (r.attempt ?? 1) < belowAttempt) {
+        runs.delete(key);
+        retired++;
+      }
+    }
+  };
+  const tasksOf = (subjects) => [...subjects].filter((s) => s.startsWith('task:')).map((s) => s.slice(5));
   const queue = new Map();
   const merged = [];
   const touched = new Set();
@@ -338,6 +365,8 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
           dryRunPlanned++;
           break;
         }
+        // A later attempt supersedes earlier ones for the same task.
+        if (isStr(p.task)) retire(p.task, isNum(p.attempt) ? p.attempt : 1);
         const key = runKey(p, ev);
         runs.set(key, {
           key,
@@ -372,6 +401,11 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
       case 'merged':
         if (isNum(p.pr)) queue.delete(p.pr);
         merged.push(ev);
+        for (const t of tasksOf(subjects)) retire(t);
+        break;
+      case 'needs_human':
+      case 'cancelled':
+        if (!isPlanOnly(ev)) for (const t of tasksOf(subjects)) retire(t);
         break;
       case 'human_action':
         if (isNum(p.pr)) touched.add(p.pr);
@@ -393,11 +427,11 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
         pr: isNum(p.pr) ? p.pr : null,
         reason: isStr(p.reason) ? p.reason : null,
         effect: isStr(p.effect) ? p.effect : null,
-        since: ev.timestamp,
-        ageMs: now - parseTime(ev.timestamp),
+        since: parseTime(ev.timestamp) == null ? null : ev.timestamp,
+        ageMs: parseTime(ev.timestamp) == null ? null : now - parseTime(ev.timestamp),
         subjects,
       });
-    } else if (RESOLVES_NEEDS_YOU.has(ev.type)) {
+    } else if (RESOLVES_NEEDS_YOU.has(ev.type) && !isPlanOnly(ev)) {
       for (const [key, item] of needs) {
         if ([...subjects].some((s) => item.subjects.has(s))) needs.delete(key);
       }
@@ -424,18 +458,29 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
 
   const needsItems = [...needs.values()]
     .map(({ subjects: _s, ...rest }) => rest)
-    .sort((a, b) => (a.since < b.since ? -1 : a.since > b.since ? 1 : 0));
+    .sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+
+  // Without any run_finished in the window, completion is unknown: v1 doesn't log it,
+  // so a dispatched attempt may have ended long ago. Report "unavailable", not a count.
+  const runStatusAvailable = finished.length > 0;
 
   return {
     now,
     today,
     eventCount: events.length,
-    latestAt: latest?.timestamp ?? null,
+    latestAt: parseTime(latest?.timestamp) == null ? null : latest.timestamp,
     heartbeat,
     killSwitch: { enabled: typeof fe === 'boolean' ? fe : null, at: heartbeat.at },
     factoryVersion: isStr(fv) ? fv : null,
     dryRun: typeof dr === 'boolean' ? dr : null,
-    running: { count: runningRows.length, wipLimit: opts.wipLimit, rows: runningRows, dryRunPlanned },
+    running: {
+      available: runStatusAvailable,
+      count: runStatusAvailable ? runningRows.length : null,
+      wipLimit: opts.wipLimit,
+      rows: runningRows,
+      dryRunPlanned,
+      retired,
+    },
     queue: { count: queue.size, items: [...queue.values()] },
     mergedToday: { count: mergedToday.length, prs: mergedToday.map((ev) => ev.payload?.pr).filter(isNum) },
     zeroTouch: {

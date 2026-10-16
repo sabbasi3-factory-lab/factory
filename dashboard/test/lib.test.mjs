@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  canonicalize, computeEventSha, dayPaths, deriveMetrics, formatDuration, heartbeatLevel,
-  parseJsonl, stageTimes, timelineFor, verifyChain,
+  canonicalize, computeEventSha, dayPaths, deriveMetrics, formatDuration, heartbeatLevel, isPlanOnly,
+  listSubjects, parseJsonl, stageTimes, subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, buildFixtureLines } from './make-fixture.mjs';
 
@@ -175,7 +175,9 @@ test('empty input gives empty, well-defined metrics', async () => {
   assert.equal(m.killSwitch.enabled, null);
   assert.equal(m.factoryVersion, null);
   assert.equal(m.dryRun, null);
-  assert.equal(m.running.count, 0);
+  assert.equal(m.running.available, false);
+  assert.equal(m.running.count, null);
+  assert.deepEqual(m.running.rows, []);
   assert.equal(m.queue.count, 0);
   assert.equal(m.mergedToday.count, 0);
   assert.equal(m.zeroTouch.rate, null);
@@ -292,4 +294,117 @@ test('helpers: day paths, durations and stage times', () => {
   assert.equal(formatDuration(3 * 3600000 + 60000), '3h 1m');
   assert.equal(formatDuration(3 * 86400000), '3d 0h');
   assert.deepEqual(stageTimes([]), []);
+});
+
+// --- review fixes ---------------------------------------------------------------
+
+const mk = (type, timestamp, payload, dryRun = false) => ({
+  type, timestamp, payload: { dedupe_key: 'k', factory_version: 'v', dry_run: dryRun, ...payload },
+});
+
+test('review #2: a heartbeat with a non-string timestamp never leaks into heartbeat.at', () => {
+  const good = mk('heartbeat', '2026-10-16T09:00:00Z', { factory_enabled: true });
+  const bad = { ...mk('heartbeat', '2026-10-16T10:00:00Z', { factory_enabled: false }), timestamp: 1792141200 };
+  const now = at('2026-10-16T10:30:00Z');
+
+  const onlyBad = deriveMetrics([bad], { now });
+  assert.equal(onlyBad.heartbeat.at, null);
+  assert.equal(onlyBad.heartbeat.ageMin, null);
+  assert.equal(onlyBad.heartbeat.level, 'none');
+  assert.equal(onlyBad.killSwitch.at, null);
+  assert.equal(onlyBad.latestAt, null);
+
+  // The latest heartbeat with a usable timestamp is used instead.
+  const mixed = deriveMetrics([good, bad], { now });
+  assert.equal(mixed.heartbeat.at, '2026-10-16T09:00:00Z');
+  assert.equal(Math.round(mixed.heartbeat.ageMin), 90);
+  assert.equal(mixed.killSwitch.enabled, true);
+});
+
+test('review #2: malformed field types in any event never make derivation throw', () => {
+  const junk = [12345, null, true, {}, [], 'not-a-date'];
+  for (const [i, value] of junk.entries()) {
+    const events = fixtureEvents().map((ev, j) => {
+      const p = { ...ev.payload };
+      for (const k of Object.keys(p)) if ((j + k.length) % 3 === 0) p[k] = value;
+      return { ...ev, timestamp: j % 4 === i % 4 ? value : ev.timestamp, payload: p };
+    });
+    const m = deriveMetrics(events, { now: at(FIXTURE_NOW) });
+    for (const v of [m.heartbeat.at, m.latestAt, ...m.needsYou.items.map((it) => it.since)]) {
+      assert.ok(v === null || typeof v === 'string', `string or null, got ${typeof v}`);
+    }
+    for (const s of listSubjects(events)) timelineFor(events, s.key);
+    stageTimes(events);
+    events.forEach(subjectLabel);
+  }
+});
+
+test('review #3: dispatched attempts retire on a later attempt, a merged PR, needs_human or cancelled', () => {
+  const finished = mk('run_finished', '2026-10-16T07:00:00Z', { task: 'x/done', attempt: 1, aic: 1 });
+  const events = [
+    finished,
+    mk('dispatched', '2026-10-16T08:00:00Z', { task: 't/a', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('repair_dispatched', '2026-10-16T08:30:00Z', { task: 't/a', attempt: 2, effect: 'dispatch', reason: 'ci-failed' }),
+    mk('dispatched', '2026-10-16T08:00:00Z', { task: 't/b', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('pr_opened', '2026-10-16T08:20:00Z', { pr: 11, task: 't/b', author: 'bot' }),
+    mk('merged', '2026-10-16T08:40:00Z', { pr: 11, merge_commit_sha: 'a'.repeat(40) }), // task via the PR
+    mk('dispatched', '2026-10-16T08:00:00Z', { task: 't/c', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('needs_human', '2026-10-16T08:50:00Z', { task: 't/c', effect: 'label', reason: 'same-failure-signature' }),
+    mk('dispatched', '2026-10-16T08:00:00Z', { task: 't/d', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('cancelled', '2026-10-16T08:55:00Z', { task: 't/d', effect: 'close', reason: 'owner' }),
+    mk('dispatched', '2026-10-16T08:00:00Z', { task: 't/e', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('needs_human', '2026-10-16T08:58:00Z', { task: 't/e', effect: 'label', reason: 'plan' }, true), // a plan: t/e keeps running
+  ];
+  const m = deriveMetrics(events, { now: at('2026-10-16T09:00:00Z') });
+  assert.equal(m.running.available, true);
+  assert.deepEqual(m.running.rows.map((r) => r.key).sort(), ['t/a#a2', 't/e#a1']);
+  assert.equal(m.running.count, 2);
+  assert.equal(m.running.retired, 4);
+});
+
+test('review #3: without any run_finished, active-run status is unavailable, not a count', () => {
+  const events = [
+    mk('dispatched', '2026-10-10T08:00:00Z', { task: 't/a', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('dispatched', '2026-10-11T08:00:00Z', { task: 't/b', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('dispatched', '2026-10-12T08:00:00Z', { task: 't/c', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('dispatched', '2026-10-13T08:00:00Z', { task: 't/d', attempt: 1, effect: 'dispatch', reason: 'ready' }),
+  ];
+  const m = deriveMetrics(events, { now: at('2026-10-16T09:00:00Z') });
+  assert.equal(m.running.available, false);
+  assert.equal(m.running.count, null); // no false "4 / 3" WIP alert
+  assert.equal(m.running.rows.length, 4); // still listed as not yet retired
+  assert.equal(deriveMetrics([], { now: at('2026-10-16T09:00:00Z') }).running.available, false);
+  assert.equal(deriveMetrics(fixtureEvents(), { now: at(FIXTURE_NOW) }).running.available, true);
+});
+
+test('review #4: dry-run dispatch decisions do not resolve needs-you items; observed facts do', () => {
+  const dry = true;
+  const base = [
+    mk('needs_human', '2026-10-16T08:00:00Z', { task: 't/a', issue: 1, effect: 'label', reason: 'r' }, dry),
+    mk('stale_contract', '2026-10-16T08:01:00Z', { task: 't/b', issue: 2, effect: 'hold', reason: 'contract-changed' }, dry),
+    mk('needs_human', '2026-10-16T08:02:00Z', { task: 't/c', issue: 3, pr: 30, effect: 'label', reason: 'r' }, dry),
+    mk('needs_human', '2026-10-16T08:03:00Z', { task: 't/d', issue: 4, pr: 40, effect: 'label', reason: 'r' }, dry),
+  ];
+  const events = [
+    ...base,
+    mk('dispatched', '2026-10-16T09:00:00Z', { task: 't/a', issue: 1, attempt: 2, effect: 'dispatch', reason: 'retry' }, dry),
+    mk('repair_dispatched', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, attempt: 2, effect: 'dispatch', reason: 'retry' }, dry),
+    mk('picked', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, effect: 'pick', reason: 'priority' }, dry),
+    mk('human_action', '2026-10-16T09:10:00Z', { action: 'review', pr: 30, reviewer: 'owner', state: 'approved', submitted_at: '2026-10-16T09:09:00Z' }, dry),
+    mk('merged', '2026-10-16T09:20:00Z', { pr: 40, merge_commit_sha: 'b'.repeat(40), merged_at: '2026-10-16T09:19:00Z' }, dry),
+  ];
+  const m = deriveMetrics(events, { now: at('2026-10-16T10:00:00Z') });
+  assert.deepEqual(m.needsYou.items.map((i) => i.task), ['t/a', 't/b']);
+  assert.equal(m.running.dryRunPlanned, 2);
+
+  // The same decisions outside dry run do resolve.
+  const live = events.map((ev) => (ev.type === 'dispatched' || ev.type === 'repair_dispatched'
+    ? { ...ev, payload: { ...ev.payload, dry_run: false } } : ev));
+  assert.deepEqual(deriveMetrics(live, { now: at('2026-10-16T10:00:00Z') }).needsYou.items, []);
+
+  assert.equal(isPlanOnly(mk('dispatched', 'x', {}, true)), true);
+  assert.equal(isPlanOnly(mk('budget_pause', 'x', { effect: 'pause' }, true)), true);
+  assert.equal(isPlanOnly(mk('human_action', 'x', {}, true)), false);
+  assert.equal(isPlanOnly(mk('merged', 'x', {}, true)), false);
+  assert.equal(isPlanOnly(mk('dispatched', 'x', {}, false)), false);
 });

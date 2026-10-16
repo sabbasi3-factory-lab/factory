@@ -62,6 +62,11 @@ public read-only access and no permissions). It's kept only in this browser's
 `localStorage` and sent only to `api.github.com`, never to `raw.githubusercontent.com`.
 It's never required.
 
+Each section renders independently: a malformed event shows a placeholder row or a
+section message, and never stops the rest of the page. The 15-second clock refresh only
+updates the time cells, so focus and table nodes stay put; when a table is rebuilt
+because new events arrived, focus returns to the same element within the same table.
+
 The Content-Security-Policy allows scripts and styles only from the site itself (no
 inline scripts), and network requests only to the site, `api.github.com` and
 `raw.githubusercontent.com`.
@@ -81,12 +86,12 @@ schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timesta
 
 | Item | Derivation |
 |---|---|
-| Agents running | `dispatched` and `repair_dispatched` events without a matching `run_finished` (same task and attempt), against the WIP limit of 3 (`policies/limits.yaml`). Dry-run dispatches are plans, so they're counted separately as "planned, not running" |
+| Agents running | `dispatched` and `repair_dispatched` attempts not yet retired, against the WIP limit of 3 (`policies/limits.yaml`). An attempt retires on its `run_finished`, a later attempt for the same task, the task's PR being `merged`, or a `needs_human` or `cancelled` for the task. If the window has no `run_finished` at all (v1 doesn't log it), the tile says "unavailable" instead of a count, and the table lists the attempts as "not yet retired". Dry-run dispatches are plans, so they're counted separately as "planned, not running" |
 | Merge queue | PRs `queued`, minus later `dequeued` or `merged` |
 | Merged today | `merged` events whose `merged_at` is today (UTC) |
 | Zero-touch rate | Merged factory PRs (a `merged` or other event links the PR to a `task`) with no `human_action` on that PR, over the window. "n/a" until a factory PR merges |
 | AIC today | Sum of `run_finished.aic` with a timestamp today (UTC), against the 10,000 AIC daily budget (`policies/budgets.yaml`). Amber at 80%, red at 100% |
-| Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue). An item closes when a later event for the same task, PR or issue shows it moved on: `ready`, `picked`, `dispatched`, `repair_dispatched`, `run_started`, `contract_pinned`, `human_action`, `merged`, `cancelled`, `accepted` or `rejected` |
+| Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue). An item closes when a later event for the same task, PR or issue shows it moved on: `ready`, `picked`, `dispatched`, `repair_dispatched`, `run_started`, `contract_pinned`, `human_action`, `merged`, `cancelled`, `accepted` or `rejected`. A controller decision logged in dry-run mode is only a plan, so it doesn't close an item; observed facts (`human_action`, `merged`, …) do, even though every v1 payload carries `dry_run: true` |
 | Kill switch | `factory_enabled` from the latest `heartbeat` |
 | Factory version, dry run | `factory_version` and `dry_run` from the latest event's payload |
 | Heartbeat age | Minutes since the latest `heartbeat`. Amber after 70 min, red after 120 min (the DESIGN alert threshold) |
@@ -95,6 +100,7 @@ schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timesta
 **Not derivable from v1 events yet:**
 
 - *Human-tier PRs* in the needs-you count: v1 events don't carry a risk tier. The tile says so.
+- *Whether an agent is still running*: v1 has no `run_finished`, so "Agents running" shows "unavailable".
 - *Tokens and AIC* while a run is in progress: they arrive only with `run_finished`, so
   "Running now" shows "—" until then. Empty states say "No runs yet" / "No finished runs yet".
 - *Golden pass %, repairs per task, escaped bugs, the stacked "where the time goes" bar
