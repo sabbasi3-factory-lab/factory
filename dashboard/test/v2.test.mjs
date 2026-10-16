@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   PIPELINE_LANES, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, isHumanTierPr,
-  parseJsonl, reviewItems, summarizePr, unmergedPrs, pipeline, shortSha, stageBreakdown, typicalRunMs,
+  parseJsonl, reviewItems, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha, stageBreakdown, typicalRunMs,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH } from './make-fixture.mjs';
 
@@ -220,4 +220,82 @@ test('needs-you: owner reviews are listed oldest first, after deduping audit ite
     'review:sabbasi3-factory-lab/factory#4',
   ]);
   assert.deepEqual(combineNeedsYou([], [], 'x/y'), []);
+});
+
+// --- review of factory#4 -----------------------------------------------------------
+
+const laneOf = (events, label, opts) => {
+  for (const l of pipeline(events, opts).lanes) for (const c of l.cards) if (c.label === label) return l.key;
+  return null;
+};
+const cardOf = (events, label, opts) => pipeline(events, opts).lanes.flatMap((l) => l.cards).find((c) => c.label === label);
+
+test('pipeline: a late run_finished never moves a merged or deployed card back; a real repair does', () => {
+  const T = { task: 't/a', issue: 1 };
+  const base = [
+    mk('dispatched', '2026-10-16T08:00:00Z', { ...T, attempt: 1, effect: 'dispatch', reason: 'ready' }),
+    mk('pr_opened', '2026-10-16T08:30:00Z', { ...T, pr: 10, head_sha: 'a'.repeat(40), author: 'bot' }),
+    mk('merged', '2026-10-16T09:00:00Z', { ...T, pr: 10, merge_commit_sha: 'b'.repeat(40) }),
+  ];
+  const finished = mk('run_finished', '2026-10-17T02:00:00Z', { ...T, attempt: 1, aic: 100 });
+  const deployed = mk('deployed', '2026-10-16T09:20:00Z', { ...T, pr: 10 });
+  // Collector record after the merge (and after the deploy): the card stays put.
+  assert.equal(laneOf([...base, finished], 't/a'), 'merged');
+  assert.equal(laneOf([...base, deployed, finished], 't/a'), 'deployed');
+  // Record before the merge: the merge still wins.
+  assert.equal(laneOf([base[0], base[1], finished, base[2]], 't/a'), 'merged');
+  // Other late records don't undo a merge either (the merge queue may log dequeued after merged).
+  assert.equal(laneOf([...base, mk('dequeued', '2026-10-16T09:00:01Z', { pr: 10, actor: 'bot' })], 't/a'), 'merged');
+  // A real repair moves it back to Running; a dry-run one doesn't.
+  const repair = (dry) => mk('repair_dispatched', '2026-10-16T10:00:00Z', { ...T, pr: 10, attempt: 2, effect: 'dispatch', reason: 'regression' }, dry);
+  assert.equal(laneOf([...base, finished, repair(false)], 't/a'), 'running');
+  assert.equal(laneOf([...base, finished, repair(true)], 't/a'), 'merged');
+  // Forward moves by records still work: dispatched (ready lane) -> run_finished stays Running.
+  assert.equal(laneOf([mk('ready', '2026-10-16T07:00:00Z', T), base[0], finished], 't/a'), 'running');
+});
+
+test('pipeline: human_action and contract_pinned clear side-state tags; dry-run decisions do not', () => {
+  const nh = mk('needs_human', '2026-10-16T08:00:00Z', { task: 't/a', issue: 1, pr: 10, effect: 'label', reason: 'r' });
+  const opened = mk('pr_opened', '2026-10-16T07:00:00Z', { task: 't/a', pr: 10, author: 'bot' });
+  const review = mk('human_action', '2026-10-16T09:00:00Z', { action: 'review', pr: 10, reviewer: 'owner', state: 'approved', submitted_at: '2026-10-16T09:00:00Z' }, true);
+  const tags = (events) => cardOf(events, 't/a', { openPrs: new Set([10]) }).tags.map((t) => t.text);
+  assert.deepEqual(tags([opened, nh]), ['needs human']);
+  assert.deepEqual(tags([opened, nh, review]), [], 'human_action is a fact, even with dry_run: true');
+
+  const stale = mk('stale_contract', '2026-10-16T08:00:00Z', { task: 't/b', issue: 2, effect: 'hold', reason: 'contract-changed' });
+  const pinned = mk('contract_pinned', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, contract_sha: 'abc1234' });
+  const tagsB = (events) => cardOf(events, 't/b').tags.map((t) => t.text);
+  assert.deepEqual(tagsB([stale]), ['stale contract']);
+  assert.deepEqual(tagsB([stale, pinned]), []);
+  const dryPick = mk('picked', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, effect: 'pick', reason: 'priority' }, true);
+  assert.deepEqual(tagsB([stale, dryPick]), ['stale contract', 'dry-run plan']);
+});
+
+test('pipeline: failure tags come from the latest result per workflow on the current head', () => {
+  const head1 = '1'.repeat(40);
+  const head2 = '2'.repeat(40);
+  const chk = (t, workflow, conclusion, head, extra = {}) => mk('check_result', t, { workflow, conclusion, prs: [7], head_sha: head, ...extra });
+  const opened = mk('pr_opened', '2026-10-16T08:00:00Z', { pr: 7, head_sha: head1, author: 'owner' });
+  const tags = (events) => cardOf(events, 'PR #7', { openPrs: new Set([7]) }).tags.map((t) => t.text);
+  // gates fails, then ci succeeds on the same head: the gates failure is still shown.
+  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1, { failure_signature: 'golden:x#1' }), chk('2026-10-16T08:11:00Z', 'ci', 'success', head1)]), ['gates failure']);
+  // A later gates success on that head clears it.
+  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T08:20:00Z', 'gates', 'success', head1)]), []);
+  // Both workflows failing show both.
+  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T08:11:00Z', 'ci', 'timed_out', head1)]), ['gates failure', 'ci timed_out']);
+  // A new head starts afresh, and a late result for the old head is ignored.
+  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T09:00:00Z', 'ci', 'success', head2), chk('2026-10-16T09:01:00Z', 'gates', 'failure', head1)]), []);
+  // Skipped and neutral aren't failures.
+  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'skipped', head1), chk('2026-10-16T08:11:00Z', 'ci', 'neutral', head1)]), []);
+});
+
+test('sparkline geometry marks every valid point and never bridges a gap', () => {
+  const g = sparkSegments([100, null, 50, null, 75]);
+  assert.deepEqual(g.points.map((p) => [p.i, p.v]), [[0, 100], [2, 50], [4, 75]]);
+  assert.deepEqual(g.segments, []);
+  const h = sparkSegments([1, 2, null, 3, null, 4, 5, 6]);
+  assert.equal(h.points.length, 6);
+  assert.deepEqual(h.segments.map((seg) => seg.map((p) => p.i)), [[0, 1], [5, 6, 7]]);
+  assert.deepEqual(sparkSegments([null, null]), { points: [], segments: [] });
+  assert.deepEqual(sparkSegments(undefined), { points: [], segments: [] });
 });

@@ -674,6 +674,27 @@ export function timelineFor(events, subjectKey) {
   return out;
 }
 
+/**
+ * Sparkline geometry: every valid point gets a marker; lines join only consecutive
+ * valid points, so a gap (null) is never bridged.
+ */
+export function sparkSegments(values) {
+  const points = [];
+  const segments = [];
+  let run = [];
+  (values || []).forEach((v, i) => {
+    if (isNum(v)) {
+      points.push({ i, v });
+      run.push({ i, v });
+    } else {
+      if (run.length > 1) segments.push(run);
+      run = [];
+    }
+  });
+  if (run.length > 1) segments.push(run);
+  return { points, segments };
+}
+
 // ---------------------------------------------------------------------------
 // v2 views: short SHAs, 7-day series, pipeline lanes, stage and cost charts
 
@@ -801,6 +822,21 @@ const SIDE_STATE = { needs_human: 'needs human', stale_contract: 'stale contract
 const DONE_LANES = new Set(['merged', 'deployed']);
 
 const PR_LANES = new Set(['pr-open', 'checks', 'queued']);
+const LANE_RANK = { ready: 0, running: 1, 'pr-open': 2, checks: 3, queued: 4, merged: 5, deployed: 6 };
+// Records of something that already happened (the daily collector may append run_finished
+// hours later); they may move a card forward but never back.
+const RECORD_ONLY = new Set(['run_started', 'run_finished']);
+// After a merge, only real new work moves a card back: a new attempt, a new PR, re-admission.
+const REOPENS = new Set(['ready', 'picked', 'dispatched', 'repair_dispatched', 'pr_opened']);
+const CHECK_OK = new Set(['success', 'neutral', 'skipped']);
+
+/** Whether an event of `type` may move a card from lane `from` to lane `to`. */
+function laneMoveAllowed(type, from, to) {
+  if (from == null || from === to || LANE_RANK[to] >= LANE_RANK[from]) return true;
+  if (RECORD_ONLY.has(type)) return false;
+  if (DONE_LANES.has(from)) return REOPENS.has(type);
+  return true;
+}
 
 /**
  * One card per task (or per PR that has no task) in the lane of its latest stage.
@@ -821,7 +857,7 @@ export function pipeline(events, { openPrs = null } = {}) {
         kind: key.startsWith('task:') ? 'task' : 'pr',
         label: key.startsWith('task:') ? key.slice(5) : `PR #${key.slice(3)}`,
         issue: null, prs: [], lane: null, enteredAt: null, attempt: null, model: null, workflow: null,
-        side: null, lastCheck: null, planned: false, removed: false,
+        side: null, checkHead: null, oldHeads: new Set(), checks: new Map(), planned: false, removed: false,
       });
     }
     return cards.get(key);
@@ -848,25 +884,39 @@ export function pipeline(events, { openPrs = null } = {}) {
         if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
         continue;
       }
+      // Resolutions without a lane (human_action, contract_pinned) still clear the side
+      // state; plan-only (dry-run) decisions never resolve anything.
+      if (RESOLVES_NEEDS_YOU.has(ev.type) && !planOnly) c.side = null;
       if (!lane) continue;
       if (planOnly) {
         c.planned = true;
         if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
         continue;
       }
+      // Latest result per workflow for the PR's current head: a success from one
+      // workflow doesn't hide another workflow's failure; a new head starts afresh.
+      const head = isStr(p.head_sha) ? p.head_sha : null;
+      if ((ev.type === 'check_result' || ev.type === 'pr_opened') && head && head !== c.checkHead) {
+        if (c.oldHeads.has(head)) continue; // a late result for a head that's been replaced
+        if (c.checkHead) c.oldHeads.add(c.checkHead);
+        c.checkHead = head;
+        c.checks = new Map();
+      }
       c.removed = false;
-      if (c.lane !== lane) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
-      if (RESOLVES_NEEDS_YOU.has(ev.type)) c.side = null;
+      if (c.lane !== lane && laneMoveAllowed(ev.type, c.lane, lane)) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
       if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {
         if (isNum(p.attempt)) c.attempt = p.attempt;
         if (isStr(p.model)) c.model = p.model;
         c.workflow = isStr(p.workflow) ? p.workflow : ev.type === 'repair_dispatched' ? 'repair' : 'implement';
         c.planned = false;
       }
+      if (ev.type === 'pr_opened' && !head) c.checks = new Map();
       if (ev.type === 'check_result') {
-        c.lastCheck = { conclusion: isStr(p.conclusion) ? p.conclusion : null, workflow: isStr(p.workflow) ? p.workflow : null, signature: isStr(p.failure_signature) ? p.failure_signature : null };
+        c.checks.set(isStr(p.workflow) ? p.workflow : 'check', {
+          conclusion: isStr(p.conclusion) ? p.conclusion : null,
+          signature: isStr(p.failure_signature) ? p.failure_signature : null,
+        });
       }
-      if (ev.type === 'pr_opened') c.lastCheck = null;
     }
   }
 
@@ -886,8 +936,10 @@ export function pipeline(events, { openPrs = null } = {}) {
     const tags = [];
     if (c.side) tags.push({ text: c.side.label, tone: 'fail', title: c.side.reason });
     if (c.lane === 'running' && c.workflow === 'repair') tags.push({ text: `repair${c.attempt ? ` a${c.attempt}` : ''}`, tone: 'warn', title: null });
-    if (c.lastCheck && c.lastCheck.conclusion && c.lastCheck.conclusion !== 'success' && !DONE_LANES.has(c.lane)) {
-      tags.push({ text: `${c.lastCheck.workflow ?? 'check'} ${c.lastCheck.conclusion}`, tone: 'fail', title: c.lastCheck.signature });
+    if (!DONE_LANES.has(c.lane)) {
+      for (const [wf, r] of c.checks) {
+        if (r.conclusion && !CHECK_OK.has(r.conclusion)) tags.push({ text: `${wf} ${r.conclusion}`, tone: 'fail', title: r.signature });
+      }
     }
     if (c.planned) tags.push({ text: 'dry-run plan', tone: 'info', title: null });
     byKey.get(c.lane).cards.push({ ...c, tags });

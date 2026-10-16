@@ -79,18 +79,18 @@
     <div class="grid g-top">
       <section aria-labelledby="needs-h">
         <h2 id="needs-h"><svg class="i" aria-hidden="true"><use href="#i-person"></use></svg>Needs you</h2>
-        <div id="needs" class="panel needs"></div>
+        <div id="needs" tabindex="-1" class="panel needs"></div>
       </section>
       <section aria-labelledby="kpis-h">
         <h2 id="kpis-h"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg>Last <span id="kpi-days">7</span> days</h2>
-        <div id="kpis" class="kpis"></div>
+        <div id="kpis" tabindex="-1" class="kpis"></div>
       </section>
     </div>
 
     <section aria-labelledby="pipeline-h">
       <h2 id="pipeline-h"><svg class="i" aria-hidden="true"><use href="#i-branch"></use></svg>Pipeline <span class="count" id="pipe-count"></span> <span class="count count--muted" id="pipe-closed" hidden></span></h2>
       <div class="panel pipe">
-        <div id="pipeline"></div>
+        <div id="pipeline" tabindex="-1"></div>
         <p class="pipe-foot" id="pipe-foot"></p>
       </div>
     </section>
@@ -98,22 +98,22 @@
     <div class="grid g-2">
       <section aria-labelledby="agents-h">
         <h2 id="agents-h"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg>Agents running <span class="count" id="agents-count"></span></h2>
-        <div id="agents" class="panel"></div>
+        <div id="agents" tabindex="-1" class="panel"></div>
       </section>
       <section aria-labelledby="checks-h">
         <h2 id="checks-h"><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>Latest checks <span class="count" id="checks-count"></span></h2>
-        <div id="checks" class="panel"></div>
+        <div id="checks" tabindex="-1" class="panel"></div>
       </section>
     </div>
 
     <div class="grid g-2">
       <section aria-labelledby="stages-h">
         <h2 id="stages-h"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg>Where the time goes</h2>
-        <div id="stages" class="panel chart"></div>
+        <div id="stages" tabindex="-1" class="panel chart"></div>
       </section>
       <section aria-labelledby="cost-h">
         <h2 id="cost-h"><svg class="i" aria-hidden="true"><use href="#i-coin"></use></svg>Cost per task (AIC)</h2>
-        <div id="cost" class="panel chart"></div>
+        <div id="cost" tabindex="-1" class="panel chart"></div>
       </section>
     </div>
 
@@ -125,7 +125,7 @@
             <label for="subject">Task or PR</label>
             <select id="subject"></select>
           </div>
-          <div id="timeline"></div>
+          <div id="timeline" tabindex="-1"></div>
         </div>
       </details>
     </section>
@@ -138,7 +138,7 @@
             <label for="type-filter">Type</label>
             <select id="type-filter"></select>
           </div>
-          <div id="events"></div>
+          <div id="events" tabindex="-1"></div>
         </div>
       </details>
     </section>

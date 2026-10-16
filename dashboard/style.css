@@ -106,6 +106,9 @@ a:hover { text-decoration: underline; }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
 .muted { color: var(--muted); }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+/* Section containers take focus only as a fallback when their focused item disappears. */
+[tabindex="-1"]:focus { outline: none; }
+[tabindex="-1"]:focus-visible { outline: 2px dashed var(--accent); outline-offset: 4px; }
 
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 svg.i {
@@ -266,7 +269,8 @@ h2 {
 .spark-base { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 3 3; }
 .spark-line { fill: none; stroke: var(--tone); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .spark-area { fill: var(--tone); opacity: 0.12; }
-.spark-dot { fill: var(--tone); }
+.spark-dot { fill: var(--tone); opacity: 0.75; }
+.spark-dot--last { opacity: 1; }
 .spark--blue { --tone: var(--accent); }
 .spark--green { --tone: var(--ok); }
 .spark--purple { --tone: var(--purple); }
@@ -297,7 +301,11 @@ h2 {
 .lane-h { display: flex; align-items: center; gap: 7px; font-size: 0.82rem; font-weight: 600; margin: 0 0 8px; }
 .lane-h .dot { width: 9px; height: 9px; border-radius: 3px; background: var(--c); }
 .lane-h .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 500; }
-.lane-empty, .more { margin: 0; font-size: 0.76rem; color: var(--muted); }
+.lane-empty { margin: 0; font-size: 0.76rem; color: var(--muted); }
+/* Every card is rendered; long lanes scroll (their cards are focusable, so keyboard
+   focus scrolls them into view). */
+.lane-cards { max-height: 30rem; overflow-y: auto; margin-right: -4px; padding-right: 4px; scrollbar-width: thin; }
+.lane-cards .task:last-child { margin-bottom: 0; }
 .lane-note { margin: -4px 0 8px; font-size: 0.74rem; color: var(--warn); display: flex; align-items: center; gap: 4px; }
 .lane-note svg.i { width: 13px; height: 13px; }
 .task {
@@ -313,6 +321,7 @@ h2 {
 @media (max-width: 700px) {
   .lanes { grid-template-columns: minmax(0, 1fr); min-width: 0; }
   .lane { min-height: 0; }
+  .lane-cards { max-height: 20rem; }
   .lane:not(:last-child)::after { right: 50%; top: auto; bottom: -9px; transform: rotate(135deg); }
 }
 

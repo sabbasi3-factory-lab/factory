@@ -3,7 +3,7 @@
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
   DEFAULTS, STAGES, STAGE_LABELS, canonicalize, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge,
-  formatDuration, parseJsonl, parseTime, pipeline, shortSha, stageBreakdown, statusSummary, subjectLabel,
+  formatDuration, parseJsonl, parseTime, pipeline, sparkSegments, shortSha, stageBreakdown, statusSummary, subjectLabel,
   reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay, verifyChain,
 } from './lib.js';
 
@@ -186,14 +186,20 @@ function assignFocusKeys(container) {
 }
 
 // Replace a section's content; if focus was inside it, put focus back on the element
-// with the same key in the same section (or on its table if that row is gone).
+// with the same key in the same section, else on its table or lane region, else on the
+// section itself (every section container has tabindex="-1"), so focus never drops to body.
 function replaceSection(id, ...nodes) {
   const el = $(id);
   const active = document.activeElement;
-  const key = active && active !== document.body && el.contains(active) ? active.getAttribute('data-focus-key') : null;
+  const hadFocus = active && active !== document.body && active !== el && el.contains(active);
+  const key = hadFocus ? active.getAttribute('data-focus-key') : null;
   el.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null && n !== false));
   assignFocusKeys(el);
-  if (key) (el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`) ?? el.querySelector('[data-focus-key="table"]'))?.focus({ preventScroll: true });
+  if (!hadFocus) return;
+  const target = (key && el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`))
+    ?? el.querySelector('[data-focus-key="table"]')
+    ?? el;
+  target.focus({ preventScroll: true });
 }
 
 // A row built from one malformed event shows a placeholder instead of breaking its table.
@@ -480,19 +486,16 @@ function sparkline(values, days, { label, tone = 'blue', format = (v) => String(
   const min = Math.min(0, ...nums);
   const x = (i) => (values.length === 1 ? w / 2 : (i * w) / (values.length - 1));
   const y = (v) => ht - pad - ((v - min) / (max - min || 1)) * (ht - 2 * pad);
-  let seg = [];
-  const flush = () => {
-    if (seg.length > 1) {
-      const d = seg.map(([i, v], k) => `${k ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
-      el.append(svg('path', { class: 'spark-area', d: `${d} L${x(seg.at(-1)[0]).toFixed(1)} ${ht - pad} L${x(seg[0][0]).toFixed(1)} ${ht - pad} Z` }));
-      el.append(svg('path', { class: 'spark-line', d }));
-    }
-    seg = [];
-  };
-  values.forEach((v, i) => (isNum(v) ? seg.push([i, v]) : flush()));
-  flush();
-  const lastIndex = values.findLastIndex(isNum);
-  el.append(svg('circle', { class: 'spark-dot', cx: x(lastIndex).toFixed(1), cy: y(values[lastIndex]).toFixed(1), r: 3 }));
+  const { points, segments } = sparkSegments(values);
+  for (const seg of segments) {
+    const d = seg.map(({ i, v }, k) => `${k ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+    el.append(svg('path', { class: 'spark-area', d: `${d} L${x(seg.at(-1).i).toFixed(1)} ${ht - pad} L${x(seg[0].i).toFixed(1)} ${ht - pad} Z` }));
+    el.append(svg('path', { class: 'spark-line', d }));
+  }
+  // A marker for every valid point, so isolated days between gaps stay visible.
+  points.forEach(({ i, v }, k) => el.append(svg('circle', {
+    class: k === points.length - 1 ? 'spark-dot spark-dot--last' : 'spark-dot', cx: x(i).toFixed(1), cy: y(v).toFixed(1), r: k === points.length - 1 ? 3 : 2,
+  })));
   return el;
 }
 
@@ -732,8 +735,6 @@ function renderNeeds(m) {
     rs === 'ok' ? h('p', { class: 'hint' }, 'Review items come from the open, non-draft PRs of both repos whose body says "Tier: human" or "Tier: owner", or that carry an owner-review label.') : null);
 }
 
-const LANE_CAP = 6;
-
 function laneCard(c) {
   const n1 = [subjectButton(c.key, c.label)];
   if (c.issue != null) n1.push(' ', issueLink(c.issue));
@@ -768,14 +769,13 @@ function renderPipeline() {
   const lanes = pl.lanes.map((l) => h('div', { class: `lane st-${l.key}`, role: 'group', 'aria-label': `${l.label}: ${l.cards.length}` },
     h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), l.label, h('span', { class: 'n' }, String(l.cards.length))),
     l.prStateUnknown ? h('p', { class: 'lane-note', title: "The open-PR list couldn't be read, so these PRs may have been closed." }, icon('question'), 'PR state unknown') : null,
-    l.cards.length ? l.cards.slice(0, LANE_CAP).map((c) => {
+    l.cards.length ? h('div', { class: 'lane-cards' }, l.cards.map((c) => {
       try {
         return laneCard(c);
       } catch (err) {
         return h('p', { class: 'problem' }, `Couldn't show this card: ${err?.message ?? err}`);
       }
-    }) : h('p', { class: 'lane-empty' }, 'none'),
-    l.cards.length > LANE_CAP ? h('p', { class: 'more' }, `+${l.cards.length - LANE_CAP} more`) : null));
+    })) : h('p', { class: 'lane-empty' }, 'none')));
   replaceSection('pipeline', h('div', { class: 'lanes-wrap', role: 'region', 'aria-label': 'Pipeline lanes', tabindex: '0', 'data-focus-key': 'table' },
     h('div', { class: 'lanes' }, lanes)));
 }
