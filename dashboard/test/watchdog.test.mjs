@@ -203,3 +203,16 @@ test('workflows default to no permissions and pin every action to a commit SHA',
   assert.match(watchdog, /cron:/);
   assert.match(watchdog, /60 days/);
 });
+
+test('review #3: an incomplete heartbeat record, a future one or an impossible date never counts as fresh', () => {
+  // Only type + timestamp: not a valid audit event.
+  const bare = JSON.stringify({ type: 'heartbeat', timestamp: minutesAgo(5) });
+  assert.equal(decide(audit(ok(TODAY, bare)), NOW).status, 'stale');
+  // 4 minutes in the future: rejected (no skew allowance).
+  assert.equal(decide(audit(ok(TODAY, line('heartbeat', '2026-10-16T12:04:00Z'))), NOW).status, 'stale');
+  // Sep 31 normalises to Oct 1 in Date.parse: rejected by the exact round-trip.
+  const oct2 = Date.parse('2026-10-02T00:00:00Z');
+  assert.equal(decide(audit(ok('audit/2026/10/01.jsonl', line('heartbeat', '2026-09-31T23:30:00Z'))), oct2).status, 'stale');
+  // A valid one exactly at now is fresh.
+  assert.equal(decide(audit(ok(TODAY, line('heartbeat', '2026-10-16T12:00:00Z'))), NOW).status, 'fresh');
+});

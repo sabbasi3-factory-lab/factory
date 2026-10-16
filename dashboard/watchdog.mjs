@@ -9,14 +9,13 @@
 // actually read and is recent enough counts as "fresh".
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { DEFAULTS, dayPaths, formatAge, parseJsonl, parseTime } from './lib.js';
+import { DEFAULTS, dayPaths, formatAge, parseJsonl, parseTime, validateEvent } from './lib.js';
 
 export const SOURCE_REPO = 'sabbasi3-factory-lab/chrono-node-rs';
 export const AUDIT_BRANCH = 'audit';
 export const LABEL = 'heartbeat-alert';
 export const TITLE = 'Controller heartbeat stale';
 export const MAX_AGE_MIN = DEFAULTS.heartbeatAlertMin; // 120: alert after 2 h
-const FUTURE_SKEW_MS = 5 * 60000; // a heartbeat "from the future" is not proof of life
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const API = 'https://api.github.com';
 const RAW = 'https://raw.githubusercontent.com';
@@ -24,16 +23,22 @@ const RAW = 'https://raw.githubusercontent.com';
 // ---------------------------------------------------------------------------
 // Pure decision logic
 
-/** Newest valid heartbeat in the readable day files, or null. */
+/**
+ * Newest valid heartbeat in the readable day files, or null. Only a complete audit record
+ * (every required field, right shapes) whose timestamp is a real UTC time (exact round-trip,
+ * so no "September 31") and not after `now` counts as proof of life.
+ */
 export function newestHeartbeat(files, now) {
   let best = null;
   for (const file of files) {
     if (file.status !== 'ok') continue;
     for (const rec of parseJsonl(file.text, file.path)) {
       const ev = rec.event;
-      if (!ev || ev.type !== 'heartbeat' || typeof ev.timestamp !== 'string' || !TIMESTAMP.test(ev.timestamp)) continue;
+      if (!ev || ev.type !== 'heartbeat' || validateEvent(ev).length !== 0) continue;
+      if (typeof ev.timestamp !== 'string' || !TIMESTAMP.test(ev.timestamp)) continue;
       const ms = parseTime(ev.timestamp);
-      if (ms == null || ms > now + FUTURE_SKEW_MS) continue;
+      if (ms == null || ms > now) continue;
+      if (new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z') !== ev.timestamp) continue;
       if (!best || ms > best.ms) best = { ms, timestamp: ev.timestamp, path: file.path, line: rec.line };
     }
   }
