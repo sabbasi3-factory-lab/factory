@@ -1,0 +1,42 @@
+# Risk tiers for chrono-node-rs. Paths are globs relative to the product repo root.
+version: 1
+tiers:
+  auto:            # merge queue after the standard gates
+    paths:
+      - "src/locales/*/parsers/**"
+      - "src/locales/*/refiners/**"
+      - "tests/locales/**"
+  auto-strict:     # merge queue after the standard gates plus the strict gates
+    paths:
+      - "src/core/**"
+      - "src/calculation/**"
+      - "src/common/**"
+      - "Cargo.toml"     # only through the dependency steward's PRs
+      - "Cargo.lock"
+      - "vendor/**"
+    start_as: human  # Stage 1. Moves to auto-strict by a reviewed PR once the core fire drills pass.
+    strict_gates:
+      - full_regression           # golden + held-out comparison across every ported language
+      - semver_checks             # no public API break
+      - mutation_score_not_lower
+      - perf_regression_max_pct: 5
+      - code_health_not_worse     # complexity, duplication
+      - reviewer_agent            # second-opinion model; "object" -> needs-human, never overrides a gate
+      - serialize_area: true      # one core PR at a time
+      - auto_revert_on_regression: true
+  human:           # owner review
+    paths:
+      - ".github/**"
+      - "contracts/**"
+      - "harness/**"
+      - "tests/golden/**"
+      - "upstream/**"
+      - "NOTICE"
+protected_from_agents:   # agents' changes to these paths are rejected outright
+  - ".github/**"
+  - "contracts/**"
+  - "upstream/**"
+  - "tests/golden/**"
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - "vendor/**"

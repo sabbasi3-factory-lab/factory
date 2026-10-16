@@ -1,0 +1,15 @@
+version: 1
+controller: "every 5 minutes, plus events (issue labelled, CI completed, pull_request dequeued, push to contracts/**)"
+heartbeat: hourly         # proves the controller is alive; no-change polls are not logged
+heartbeat_alert_after_hours: 2   # raised by the daily-digest workflow, not the controller itself
+outcomes_collector: daily # gh aw outcomes + gh aw logs -> acceptance, zero-touch, cost per merged PR -> audit log + dashboard
+daily_digest: daily       # one-page summary mentioning the owner: merged/failed, needs-you, spend, drills, anomalies
+monitor: nightly          # plain code: random phrases compared with chrono-node
+audit_chain_verifier: daily
+factory_review:
+  every_days: 3           # proposes factory changes as draft PRs; the owner approves
+  data_window_days: 7     # always a rolling 7-day window
+  min_tasks_since_last_change_in_area: 15   # otherwise "no change"
+fire_drills: "weekly, at random times, from Stage 2; and after every factory change (dry-run first)"
+token_expiry_warning_days: 14
+key_rotation_days: 90

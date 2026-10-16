@@ -1,0 +1,25 @@
+# Bounds for every loop. Exceeding a bound gives an explicit state; nothing fails silently.
+version: 1
+wip:
+  start: 3                 # tasks in flight at once
+  max: 10                  # adaptive ceiling
+  adaptive:
+    org_concurrent_job_limit: 20     # Free plan, whole org
+    pause_dispatch_when_busy_jobs_over: 14   # running + queued Actions jobs
+  core_area: 1             # auto-strict paths are serialized
+ci:
+  max_jobs_per_pr: 2       # keep CI fan-out small so more tasks fit
+task:
+  max_attempts: 1          # first implementation attempt
+  max_repairs: 2           # Evergreen repairs after the first attempt
+  stop_on_repeated_signature: true   # same failure signature twice -> needs-human
+  max_wall_clock_hours: 24 # from picked to merged; then needs-human
+  flaky_requeue: 1         # re-queue once if a failure is classified as flaky
+human_queue:
+  max_items: 5             # above this, stop admitting new human-tier work
+borderline_dependency:
+  auto_reject_after_hours: 24
+flaky_tests:
+  quarantine_after: 3      # flakes within 7 days
+  window_days: 7
+fail_closed: true          # unknown state, missing model or tool -> wait or needs-human; never fall back
