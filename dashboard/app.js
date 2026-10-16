@@ -1,8 +1,10 @@
-// Control-room UI. Fetches the audit branch from GitHub, verifies it with lib.js
-// and renders tiles and tables. All DOM writes use textContent, never innerHTML.
+// Control-room UI (v2). Fetches the audit branch from GitHub, verifies it with lib.js
+// and renders the panels. All DOM writes use textContent or createElement(NS), never
+// innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
-  DEFAULTS, STAGES, canonicalize, dayPaths, deriveMetrics, formatDuration, parseJsonl,
-  parseTime, statusSummary, subjectLabel, timelineFor, utcDay, verifyChain,
+  DEFAULTS, STAGES, STAGE_LABELS, canonicalize, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge,
+  formatDuration, parseJsonl, parseTime, pipeline, shortSha, stageBreakdown, statusSummary, subjectLabel,
+  timelineFor, typicalRunMs, utcDay, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -11,6 +13,7 @@ const API = 'https://api.github.com';
 const RAW = 'https://raw.githubusercontent.com';
 const GH = 'https://github.com';
 const TOKEN_KEY = 'factory-dashboard.github-token';
+const THEME_KEY = 'factory-dashboard.theme';
 const FIXTURE_URL = 'test/fixtures/sample.jsonl'; // relative, so it works locally and on Pages
 const MISSING_BRANCH_POLL_S = 300;
 
@@ -62,7 +65,7 @@ function h(tag, attrs = {}, ...children) {
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? '' : String(v));
   }
-  for (const c of children.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
   return el;
 }
 
@@ -105,8 +108,9 @@ function subjectButton(key, label) {
     title: 'Show the timeline',
     onclick: () => {
       state.subject = key;
-      render({ full: true });
-      $('timeline-h').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      $('timeline-fold').open = true;
+      safe('timeline', () => renderTimeline(deriveMetrics(state.events, { now: now() })));
+      $('timeline-fold').scrollIntoView({ behavior: 'smooth', block: 'start' });
       $('subject').focus({ preventScroll: true });
     },
   }, label);
@@ -149,6 +153,7 @@ function updateClockCells() {
     const text = formatDuration(now() - Number(el.getAttribute('data-since')));
     if (el.textContent !== text) el.textContent = text;
   }
+  for (const el of document.querySelectorAll('[data-bar-since]')) setBar(el);
 }
 
 const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]';
@@ -173,9 +178,9 @@ function replaceSection(id, ...nodes) {
   const el = $(id);
   const active = document.activeElement;
   const key = active && active !== document.body && el.contains(active) ? active.getAttribute('data-focus-key') : null;
-  el.replaceChildren(...nodes.filter((n) => n != null));
+  el.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null && n !== false));
   assignFocusKeys(el);
-  if (key) (el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`) ?? el.querySelector('.table-wrap'))?.focus({ preventScroll: true });
+  if (key) (el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`) ?? el.querySelector('[data-focus-key="table"]'))?.focus({ preventScroll: true });
 }
 
 // A row built from one malformed event shows a placeholder instead of breaking its table.
@@ -235,8 +240,31 @@ function nextDelayMs(minSeconds) {
   return ms;
 }
 
+// Lists the day files that exist at the head commit, so missing days aren't fetched
+// (each 404 would log a console error). One API call per head change. Returns null if
+// the listing isn't usable, and the caller then falls back to fetching every day.
+async function listAuditFiles(sha) {
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const res = await fetch(`${API}/repos/${REPO}/git/trees/${sha}:audit?recursive=1`, {
+      headers, credentials: 'omit', referrerPolicy: 'no-referrer',
+    });
+    readRate(res);
+    if (res.status === 404) return []; // no audit/ directory at this commit
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body && Array.isArray(body.tree) && !body.truncated ? body.tree : null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchDayFiles(sha) {
-  const paths = dayPaths(now(), DAYS);
+  const wanted = dayPaths(now(), DAYS);
+  const listing = await listAuditFiles(sha);
+  const paths = listing ? existingDayPaths(listing, wanted) : wanted;
   const texts = await Promise.all(paths.map(async (path) => {
     const res = await fetch(`${RAW}/${REPO}/${sha}/${path}`, { credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (res.status === 404) return '';
@@ -339,6 +367,61 @@ async function tick() {
 // ---------------------------------------------------------------------------
 // Rendering
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svg(tag, attrs = {}, ...children) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) el.setAttribute(k, String(v));
+  for (const c of children) if (c) el.append(c);
+  return el;
+}
+
+function icon(name, cls = '') {
+  return svg('svg', { class: `i ${cls}`.trim(), 'aria-hidden': 'true', focusable: 'false' }, svg('use', { href: `#i-${name}` }));
+}
+
+// Widths are set through the CSSOM, which the CSP allows (no style attributes).
+function withWidth(el, pct) {
+  el.style.width = `${Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0))}%`;
+  return el;
+}
+
+const pctText = (v) => (v == null ? 'n/a' : `${Math.round(v)}%`);
+const millions = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+
+/** A 7-day trend line. Null values leave a gap rather than a fake zero. */
+function sparkline(values, days, { label, tone = 'blue', format = (v) => String(v) } = {}) {
+  const w = 200;
+  const ht = 36;
+  const pad = 4;
+  const nums = values.filter(isNum);
+  const described = days.map((d, i) => `${d.slice(5)} ${values[i] == null ? 'none' : format(values[i])}`).join(', ');
+  const el = svg('svg', {
+    class: `spark spark--${tone}`, viewBox: `0 0 ${w} ${ht}`, preserveAspectRatio: 'none', role: 'img',
+    'aria-label': `${label}, oldest to newest: ${described}`,
+  });
+  el.append(svg('path', { class: 'spark-base', d: `M0 ${ht - pad} L${w} ${ht - pad}` }));
+  if (!nums.length) return el;
+  const max = Math.max(...nums);
+  const min = Math.min(0, ...nums);
+  const x = (i) => (values.length === 1 ? w / 2 : (i * w) / (values.length - 1));
+  const y = (v) => ht - pad - ((v - min) / (max - min || 1)) * (ht - 2 * pad);
+  let seg = [];
+  const flush = () => {
+    if (seg.length > 1) {
+      const d = seg.map(([i, v], k) => `${k ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+      el.append(svg('path', { class: 'spark-area', d: `${d} L${x(seg.at(-1)[0]).toFixed(1)} ${ht - pad} L${x(seg[0][0]).toFixed(1)} ${ht - pad} Z` }));
+      el.append(svg('path', { class: 'spark-line', d }));
+    }
+    seg = [];
+  };
+  values.forEach((v, i) => (isNum(v) ? seg.push([i, v]) : flush()));
+  flush();
+  const lastIndex = values.findLastIndex(isNum);
+  el.append(svg('circle', { class: 'spark-dot', cx: x(lastIndex).toFixed(1), cy: y(values[lastIndex]).toFixed(1), r: 3 }));
+  return el;
+}
+
 // Clock-dependent parts re-render on every tick; the rest only when data or a selection changes,
 // so open selects, expanded rows and text selections aren't disturbed.
 function render({ full = false } = {}) {
@@ -358,50 +441,64 @@ function render({ full = false } = {}) {
   } catch (err) {
     setStatus(`Problem showing the header: ${err?.message ?? err}`, 'alert');
   }
-  safe('tiles', withMetrics(renderTiles)); // tiles hold no focusable elements
+  safe('kpis', withMetrics(renderKpis)); // KPI tiles hold no focusable elements
   if (full || state.renderedVersion !== state.dataVersion) {
     state.renderedVersion = state.dataVersion;
     safe('needs', withMetrics(renderNeeds));
-    safe('running', withMetrics(renderRunning));
-    safe('tokens', withMetrics(renderTokens));
-    safe('stages', withMetrics(renderStages));
+    safe('pipeline', renderPipeline);
+    safe('agents', withMetrics(renderAgents));
     safe('checks', withMetrics(renderChecks));
+    safe('stages', withMetrics(renderStages));
+    safe('cost', withMetrics(renderCost));
     safe('timeline', withMetrics(renderTimeline));
     safe('events', renderEvents);
-  } else {
-    updateClockCells();
   }
+  updateClockCells();
 }
 
 function setStatus(text, level = 'warn') {
   const el = $('status');
   if (el.textContent !== text) el.textContent = text; // only real changes are announced
-  el.className = `status status--${level}`;
+  el.className = `chip status status--${level}`;
+}
+
+function setChip(id, { hidden = false, tone = null, iconName = null, text = '', title = null }) {
+  const el = $(id);
+  el.hidden = hidden;
+  if (hidden) return;
+  el.className = `chip${tone ? ` chip--${tone}` : ''}`;
+  el.replaceChildren(...(iconName ? [icon(iconName)] : []), text);
+  if (title) el.title = title;
+  else el.removeAttribute('title');
 }
 
 function renderHeader(m) {
   const chain = state.chain;
-  const badge = $('chain-badge');
   if (!chain || chain.status === 'empty') {
-    badge.className = 'badge';
-    badge.textContent = state.loaded ? 'Chain: no events' : 'Chain: not loaded';
+    setChip('chain-badge', { iconName: 'shield', text: state.loaded ? 'Chain: no events' : 'Chain: not loaded' });
   } else if (chain.status === 'verified') {
-    badge.className = 'badge badge--ok';
-    badge.textContent = `✓ Chain verified · ${chain.total} event${chain.total === 1 ? '' : 's'}` + (chain.windowStart === 'genesis' ? ' from genesis' : '');
+    setChip('chain-badge', {
+      tone: 'ok', iconName: 'shield',
+      text: `Chain verified · ${chain.total} event${chain.total === 1 ? '' : 's'}`,
+      title: chain.windowStart === 'genesis' ? 'Every hash and parent link checks out, back to the first event of the log.' : 'Every hash and parent link in the loaded window checks out.',
+    });
   } else {
-    badge.className = 'badge badge--alert';
-    badge.textContent = `✗ Chain broken at event ${chain.brokenAt} (${chain.brokenSource}): ${chain.brokenReason}`;
+    setChip('chain-badge', { tone: 'alert', iconName: 'warn', text: `Chain broken at event ${chain.brokenAt}`, title: `${chain.brokenSource}: ${chain.brokenReason}` });
   }
 
+  const enabled = m?.killSwitch?.enabled ?? null;
+  setChip('kill-chip', {
+    hidden: enabled == null, tone: enabled ? 'ok' : 'alert', iconName: 'power',
+    text: enabled ? 'Factory on' : 'Factory off', title: 'factory_enabled from the latest heartbeat; off means no new dispatches',
+  });
   const dryRun = m?.dryRun ?? null;
-  const dry = $('dry-badge');
-  dry.hidden = dryRun == null;
-  dry.className = dryRun ? 'badge badge--warn' : 'badge';
-  dry.textContent = dryRun ? 'Dry run: decisions are logged, not acted on' : 'Live mode (not dry run)';
-
-  const mode = $('mode-badge');
-  mode.hidden = !FIXTURE;
-  mode.textContent = `Fixture mode · sample data · clock pinned at ${new Date(now()).toISOString().slice(0, 16)}Z`;
+  setChip('dry-badge', {
+    hidden: dryRun == null, tone: dryRun ? 'warn' : 'ok', iconName: dryRun ? 'info' : 'bolt',
+    text: dryRun ? 'Dry run' : 'Live mode', title: dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect',
+  });
+  const version = m?.factoryVersion ?? null;
+  setChip('version-chip', { hidden: !version, iconName: 'branch', text: `factory ${shortSha(version)}`, title: `Factory version ${version}` });
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: `Sample data · clock ${new Date(now()).toISOString().slice(11, 16)}Z` });
 
   const summary = statusSummary({
     loaded: state.loaded,
@@ -416,169 +513,293 @@ function renderHeader(m) {
   setStatus(summary.text, summary.level);
 
   const meta = [];
-  if (!FIXTURE) {
-    if (state.lastCheck) meta.push(`Last checked ${new Date(state.lastCheck).toISOString().slice(11, 19)}Z`);
+  if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
+  else {
+    if (state.lastCheck) meta.push(`checked ${new Date(state.lastCheck).toISOString().slice(11, 19)}Z`);
     if (state.nextCheckAt) meta.push(`next in ${Math.max(0, Math.round((state.nextCheckAt - Date.now()) / 1000))} s`);
     const r = state.rate;
-    if (r) meta.push(`GitHub API: ${r.remaining} of ${r.limit} requests left` + (r.reset ? `, resets ${new Date(r.reset).toISOString().slice(11, 16)}Z` : ''));
-    meta.push(getToken() ? 'using your token' : 'no token');
+    if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${new Date(r.reset).toISOString().slice(11, 16)}Z` : ''));
+    meta.push(getToken() ? 'your token' : 'no token');
   }
   $('meta').textContent = meta.join(' · ');
+  $('meta-settings').textContent = meta.length ? `Now: ${meta.join(' · ')}.` : '';
   $('poll-hint').textContent = `Checks every ${POLL_S} s at most (?poll=N), spread out to stay within the rate limit: about once a minute without a token. Window: ${DAYS} days (?days=N).`;
   $('window-days').textContent = String(DAYS);
+  $('kpi-days').textContent = String(DAYS);
 }
 
-function tile(label, value, note, level = null, levelText = null) {
-  return h('article', { class: `tile${level ? ` tile--${level}` : ''}` },
-    h('h3', {}, label),
-    h('p', { class: 'value' }, value, levelText ? h('span', { class: 'level' }, levelText) : null),
-    note ? h('p', { class: 'note' }, note) : null);
+function kpi({ title, iconName, value, unit = null, detail, level = null, levelText = null, extra = null, spark }) {
+  return h('article', { class: `panel kpi${level ? ` kpi--${level}` : ''}` },
+    h('h3', { class: 'kpi-t' }, icon(iconName), title),
+    h('p', { class: 'kpi-v' }, value, unit ? h('small', {}, ` ${unit}`) : null, levelText ? h('span', { class: 'kpi-level' }, levelText) : null),
+    h('p', { class: 'kpi-d' }, detail),
+    extra,
+    spark);
 }
 
-function runningTile(r) {
-  const planned = r.dryRunPlanned ? `; ${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running` : '';
-  if (!r.available) {
-    const open = r.rows.length ? `; ${r.rows.length} dispatched attempt${r.rows.length === 1 ? '' : 's'} not yet retired` : '';
-    return tile('Agents running', 'unavailable', `run completion isn't logged yet (no run_finished events)${open}${planned}`);
-  }
-  const over = r.count > r.wipLimit;
-  return tile('Agents running', `${r.count} / ${r.wipLimit}`, `WIP limit ${r.wipLimit}${planned}`, over ? 'alert' : null, over ? 'over limit' : null);
-}
-
-function renderTiles(m) {
+function renderKpis(m) {
+  const s = dailySeries(state.events, { now: now(), days: DAYS });
+  const zt = m.zeroTouch;
   const hb = m.heartbeat;
-  const r = m.running;
-  const tiles = [
-    runningTile(r),
-    tile('Merge queue', String(m.queue.count), m.queue.count ? `PR ${m.queue.items.map((q) => `#${q.pr}`).join(', ')}` : 'empty'),
-    tile('Merged today (UTC)', String(m.mergedToday.count), m.mergedToday.count ? `PR ${m.mergedToday.prs.map((n) => `#${n}`).join(', ')}` : 'nothing yet today'),
-    tile(`Zero-touch rate (${DAYS} d)`, m.zeroTouch.rate == null ? 'n/a' : `${Math.round(m.zeroTouch.rate * 100)}%`,
-      m.zeroTouch.merged ? `${m.zeroTouch.untouched} of ${m.zeroTouch.merged} merged factory PRs had no human action` : 'no merged factory PRs yet'),
-    tile('AIC today (UTC)', `${fmtInt(Math.round(m.aicToday.total))} / ${fmtInt(m.aicToday.budget)}`,
-      `${(m.aicToday.pct ?? 0).toFixed(1)}% of the daily budget` + (m.tokensPerTask.total.runs ? '' : ' · no run_finished events yet'),
-      m.aicToday.level === 'ok' ? null : m.aicToday.level, m.aicToday.level === 'alert' ? 'budget reached' : m.aicToday.level === 'warn' ? '≥ 80%' : null),
-    tile('Needs you', String(m.needsYou.count), 'open needs-human and stale contracts (human-tier PRs aren\'t in v1 events)',
-      m.needsYou.count ? 'warn' : null, m.needsYou.count ? 'action' : null),
-    tile('Kill switch', m.killSwitch.enabled == null ? 'unknown' : m.killSwitch.enabled ? 'Factory on' : 'Factory off',
-      m.killSwitch.enabled == null ? 'no heartbeat yet' : `factory_enabled = ${m.killSwitch.enabled}, from the last heartbeat`,
-      m.killSwitch.enabled === false ? 'alert' : null, m.killSwitch.enabled === false ? 'no new dispatches' : null),
-    tile('Factory version', m.factoryVersion ? h('code', {}, m.factoryVersion) : '—', m.factoryVersion ? 'from the latest event' : 'no events yet'),
-    tile('Heartbeat age', hb.ageMin == null ? 'none' : `${Math.floor(hb.ageMin)} min`,
-      typeof hb.at === 'string' ? `last at ${hb.at.slice(0, 16).replace('T', ' ')}Z · amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min` : 'no heartbeat in the window',
-      hb.level === 'alert' ? 'alert' : hb.level === 'warn' || hb.level === 'none' ? 'warn' : 'ok',
-      hb.level === 'alert' ? 'controller may be down' : hb.level === 'warn' ? 'late' : hb.level === 'none' ? 'missing' : 'ok'),
-    tile('Dry run', m.dryRun == null ? 'unknown' : m.dryRun ? 'Yes' : 'No',
-      m.dryRun ? 'the controller plans and logs, but does not act' : m.dryRun === false ? 'decisions take effect' : 'no events yet',
-      m.dryRun ? 'info' : null),
-  ];
-  replaceSection('tiles', ...tiles);
+  const aic = m.aicToday;
+  const meter = withWidth(h('i'), aic.pct ?? 0);
+  const mergedWeek = s.merged.reduce((a, b) => a + b, 0);
+  const hbLevel = hb.level === 'alert' ? 'alert' : hb.level === 'ok' ? null : 'warn';
+  replaceSection('kpis',
+    kpi({
+      title: 'Zero-touch rate', iconName: 'ok', value: zt.rate == null ? 'n/a' : pctText(zt.rate * 100),
+      detail: zt.merged ? `${zt.untouched} of ${zt.merged} merged factory PRs had no human action` : 'no merged factory PRs yet',
+      spark: sparkline(s.zeroTouchPct, s.days, { label: 'Zero-touch rate so far', tone: 'green', format: pctText }),
+    }),
+    kpi({
+      title: 'Checks passed', iconName: 'shield', value: pctText(s.checks.pct),
+      detail: s.checks.total ? `${s.checks.passed} of ${s.checks.total} check runs passed` : 'no check results yet',
+      spark: sparkline(s.checksPassPct, s.days, { label: 'Share of check runs that passed, by day', tone: 'green', format: pctText }),
+    }),
+    kpi({
+      title: 'AIC today (UTC)', iconName: 'coin', value: fmtInt(Math.round(aic.total)), unit: `/ ${fmtInt(aic.budget)}`,
+      detail: `${(aic.pct ?? 0).toFixed(1)}% of the daily budget${m.tokensPerTask.total.runs ? '' : ' · no run_finished events yet'}`,
+      level: aic.level === 'ok' ? null : aic.level, levelText: aic.level === 'alert' ? 'budget reached' : aic.level === 'warn' ? '≥ 80%' : null,
+      extra: h('div', { class: 'meter', role: 'meter', 'aria-label': 'AIC today vs. daily budget', 'aria-valuemin': '0', 'aria-valuemax': String(aic.budget), 'aria-valuenow': String(Math.round(aic.total)) }, meter),
+      spark: sparkline(s.aic, s.days, { label: 'AIC per day', tone: 'purple', format: (v) => fmtInt(Math.round(v)) }),
+    }),
+    kpi({
+      title: 'Merged today (UTC)', iconName: 'branch', value: String(m.mergedToday.count),
+      detail: `${m.mergedToday.count ? `PR ${m.mergedToday.prs.slice(0, 5).map((n) => `#${n}`).join(', ')}${m.mergedToday.prs.length > 5 ? ` +${m.mergedToday.prs.length - 5} more` : ''} · ` : ''}${mergedWeek} in ${DAYS} days`,
+      spark: sparkline(s.merged, s.days, { label: 'PRs merged per day' }),
+    }),
+    kpi({
+      title: 'Median time to merge', iconName: 'clock', value: s.mergeMedianAllMin == null ? 'n/a' : formatDuration(s.mergeMedianAllMin * 60000),
+      detail: 'from PR opened to merged',
+      spark: sparkline(s.mergeMedianMin, s.days, { label: 'Median time to merge, by day', format: (v) => formatDuration(v * 60000) }),
+    }),
+    kpi({
+      title: 'Heartbeat', iconName: 'pulse', value: hb.ageMin == null ? 'none' : formatAge(hb.ageMin), unit: hb.ageMin == null ? null : 'ago',
+      detail: `amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min`,
+      level: hbLevel, levelText: hb.level === 'alert' ? 'stale' : hb.level === 'warn' ? 'late' : hb.level === 'none' ? 'missing' : null,
+      spark: sparkline(s.heartbeats, s.days, { label: 'Heartbeats per day (24 expected)', tone: 'green' }),
+    }),
+  );
+}
+
+function needsSubject(it) {
+  if (it.task) return subjectButton(`task:${it.task}`, it.task);
+  if (it.pr != null) return subjectButton(`pr:${it.pr}`, `PR #${it.pr}`);
+  return it.issue != null ? `issue #${it.issue}` : '—';
 }
 
 function renderNeeds(m) {
   const items = m.needsYou.items;
+  const cap = DEFAULTS.humanQueueMax;
+  $('needs').classList.toggle('needs--clear', !items.length);
   if (!items.length) {
-    replaceSection('needs', empty('Nothing needs you right now.'));
+    replaceSection('needs',
+      h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you right now.'),
+      h('p', { class: 'hint' }, `Open needs-human items and stale contracts show up here, oldest first. Above ${cap}, the controller stops admitting new human-tier work. Human-tier PRs aren't in v1 events yet.`));
     return;
   }
-  const rows = items.map((it) => row(it.key,
-    it.kind === 'needs_human' ? 'needs-human' : 'stale contract',
-    it.task ? taskCell(it.task, it.issue) : it.pr != null ? subjectButton(`pr:${it.pr}`, `PR #${it.pr}`) : issueLink(it.issue),
-    it.pr != null ? prLink(it.pr) : '—',
-    it.reason ? h('code', {}, it.reason) : '—',
-    it.effect ?? '—',
-    timeEl(it.since),
-    clockCell(parseTime(it.since)),
-  ));
-  replaceSection('needs', table('Needs you', ['Kind', 'Task', 'PR', 'Reason', 'Effect', 'Since', 'Waiting'], rows, { numeric: [6] }));
+  const list = h('ul', { class: 'needs-list' }, items.map((it) => {
+    const action = it.issue != null ? link(`${GH}/${REPO}/issues/${it.issue}`, `Open issue #${it.issue} →`)
+      : it.pr != null ? link(`${GH}/${REPO}/pull/${it.pr}`, `Open PR #${it.pr} →`) : null;
+    action?.classList.add('btn', 'btn--small');
+    const why = [];
+    if (it.reason) why.push(h('code', {}, it.reason));
+    if (it.effect) why.push(`effect: ${it.effect}`);
+    if (it.since) why.push(h('span', {}, 'since ', timeEl(it.since)));
+    return h('li', { 'data-row-key': it.key },
+      icon('warn', 'needs-icon'),
+      h('div', { class: 'needs-main' },
+        h('p', { class: 'needs-title' }, h('b', {}, it.kind === 'needs_human' ? 'Needs human' : 'Stale contract'), ' · ', needsSubject(it)),
+        h('p', { class: 'why' }, why.flatMap((x, i) => (i ? [' · ', x] : [x])))),
+      h('div', { class: 'needs-side' },
+        it.since ? h('p', { class: 'age' }, 'waiting ', clockCell(parseTime(it.since))) : null,
+        action));
+  }));
+  replaceSection('needs',
+    h('div', { class: 'needs-head' },
+      h('span', { class: 'big' }, String(items.length)),
+      h('span', { class: 'lbl' }, items.length === 1 ? 'item is waiting for you' : 'items are waiting for you'),
+      h('span', { class: 'cap' }, `review queue cap ${cap}`)),
+    items.length > cap ? h('p', { class: 'problem' }, 'Over the cap: the controller stops admitting new human-tier work until you catch up.') : null,
+    list,
+    h('p', { class: 'hint' }, "Human-tier PRs aren't in v1 events yet, so they aren't counted here."));
 }
 
-function renderRunning(m) {
-  const rows = m.running.rows;
-  if (!rows.length) {
-    replaceSection('running', empty(m.running.available ? 'No agents running.' : 'No runs yet.'));
-    return;
+const LANE_CAP = 6;
+
+function laneCard(c) {
+  const n1 = [subjectButton(c.key, c.label)];
+  if (c.issue != null) n1.push(' ', issueLink(c.issue));
+  if (c.kind === 'task') c.prs.forEach((pr) => n1.push(' ', link(`${GH}/${REPO}/pull/${pr}`, `PR #${pr}`)));
+  else if (c.prs[0] != null) {
+    const a = link(`${GH}/${REPO}/pull/${c.prs[0]}`, '↗');
+    a.setAttribute('aria-label', `PR #${c.prs[0]} on GitHub`);
+    n1.push(' ', a);
   }
-  const trs = rows.map((r) => row(r.key,
-    taskCell(r.task, r.issue),
-    r.attempt != null ? `a${r.attempt}` : '—',
-    r.workflow,
-    r.state,
-    r.model ? h('code', {}, r.model) : '—',
-    clockCell(r.startedAt),
-    r.tokens == null ? '—' : fmtInt(r.tokens),
-    r.aic == null ? '—' : fmtInt(r.aic),
-    runLink(r.runId),
-  ));
-  replaceSection('running', 
-    table('Running now', ['Task', 'Attempt', 'Workflow', 'Step / state', 'Model', 'Elapsed', 'Tokens', 'AIC', 'Run'], trs, { numeric: [5, 6, 7] }),
-    h('p', { class: 'hint' }, m.running.available
-      ? 'Tokens and AIC appear when the run_finished event arrives.'
-      : "Run completion isn't logged yet (no run_finished events), so these are dispatched attempts that haven't been superseded, merged, escalated or cancelled. Some may already have finished."),
-  );
+  const n2 = [];
+  if (c.attempt != null) n2.push(h('span', {}, `a${c.attempt}`));
+  if (c.model) n2.push(h('span', {}, c.model));
+  if (c.enteredAt != null) n2.push(h('span', { title: 'time in this stage' }, clockCell(c.enteredAt)));
+  return h('div', { class: 'task', 'data-row-key': c.key },
+    h('p', { class: 'n1' }, n1),
+    n2.length ? h('p', { class: 'n2' }, n2) : null,
+    c.tags.length ? h('p', { class: 'tags' }, c.tags.map((t) => h('span', { class: `tag tag--${t.tone}`, title: t.title }, t.text))) : null);
 }
 
-function renderTokens(m) {
-  const { rows, total } = m.tokensPerTask;
-  if (!rows.length) {
-    replaceSection('tokens', empty('No finished runs yet. Tokens and AIC come from run_finished events.'));
+function renderPipeline() {
+  const pl = pipeline(state.events);
+  $('pipe-count').textContent = `${pl.total} item${pl.total === 1 ? '' : 's'}`;
+  $('pipe-foot').textContent = `One card per task, or per PR without a task, in the lane of its latest stage; the time shown is how long it has been there. WIP limit ${DEFAULTS.wipLimit} · review queue cap ${DEFAULTS.humanQueueMax}.`;
+  if (!pl.total) {
+    replaceSection('pipeline', empty(state.noLog ? 'No audit log yet, so the pipeline is empty.' : 'No tasks or PRs in the window yet.'));
     return;
   }
-  const cells = (r, label) => [label, fmtInt(r.runs), fmtInt(r.tokens_input), fmtInt(r.tokens_output), fmtInt(r.tokens_cache),
-    fmtInt(Math.round(r.aic)), formatDuration(r.duration_ms), r.models.length ? r.models.join(', ') : '—'];
-  const trs = rows.map((r) => row(r.task, ...cells(r, r.task === '(no task)' ? r.task : subjectButton(`task:${r.task}`, r.task))));
-  const foot = h('tfoot', {}, h('tr', {}, cells(total, 'Total').map((c, i) => (i === 0 ? h('th', { scope: 'row' }, c) : h('td', {}, c)))));
-  replaceSection('tokens', table('Tokens and AIC per task',
-    ['Task', 'Runs', 'Input tokens', 'Output tokens', 'Cache tokens', 'AIC', 'Run time', 'Models'], trs, { foot, numeric: [1, 2, 3, 4, 5, 6] }));
+  const lanes = pl.lanes.map((l) => h('div', { class: `lane st-${l.key}`, role: 'group', 'aria-label': `${l.label}: ${l.cards.length}` },
+    h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), l.label, h('span', { class: 'n' }, String(l.cards.length))),
+    l.cards.length ? l.cards.slice(0, LANE_CAP).map((c) => {
+      try {
+        return laneCard(c);
+      } catch (err) {
+        return h('p', { class: 'problem' }, `Couldn't show this card: ${err?.message ?? err}`);
+      }
+    }) : h('p', { class: 'lane-empty' }, 'none'),
+    l.cards.length > LANE_CAP ? h('p', { class: 'more' }, `+${l.cards.length - LANE_CAP} more`) : null));
+  replaceSection('pipeline', h('div', { class: 'lanes-wrap', role: 'region', 'aria-label': 'Pipeline lanes', tabindex: '0', 'data-focus-key': 'table' },
+    h('div', { class: 'lanes' }, lanes)));
 }
 
-function renderStages(m) {
-  const rows = m.stageTimes;
-  if (!rows.length) {
-    replaceSection('stages', empty('No task or PR has moved through a stage yet.'));
+function setBar(el) {
+  const since = Number(el.getAttribute('data-bar-since'));
+  const span = Number(el.getAttribute('data-bar-span'));
+  const elapsed = now() - since;
+  withWidth(el, (elapsed / span) * 100);
+  el.classList.toggle('late', elapsed > span / 2);
+}
+
+function renderAgents(m) {
+  const r = m.running;
+  const typical = typicalRunMs(state.events);
+  $('agents-count').textContent = r.available ? `${r.count} of ${r.wipLimit}` : 'status unavailable';
+  const slotCount = Math.max(r.wipLimit, r.available ? r.count : 0);
+  const slots = h('div', { class: 'slots' },
+    h('span', {}, r.available ? `WIP ${r.count}/${r.wipLimit}` : `WIP ?/${r.wipLimit}`),
+    Array.from({ length: slotCount }, (_, i) => h('span', {
+      class: `slot${!r.available ? ' slot--unknown' : i >= r.wipLimit ? ' slot--over' : i < r.count ? ' slot--on' : ''}`,
+      'aria-hidden': 'true',
+    })),
+    r.dryRunPlanned ? h('span', { class: 'muted' }, `· ${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running`) : null);
+
+  if (!r.rows.length) {
+    replaceSection('agents', h('div', { class: 'agents' }, empty(r.available ? 'No agents running.' : 'No runs yet.')), slots);
     return;
   }
-  const transitions = STAGES.slice(0, -1);
-  const trs = rows.map((r) => row(r.key,
-    subjectButton(r.key, r.label),
-    ...transitions.map((st) => {
-      const d = r.durations[st];
-      if (!d) return '—';
-      const next = STAGES[STAGES.indexOf(st) + 1];
-      return d.to === next ? formatDuration(d.ms) : `${formatDuration(d.ms)} (to ${d.to})`;
-    }),
-    formatDuration(r.totalMs),
-    r.current ?? '—',
-  ));
-  const headers = ['Task / PR', ...transitions.map((st, i) => `${st} → ${STAGES[i + 1]}`), 'Total', 'Latest stage'];
-  replaceSection('stages', 
-    table('Time per stage', headers, trs, { numeric: transitions.map((_, i) => i + 1).concat(transitions.length + 1) }),
-    h('p', { class: 'hint' }, 'Time from reaching each stage to reaching the next one, from event times. A stage that was skipped shows where the time went instead.'),
-  );
+  const cards = r.rows.map((a) => {
+    const repair = a.workflow === 'repair';
+    const bar = typical && a.startedAt != null
+      ? h('div', { class: 'bar', title: 'elapsed vs. twice the typical run' }, h('i', { 'data-bar-since': String(a.startedAt), 'data-bar-span': String(typical * 2) }))
+      : null;
+    const meta = [a.state, a.model].filter(Boolean).join(' · ');
+    return h('div', { class: 'agent', 'data-row-key': a.key },
+      r.available
+        ? h('span', { class: `spin${repair ? ' spin--repair' : ''}`, role: 'img', 'aria-label': repair ? 'repairing' : 'running' })
+        : h('span', { class: 'agent-unknown', role: 'img', 'aria-label': 'status unknown' }, icon('question')),
+      h('div', { class: 'agent-main' },
+        h('p', { class: 'n1' }, taskCell(a.task, a.issue), ' ', h('span', { class: `tag${repair ? ' tag--warn' : ''}` }, `${a.workflow}${a.attempt != null ? ` a${a.attempt}` : ''}`)),
+        h('p', { class: 'n2' }, meta, a.runId != null ? [meta ? ' · run ' : 'run ', runLink(a.runId)] : null),
+        bar),
+      h('div', { class: 'el' }, clockCell(a.startedAt), typical ? h('small', {}, `typical ${formatDuration(typical)}`) : null));
+  });
+  replaceSection('agents',
+    h('div', { class: 'agents' }, cards),
+    r.available ? null : h('p', { class: 'hint pad' }, "Run completion isn't logged yet (no run_finished events), so these are dispatched attempts that haven't been superseded, merged, escalated or cancelled. Some may already have finished."),
+    slots);
+  for (const el of $('agents').querySelectorAll('[data-bar-since]')) setBar(el);
 }
 
 function renderChecks(m) {
-  const checks = m.checks.slice(0, 25);
+  const passed = m.checks.filter((ev) => ev.payload?.conclusion === 'success').length;
+  $('checks-count').textContent = m.checks.length ? `${passed} of ${m.checks.length} passed` : '';
+  const checks = m.checks.slice(0, 8);
   if (!checks.length) {
     replaceSection('checks', empty('No check results yet.'));
     return;
   }
-  const trs = checks.map((ev, i) => safeRow(typeof ev.id === 'string' ? ev.id : `#${i}`, 9, () => {
-    const p = ev.payload;
-    const ok = p.conclusion === 'success';
-    return row(typeof ev.id === 'string' ? ev.id : `#${i}`,
-      timeEl(p.completed_at ?? ev.timestamp),
-      p.workflow ?? '—',
-      h('span', { class: `pill ${ok ? 'pill--ok' : p.conclusion === 'failure' ? 'pill--alert' : ''}` }, p.conclusion ?? '—'),
-      p.event ?? '—',
-      Array.isArray(p.prs) && p.prs.length ? p.prs.flatMap((n, i) => (i ? [', ', prLink(n)] : [prLink(n)])) : '—',
-      commitLink(p.head_sha),
-      runLink(p.run_id, p.run_attempt),
-      typeof p.heldout_seed === 'string' ? h('code', {}, p.heldout_seed) : '—',
-      typeof p.failure_signature === 'string' ? h('code', {}, p.failure_signature) : '—',
-    );
-  }));
-  replaceSection('checks', table('Latest check results',
-    ['Completed', 'Workflow', 'Conclusion', 'Event', 'PRs', 'Head', 'Run', 'Held-out seed', 'Failure signature'], trs));
+  const items = checks.map((ev, i) => {
+    const key = typeof ev.id === 'string' ? ev.id : `#${i}`;
+    try {
+      const p = ev.payload;
+      const tone = p.conclusion === 'success' ? 'ok' : p.conclusion === 'failure' ? 'fail' : 'other';
+      const prs = Array.isArray(p.prs) ? p.prs.filter(isNum) : [];
+      const seed = typeof p.heldout_seed === 'string' ? p.heldout_seed : null;
+      return h('li', { class: `chk chk--${tone}`, 'data-row-key': key },
+        h('span', { class: 'chk-icon' }, icon(tone === 'ok' ? 'ok' : tone === 'fail' ? 'fail' : 'dot')),
+        h('span', { class: 'mono muted' }, timeEl(p.completed_at ?? ev.timestamp)),
+        h('div', { class: 'chk-main' },
+          h('p', {}, h('b', {}, String(p.workflow ?? 'check')),
+            prs.length ? [' on ', prs.flatMap((n, j) => [j ? ', ' : '', link(`${GH}/${REPO}/pull/${n}`, `PR #${n}`)])]
+              : typeof p.event === 'string' ? h('span', { class: 'muted' }, ` on ${p.event}`) : null),
+          typeof p.failure_signature === 'string' ? h('p', { class: 'sig' }, 'signature ', h('code', {}, p.failure_signature)) : null,
+          seed ? h('p', { class: 'seed muted' }, 'held-out seed ', h('code', { title: seed }, seed.length > 10 ? `${seed.slice(0, 8)}…` : seed)) : null),
+        h('span', { class: 'chk-run' }, isNum(p.run_id) ? ['run ', runLink(p.run_id, p.run_attempt)] : null),
+        h('span', { class: 'chk-concl' }, String(p.conclusion ?? 'unknown')));
+    } catch (err) {
+      return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
+    }
+  });
+  replaceSection('checks', h('ul', { class: 'checks' }, items));
+}
+
+function stackRow(r, maxMs, isAverage = false) {
+  const desc = r.segments.map((sg) => `${STAGE_LABELS[sg.stage]} ${formatDuration(sg.ms)}`).join(', ');
+  const stack = withWidth(h('div', { class: 'stack', role: 'img', 'aria-label': `${r.label}: ${desc}; total ${formatDuration(r.totalMs)}` },
+    r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}`, title: `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}` }), (sg.ms / r.totalMs) * 100))),
+  (r.totalMs / maxMs) * 100);
+  return h('div', { class: `srow${isAverage ? ' srow--avg' : ''}`, 'data-row-key': r.key },
+    h('span', { class: 'srow-label' }, isAverage ? h('b', {}, `Average (${DAYS} days)`) : subjectButton(r.key, r.label)),
+    h('div', { class: 'track' }, stack),
+    h('span', { class: 'mono muted num' }, formatDuration(r.totalMs)));
+}
+
+function renderStages(m) {
+  const sb = stageBreakdown(m.stageTimes);
+  if (!sb.rows.length) {
+    replaceSection('stages', empty('No task or PR has moved through two stages yet.'));
+    return;
+  }
+  const shown = sb.rows.slice(-10);
+  const used = STAGES.filter((st) => sb.rows.some((r) => r.segments.some((sg) => sg.stage === st)));
+  const ins = sb.insight;
+  replaceSection('stages',
+    sb.rows.length > 1 ? stackRow(sb.average, sb.maxMs, true) : null,
+    shown.map((r) => stackRow(r, sb.maxMs)),
+    sb.rows.length > shown.length ? h('p', { class: 'hint' }, `Showing the latest ${shown.length} of ${sb.rows.length}.`) : null,
+    h('p', { class: 'legend' }, used.map((st) => h('span', {}, h('i', { class: `st-${st}`, 'aria-hidden': 'true' }), STAGE_LABELS[st]))),
+    ins ? h('p', { class: 'insight' }, icon('info'), h('span', {},
+      h('b', {}, ins.label), ` takes the largest share of the time: ${Math.round(ins.pct)}% of ${formatDuration(ins.totalMs)} measured across ${ins.tasks} task${ins.tasks === 1 ? '' : 's'} and PRs.`)) : null);
+}
+
+function renderCost(m) {
+  const c = costSummary(m.tokensPerTask, DEFAULTS.perTaskAic);
+  if (!c.rows.length) {
+    replaceSection('cost', empty('No run_finished events yet, so there is no cost data.'));
+    return;
+  }
+  const rows = c.rows.slice(0, 10).map((r) => {
+    const tokens = r.tokens_input + r.tokens_output;
+    return h('div', { class: 'crow', 'data-row-key': r.task },
+      h('span', { class: 'srow-label' }, subjectButton(`task:${r.task}`, r.task)),
+      h('div', { class: 'track' }, withWidth(h('div', { class: `cbar${r.aic > DEFAULTS.perTaskAic ? ' cbar--over' : ''}`, role: 'img', 'aria-label': `${r.task}: ${fmtInt(Math.round(r.aic))} AIC` }), (r.aic / c.maxAic) * 100)),
+      h('span', { class: 'num' }, `${fmtInt(Math.round(r.aic))} AIC`,
+        h('small', { class: 'muted', title: `input ${fmtInt(r.tokens_input)}, output ${fmtInt(r.tokens_output)}, cache ${fmtInt(r.tokens_cache)}` }, ` · ${millions(tokens)} tokens`)));
+  });
+  const total = m.tokensPerTask.total;
+  replaceSection('cost',
+    rows,
+    h('p', { class: 'hint' }, `Total ${fmtInt(Math.round(total.aic))} AIC over ${total.runs} finished run${total.runs === 1 ? '' : 's'}.`),
+    h('p', { class: `insight${c.overBudget.length ? ' insight--warn' : ''}` }, icon('info'), h('span', {},
+      'Average ', h('b', {}, `${fmtInt(Math.round(c.avgAic))} AIC per task`),
+      `: ${Math.round(c.pct)}% of the ${fmtInt(DEFAULTS.perTaskAic)} AIC per-task budget.`,
+      c.overBudget.length ? ` Over budget: ${c.overBudget.join(', ')}.` : '')));
 }
 
 function eventDetail(ev) {
@@ -664,6 +885,7 @@ function renderEvents() {
   select.value = state.typeFilter;
   select.disabled = !types.length;
 
+  $('events-sum').textContent = records.length ? `· ${records.length} events, newest first` : '';
   if (!records.length) {
     replaceSection('events', empty(state.noLog ? 'No audit log yet.' : state.loaded ? 'No events in the window.' : 'Loading…'));
     return;
@@ -732,6 +954,39 @@ function renderEvents() {
 // ---------------------------------------------------------------------------
 // Wiring
 
+// Theme: follows the system unless the owner picks one; the choice stays in localStorage.
+function effectiveTheme() {
+  return document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  $('theme-label').textContent = next === 'dark' ? 'Dark theme' : 'Light theme';
+  $('theme').setAttribute('aria-label', `Switch to the ${next} theme`);
+}
+
+function initTheme() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem(THEME_KEY);
+  } catch {
+    /* no storage: follow the system */
+  }
+  applyTheme(stored);
+  $('theme').addEventListener('click', () => {
+    const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      /* the choice just won't persist */
+    }
+    applyTheme(next);
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
+}
+
 function init() {
   $('refresh').addEventListener('click', () => {
     if (FIXTURE) state.loaded = false;
@@ -773,6 +1028,7 @@ function init() {
     state.etag = null;
     tick();
   });
+  initTheme();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.nextCheckAt && Date.now() >= state.nextCheckAt - 1000) tick();
   });

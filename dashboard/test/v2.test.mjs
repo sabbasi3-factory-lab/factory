@@ -1,0 +1,129 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import {
+  PIPELINE_LANES, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, parseJsonl, pipeline, shortSha, stageBreakdown, typicalRunMs,
+} from '../lib.js';
+import { FIXTURE_NOW, FIXTURE_PATH } from './make-fixture.mjs';
+
+const at = (iso) => Date.parse(iso);
+const fixture = () => parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
+const mk = (type, timestamp, payload, dryRun = false) => ({
+  type, timestamp, payload: { dedupe_key: 'k', factory_version: 'v', dry_run: dryRun, ...payload },
+});
+
+test('shortSha shows 7 characters of a full SHA and leaves other values alone', () => {
+  assert.equal(shortSha('320c4fcedefc03648caa4cda140bd93932367986'), '320c4fc');
+  assert.equal(shortSha('f4c1a9e'), 'f4c1a9e');
+  assert.equal(shortSha('v1.2.3'), 'v1.2.3');
+  assert.equal(shortSha(null), null);
+});
+
+test('daily series: 7 UTC days, counts per day, gaps where there is nothing to measure', () => {
+  const s = dailySeries(fixture(), { now: at(FIXTURE_NOW) });
+  assert.deepEqual(s.days, ['2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16']);
+  assert.deepEqual(s.merged, [0, 0, 0, 0, 0, 2, 1]);
+  assert.deepEqual(s.aic, [0, 0, 0, 0, 0, 280, 722]);
+  assert.deepEqual(s.heartbeats, [0, 0, 0, 0, 0, 1, 3]);
+  assert.deepEqual(s.checksPassPct.slice(0, 5), [null, null, null, null, null]);
+  assert.equal(s.checksPassPct[5], 100);
+  assert.equal(Math.round(s.checksPassPct[6]), 67); // 2 of 3 on the 16th
+  assert.deepEqual([s.checks.passed, s.checks.total], [6, 7]);
+  // Zero-touch is cumulative: PR 6 (reviewed) on the 15th, PR 7 (untouched) on the 16th.
+  assert.deepEqual(s.zeroTouchPct, [null, null, null, null, null, 0, 50]);
+  // PR open -> merged: #5 50m, #6 54m on the 15th; #7 38m on the 16th.
+  assert.equal(Math.round(s.mergeMedianMin[6]), 38);
+  assert.equal(Math.round(s.mergeMedianAllMin), 50);
+
+  const empty = dailySeries([], { now: at(FIXTURE_NOW), days: 3 });
+  assert.deepEqual(empty.merged, [0, 0, 0]);
+  assert.deepEqual(empty.checksPassPct, [null, null, null]);
+  assert.equal(empty.checks.pct, null);
+  assert.equal(empty.mergeMedianAllMin, null);
+});
+
+test('pipeline: one card per task or task-less PR, in the lane of its latest stage, with tags', () => {
+  const { lanes, total } = pipeline(fixture());
+  assert.deepEqual(lanes.map((l) => l.key), PIPELINE_LANES.map((l) => l.key));
+  assert.equal(lanes.length, 7);
+  const lane = (k) => lanes.find((l) => l.key === k).cards;
+  const where = Object.fromEntries(lanes.flatMap((l) => l.cards.map((c) => [c.label, l.key])));
+  assert.deepEqual(where, {
+    'en/time-expression': 'ready',
+    'en/relative': 'ready',
+    'en/month-parser': 'running',
+    'en/casual-date': 'running',
+    'PR #9': 'queued',
+    'PR #5': 'merged',
+    'en/weekday-parser': 'deployed',
+    'en/ordinal': 'deployed',
+  });
+  assert.equal(total, 8);
+  const month = lane('running').find((c) => c.label === 'en/month-parser');
+  assert.deepEqual(month.tags.map((t) => t.text), ['repair a2', 'gates failure']);
+  assert.equal(month.tags[1].title, 'golden:en/month#3');
+  assert.deepEqual([month.issue, month.prs, month.attempt, month.model], [43, [8], 2, 'pinned-model-a']);
+  assert.deepEqual(lane('ready').map((c) => c.tags[0].text), ['needs human', 'stale contract']);
+  // Done lanes put the newest first.
+  assert.deepEqual(lane('deployed').map((c) => c.label), ['en/weekday-parser', 'en/ordinal']);
+  assert.deepEqual(pipeline([]).total, 0);
+});
+
+test('pipeline: dry-run decisions never move a card; cancelled removes it', () => {
+  const events = [
+    mk('ready', '2026-10-16T08:00:00Z', { task: 't/a', issue: 1 }),
+    mk('dispatched', '2026-10-16T08:05:00Z', { task: 't/a', issue: 1, attempt: 1, effect: 'dispatch', reason: 'ready' }, true),
+    mk('ready', '2026-10-16T08:00:00Z', { task: 't/b', issue: 2 }),
+    mk('cancelled', '2026-10-16T08:10:00Z', { task: 't/b', issue: 2, effect: 'close', reason: 'owner' }),
+  ];
+  const { lanes } = pipeline(events);
+  const ready = lanes.find((l) => l.key === 'ready').cards;
+  assert.deepEqual(ready.map((c) => c.label), ['t/a']);
+  assert.deepEqual(ready[0].tags.map((t) => t.text), ['dry-run plan']);
+  assert.equal(lanes.find((l) => l.key === 'running').cards.length, 0);
+});
+
+test('stage breakdown: stacked segments per task and the stage with the largest share', () => {
+  const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
+  const sb = stageBreakdown(m.stageTimes);
+  const weekday = sb.rows.find((r) => r.label === 'en/weekday-parser');
+  assert.deepEqual(weekday.segments.map((s) => s.stage), ['ready', 'picked', 'running', 'pr-open', 'checks', 'queued', 'merged']);
+  assert.equal(weekday.totalMs, at('2026-10-16T09:25:00Z') - at('2026-10-16T08:00:00Z'));
+  assert.equal(sb.maxMs, Math.max(...sb.rows.map((r) => r.totalMs)));
+  assert.equal(sb.insight.stage, 'running');
+  assert.equal(sb.insight.label, 'Agent running');
+  assert.equal(Math.round(sb.insight.pct), 33);
+  assert.equal(sb.insight.tasks, sb.rows.length);
+  assert.equal(sb.average.label, 'Average');
+  assert.equal(Math.round(sb.average.totalMs), Math.round(sb.rows.reduce((a, r) => a + r.totalMs, 0) / sb.rows.length));
+  assert.deepEqual(stageBreakdown([]), { rows: [], average: null, maxMs: 0, insight: null });
+});
+
+test('cost summary: highest first, average against the 1,000 AIC per-task budget', () => {
+  const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
+  const c = costSummary(m.tokensPerTask);
+  assert.deepEqual(c.rows.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 312], ['en/ordinal', 280]]);
+  assert.equal(c.maxAic, 410);
+  assert.equal(c.avgAic, 334);
+  assert.equal(Math.round(c.pct * 10) / 10, 33.4);
+  assert.deepEqual(c.overBudget, []);
+  assert.deepEqual(costSummary({ rows: [{ task: 'x', aic: 1500 }] }).overBudget, ['x']);
+  assert.equal(costSummary({ rows: [] }).avgAic, null);
+  assert.equal(typicalRunMs(fixture()), 2040000); // median of 34m, 24m50s, 38m
+  assert.equal(typicalRunMs([]), null);
+});
+
+test('only day files listed in the audit tree are fetched, so missing days cause no 404s', () => {
+  const wanted = dayPaths(at(FIXTURE_NOW), 7);
+  const tree = [
+    { path: '2026', type: 'tree' },
+    { path: '2026/10', type: 'tree' },
+    { path: '2026/10/09.jsonl', type: 'blob' }, // outside the window
+    { path: '2026/10/15.jsonl', type: 'blob' },
+    { path: '2026/10/16.jsonl', type: 'blob' },
+    { path: '2026/10/14.jsonl', type: 'tree' }, // not a file
+  ];
+  assert.deepEqual(existingDayPaths(tree, wanted), ['audit/2026/10/15.jsonl', 'audit/2026/10/16.jsonl']);
+  assert.deepEqual(existingDayPaths([], wanted), []);
+  assert.deepEqual(existingDayPaths(null, wanted), []);
+});

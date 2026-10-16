@@ -1,4 +1,4 @@
-# Control room (dashboard v1)
+# Control room (dashboard v2)
 
 A static, read-only dashboard for the factory, built from the controller's audit log
 (DESIGN.md §11, "Control room"). It is published on this repo's GitHub Pages by
@@ -12,11 +12,27 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `index.html` | Page structure and the Content-Security-Policy |
 | `app.js` | UI: polling, rendering, settings |
 | `lib.js` | Pure logic: canonical JSON, SHA-256 checks, chain check, metrics. Runs in the browser and in Node |
-| `style.css` | Layout; light and dark themes via `prefers-color-scheme` |
-| `test/lib.test.mjs` | Tests for `lib.js` |
+| `style.css` | Layout; light and dark themes (system setting, or the Theme button, remembered in `localStorage`) |
+| `test/lib.test.mjs`, `test/v2.test.mjs` | Tests for `lib.js` |
 | `test/make-fixture.mjs` | Generates `test/fixtures/sample.jsonl` with real hashes |
 | `watchdog.mjs` | Heartbeat watchdog run hourly by `.github/workflows/heartbeat-watchdog.yml`: opens a `heartbeat-alert` issue when the heartbeat is over 2 h old, missing or unreadable, and closes it on recovery. Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
+
+## Layout
+
+From the top, at widths up to 1480 px:
+
+- **Sticky header chips:** data and heartbeat status (the `aria-live` status line), audit-chain check, kill switch, dry-run or live mode, and the factory version as a 7-character SHA (the full SHA is in the tooltip). In `?fixture=1` mode there's also a "Sample data" chip. Refresh, Theme and Settings sit on the right.
+- **Needs you:** a hero panel listing open needs-human items and stale contracts, oldest first, each with how long it has waited and a link to its issue or PR.
+- **Last 7 days:** six KPI tiles, each with a per-day trend line: zero-touch rate, checks passed, AIC today against the budget, merged today, median time to merge, and heartbeat age. A day with nothing to measure leaves a gap in the line rather than a zero.
+- **Pipeline:** seven lanes (Ready, Running, PR open, Checks, Merge queue, Merged, Deployed), with one card per task, or per PR without a task, showing time in the current stage and tags such as `repair a2`, `gates failure`, `needs human`, `stale contract` or `dry-run plan`.
+- **Agents running:** a card per active attempt, with elapsed time against the typical run, and WIP slots. It shows "status unavailable" while no `run_finished` events exist.
+- **Latest checks:** pass and fail icons, PRs, failure signature, held-out seed and run link.
+- **Where the time goes:** a stacked bar per task or PR, plus the average, and a one-line insight naming the stage with the largest share of the time.
+- **Cost per task:** AIC bars with token counts, and a one-line insight comparing the average with the 1,000 AIC per-task budget.
+- **Task timeline** and **audit log**, both collapsed. Clicking a task name anywhere opens its timeline. The audit log keeps v1's type filter, integrity column and canonical JSON per event.
+
+On narrow screens the header chips scroll sideways, the lanes stack, and the rate-limit details move to Settings.
 
 ## Preview locally
 
@@ -47,9 +63,12 @@ module and fails. After changing `make-fixture.mjs`, regenerate the fixture with
 
 1. It polls `GET api.github.com/repos/sabbasi3-factory-lab/chrono-node-rs/branches/audit`
    with `If-None-Match` set to the last ETag.
-2. When the branch head changes, it fetches the last 7 UTC days of
-   `audit/YYYY/MM/DD.jsonl` from `raw.githubusercontent.com`, pinned to the head SHA,
-   so raw caching can't serve stale files. A 404 means there were no events that day.
+2. When the branch head changes, it lists the `audit/` tree at that commit
+   (`GET /git/trees/<sha>:audit?recursive=1`, one more API call per head change), then
+   fetches only the day files from the last 7 UTC days that exist, from
+   `raw.githubusercontent.com` pinned to the head SHA, so raw caching can't serve stale
+   files. Skipping missing days keeps the console free of 404 errors. If the listing
+   fails, it falls back to fetching all 7 days and treats a 404 as an empty day.
 3. A missing `audit` branch shows "No audit log yet" and is re-checked every 5 minutes.
 
 **Rate limits.** Without a token, GitHub allows 60 API requests an hour per IP, and
@@ -84,7 +103,7 @@ loaded event may point to a parent before the window ("window start"); an event 
 "Chain verified" or "Chain broken at event N", with the file, line and reason. The
 schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timestamp.
 
-## How tiles and tables are derived
+## How the panels are derived
 
 | Item | Derivation |
 |---|---|
@@ -97,17 +116,20 @@ schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timesta
 | Kill switch | `factory_enabled` from the latest `heartbeat` |
 | Factory version, dry run | `factory_version` and `dry_run` from the latest event's payload |
 | Heartbeat age | Minutes since the latest `heartbeat`. Amber after 70 min, red after 120 min (the DESIGN alert threshold) |
+| Trend lines | Per UTC day over the window: zero-touch rate so far (cumulative), share of `check_result` events with `success`, `run_finished.aic` sum, `merged` count, median PR `opened_at` → `merged_at`, and `heartbeat` count (24 expected) |
+| Pipeline lane | The latest stage event for the task (or task-less PR): `ready` → Ready; `picked`, `dispatched`, `run_started`, `repair_dispatched`, `run_finished` → Running; `pr_opened`, `dequeued` → PR open; `check_result` → Checks; `queued` → Merge queue; `merged` → Merged; `deployed`, `accepted` → Deployed. `cancelled` removes the card. Dry-run decisions never move a card |
 | Time per stage | First time each stage (ready → picked → running → pr-open → checks → queued → merged → deployed) was reached, per task, or per PR when the PR has no task. Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp. A skipped stage shows "(to …)" |
 
 **Not derivable from v1 events yet:**
 
-- *Human-tier PRs* in the needs-you count: v1 events don't carry a risk tier. The tile says so.
+- *Human-tier PRs* in the needs-you count: v1 events don't carry a risk tier. The Needs-you panel says so.
 - *Whether an agent is still running*: v1 has no `run_finished`, so "Agents running" shows "unavailable".
 - *Tokens and AIC* while a run is in progress: they arrive only with `run_finished`, so
-  "Running now" shows "—" until then. Empty states say "No runs yet" / "No finished runs yet".
-- *Golden pass %, repairs per task, escaped bugs, the stacked "where the time goes" bar
-  and flow/throughput charts* from DESIGN §11 aren't in v1. They need `run_finished`
-  per-job durations, `deployed`/`accepted` and outcome events.
+  agent cards show elapsed time only until then. Empty states say "No runs yet" / "No finished runs yet".
+- *Golden pass %, repairs per task, escaped bugs, and flow/throughput charts* from
+  DESIGN §11 aren't in v1. They need outcome events. "Where the time goes" uses the
+  stage events that exist; per-job durations (queue wait, run setup, detection) need
+  `run_finished` details.
 
 ## Deploy
 

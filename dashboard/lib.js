@@ -10,6 +10,8 @@ export const DEFAULTS = Object.freeze({
   heartbeatWarnMin: 70,
   heartbeatAlertMin: 120, // DESIGN §11: alert after 2 h without a heartbeat
   windowDays: 7,
+  perTaskAic: 1000, // policies/budgets.yaml per_task.max_aic
+  humanQueueMax: 5, // policies/limits.yaml human_queue.max_items
 });
 
 // Task stages in DESIGN §7 order, up to deployed.
@@ -172,6 +174,15 @@ export function dayPaths(now, days = DEFAULTS.windowDays) {
     out.push(`audit/${d.slice(0, 4)}/${d.slice(5, 7)}/${d.slice(8, 10)}.jsonl`);
   }
   return out;
+}
+
+/**
+ * Keeps only the wanted day-file paths that exist, given the entries of a recursive
+ * git tree listing of `audit/` (paths relative to it, like "2026/10/16.jsonl").
+ */
+export function existingDayPaths(treeEntries, wanted) {
+  const have = new Set((treeEntries || []).filter((t) => t && t.type === 'blob' && typeof t.path === 'string').map((t) => `audit/${t.path}`));
+  return wanted.filter((p) => have.has(p));
 }
 
 export function parseTime(value) {
@@ -661,4 +672,268 @@ export function timelineFor(events, subjectKey) {
     prev = ms;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// v2 views: short SHAs, 7-day series, pipeline lanes, stage and cost charts
+
+/** First 7 characters of a hex SHA; anything else is returned unchanged. */
+export function shortSha(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8,64}$/i.test(value) ? value.slice(0, 7) : value;
+}
+
+function median(values) {
+  const v = values.filter(isNum).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+/**
+ * Per-UTC-day series for the KPI trend lines, oldest day first. Rates are null on days
+ * with nothing to measure, so a trend line shows a gap instead of a fake zero.
+ */
+export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
+  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
+  const labels = [];
+  for (let i = days - 1; i >= 0; i--) labels.push(utcDay(end - i * 86400000));
+  const index = new Map(labels.map((d, i) => [d, i]));
+  const zeros = () => labels.map(() => 0);
+  const dayOf = (ms) => (ms == null ? null : index.get(utcDay(ms)) ?? null);
+
+  const prTask = prTaskMap(events);
+  const merged = zeros();
+  const aic = zeros();
+  const heartbeats = zeros();
+  const checksPassed = zeros();
+  const checksTotal = zeros();
+  const mergeMinutes = labels.map(() => []);
+  const factoryMerged = zeros();
+  const factoryMergedPrs = labels.map(() => []);
+  const opened = new Map();
+  const touched = new Set();
+
+  for (const ev of events) {
+    const p = ev.payload || {};
+    if (ev.type === 'human_action' && isNum(p.pr)) touched.add(p.pr);
+    if (ev.type === 'pr_opened' && isNum(p.pr) && !opened.has(p.pr)) opened.set(p.pr, eventTime(ev));
+  }
+  for (const ev of events) {
+    const p = ev.payload || {};
+    const d = dayOf(ev.type === 'run_finished' || ev.type === 'heartbeat' ? parseTime(ev.timestamp) : eventTime(ev));
+    if (d == null) continue;
+    switch (ev.type) {
+      case 'merged': {
+        merged[d]++;
+        const at = eventTime(ev);
+        if (isNum(p.pr) && opened.get(p.pr) != null && at != null) mergeMinutes[d].push((at - opened.get(p.pr)) / 60000);
+        if (isStr(p.task) || prTask.has(p.pr)) {
+          factoryMerged[d]++;
+          factoryMergedPrs[d].push(p.pr);
+        }
+        break;
+      }
+      case 'run_finished':
+        if (isNum(p.aic)) aic[d] += p.aic;
+        break;
+      case 'heartbeat':
+        heartbeats[d]++;
+        break;
+      case 'check_result':
+        checksTotal[d]++;
+        if (p.conclusion === 'success') checksPassed[d]++;
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Zero-touch is cumulative across the window, so each point is "rate so far".
+  const zeroTouchPct = [];
+  let fm = 0;
+  let untouched = 0;
+  for (let i = 0; i < labels.length; i++) {
+    fm += factoryMerged[i];
+    untouched += factoryMergedPrs[i].filter((pr) => !touched.has(pr)).length;
+    zeroTouchPct.push(fm ? (untouched / fm) * 100 : null);
+  }
+  const passed = checksPassed.reduce((a, b) => a + b, 0);
+  const total = checksTotal.reduce((a, b) => a + b, 0);
+  return {
+    days: labels,
+    merged,
+    aic,
+    heartbeats,
+    checksPassPct: checksTotal.map((t, i) => (t ? (checksPassed[i] / t) * 100 : null)),
+    checks: { passed, total, pct: total ? (passed / total) * 100 : null },
+    mergeMedianMin: mergeMinutes.map(median),
+    mergeMedianAllMin: median(mergeMinutes.flat()),
+    zeroTouchPct,
+  };
+}
+
+export const PIPELINE_LANES = Object.freeze([
+  { key: 'ready', label: 'Ready' },
+  { key: 'running', label: 'Running' },
+  { key: 'pr-open', label: 'PR open' },
+  { key: 'checks', label: 'Checks' },
+  { key: 'queued', label: 'Merge queue' },
+  { key: 'merged', label: 'Merged' },
+  { key: 'deployed', label: 'Deployed' },
+]);
+
+const LANE_OF = {
+  ready: 'ready',
+  picked: 'running',
+  dispatched: 'running',
+  run_started: 'running',
+  repair_dispatched: 'running',
+  run_finished: 'running',
+  pr_opened: 'pr-open',
+  check_result: 'checks',
+  queued: 'queued',
+  dequeued: 'pr-open',
+  merged: 'merged',
+  deployed: 'deployed',
+  accepted: 'deployed',
+};
+const SIDE_STATE = { needs_human: 'needs human', stale_contract: 'stale contract', blocked: 'blocked' };
+const DONE_LANES = new Set(['merged', 'deployed']);
+
+/**
+ * One card per task (or per PR that has no task) in the lane of its latest stage.
+ * Side states (needs-human, stale contract, blocked) become tags on the card; dry-run
+ * decisions never move a card, because nothing was launched.
+ */
+export function pipeline(events) {
+  const prTask = prTaskMap(events);
+  const cards = new Map();
+  const card = (key) => {
+    if (!cards.has(key)) {
+      cards.set(key, {
+        key,
+        kind: key.startsWith('task:') ? 'task' : 'pr',
+        label: key.startsWith('task:') ? key.slice(5) : `PR #${key.slice(3)}`,
+        issue: null, prs: [], lane: null, enteredAt: null, attempt: null, model: null, workflow: null,
+        side: null, lastCheck: null, planned: false, removed: false,
+      });
+    }
+    return cards.get(key);
+  };
+
+  for (const ev of events) {
+    const p = ev.payload || {};
+    const subjects = eventSubjects(ev, prTask);
+    let keys = [...subjects].filter((s) => s.startsWith('task:'));
+    if (!keys.length) keys = [...subjects].filter((s) => s.startsWith('pr:'));
+    if (!keys.length) continue;
+    const planOnly = isPlanOnly(ev);
+    const lane = LANE_OF[ev.type];
+    for (const key of keys) {
+      const c = card(key);
+      if (isNum(p.issue)) c.issue = p.issue;
+      for (const pr of eventPrs(ev)) if (!c.prs.includes(pr)) c.prs.push(pr);
+      if (ev.type === 'cancelled' && !planOnly) {
+        c.removed = true;
+        continue;
+      }
+      if (SIDE_STATE[ev.type]) {
+        c.side = { label: SIDE_STATE[ev.type], reason: isStr(p.reason) ? p.reason : null };
+        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
+        continue;
+      }
+      if (!lane) continue;
+      if (planOnly) {
+        c.planned = true;
+        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
+        continue;
+      }
+      c.removed = false;
+      if (c.lane !== lane) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
+      if (RESOLVES_NEEDS_YOU.has(ev.type)) c.side = null;
+      if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {
+        if (isNum(p.attempt)) c.attempt = p.attempt;
+        if (isStr(p.model)) c.model = p.model;
+        c.workflow = isStr(p.workflow) ? p.workflow : ev.type === 'repair_dispatched' ? 'repair' : 'implement';
+        c.planned = false;
+      }
+      if (ev.type === 'check_result') {
+        c.lastCheck = { conclusion: isStr(p.conclusion) ? p.conclusion : null, workflow: isStr(p.workflow) ? p.workflow : null, signature: isStr(p.failure_signature) ? p.failure_signature : null };
+      }
+      if (ev.type === 'pr_opened') c.lastCheck = null;
+    }
+  }
+
+  const lanes = PIPELINE_LANES.map((l) => ({ ...l, cards: [] }));
+  const byKey = new Map(lanes.map((l) => [l.key, l]));
+  for (const c of cards.values()) {
+    if (c.removed || !c.lane) continue;
+    const tags = [];
+    if (c.side) tags.push({ text: c.side.label, tone: 'fail', title: c.side.reason });
+    if (c.lane === 'running' && c.workflow === 'repair') tags.push({ text: `repair${c.attempt ? ` a${c.attempt}` : ''}`, tone: 'warn', title: null });
+    if (c.lastCheck && c.lastCheck.conclusion && c.lastCheck.conclusion !== 'success' && !DONE_LANES.has(c.lane)) {
+      tags.push({ text: `${c.lastCheck.workflow ?? 'check'} ${c.lastCheck.conclusion}`, tone: 'fail', title: c.lastCheck.signature });
+    }
+    if (c.planned) tags.push({ text: 'dry-run plan', tone: 'info', title: null });
+    byKey.get(c.lane).cards.push({ ...c, tags });
+  }
+  for (const l of lanes) {
+    // Active lanes: longest-waiting first. Done lanes: most recent first.
+    l.cards.sort((a, b) => (DONE_LANES.has(l.key) ? (b.enteredAt ?? 0) - (a.enteredAt ?? 0) : (a.enteredAt ?? 0) - (b.enteredAt ?? 0)));
+  }
+  return { lanes, total: lanes.reduce((n, l) => n + l.cards.length, 0) };
+}
+
+export const STAGE_LABELS = Object.freeze({
+  ready: 'Ready', picked: 'Picked', running: 'Agent running', 'pr-open': 'PR open',
+  checks: 'Checks', queued: 'Merge queue', merged: 'Merged, not yet deployed', deployed: 'Deployed',
+});
+
+/** Stacked-bar data from stageTimes(), plus the stage that takes the largest share. */
+export function stageBreakdown(rows) {
+  const out = [];
+  const sums = {};
+  for (const r of rows || []) {
+    const segments = [];
+    for (const st of STAGES) {
+      const d = r.durations?.[st];
+      if (d && isNum(d.ms) && d.ms > 0) {
+        segments.push({ stage: st, ms: d.ms, to: d.to });
+        sums[st] = (sums[st] ?? 0) + d.ms;
+      }
+    }
+    const totalMs = segments.reduce((a, s) => a + s.ms, 0);
+    if (totalMs > 0) out.push({ key: r.key, label: r.label, segments, totalMs, current: r.current });
+  }
+  const grand = Object.values(sums).reduce((a, b) => a + b, 0);
+  let insight = null;
+  if (grand > 0) {
+    const [stage, ms] = Object.entries(sums).sort((a, b) => b[1] - a[1])[0];
+    insight = { stage, label: STAGE_LABELS[stage], pct: (ms / grand) * 100, totalMs: grand, tasks: out.length };
+  }
+  // Average per task and PR across the window: each stage's total divided by the row count.
+  const average = out.length
+    ? { key: 'average', label: 'Average', segments: STAGES.filter((st) => sums[st]).map((st) => ({ stage: st, ms: sums[st] / out.length })), totalMs: grand / out.length }
+    : null;
+  return { rows: out, average, maxMs: Math.max(0, ...out.map((r) => r.totalMs)), insight };
+}
+
+/** Cost bars from deriveMetrics().tokensPerTask, highest first, with an average-vs-budget line. */
+export function costSummary(tokens, perTaskBudget = DEFAULTS.perTaskAic) {
+  const rows = (tokens?.rows ?? []).filter((r) => r.task !== '(no task)').slice().sort((a, b) => b.aic - a.aic);
+  if (!rows.length) return { rows: [], maxAic: 0, avgAic: null, pct: null, overBudget: [] };
+  const total = rows.reduce((a, r) => a + r.aic, 0);
+  const avgAic = total / rows.length;
+  return {
+    rows,
+    maxAic: rows[0].aic,
+    avgAic,
+    pct: perTaskBudget > 0 ? (avgAic / perTaskBudget) * 100 : null,
+    overBudget: rows.filter((r) => r.aic > perTaskBudget).map((r) => r.task),
+  };
+}
+
+/** Median run_finished duration (ms), used as the "typical run" for agent progress bars. */
+export function typicalRunMs(events) {
+  return median(events.filter((e) => e.type === 'run_finished').map((e) => e.payload?.duration_ms));
 }
