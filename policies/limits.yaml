@@ -2,8 +2,13 @@
 version: 1
 wip:
   start: 3                 # tasks in flight at once
-  max: 5                   # Free plan: 20 concurrent jobs for the whole org
+  max: 10                  # adaptive ceiling
+  adaptive:
+    org_concurrent_job_limit: 20     # Free plan, whole org
+    pause_dispatch_when_busy_jobs_over: 14   # running + queued Actions jobs
   core_area: 1             # auto-strict paths are serialized
+ci:
+  max_jobs_per_pr: 2       # keep CI fan-out small so more tasks fit
 task:
   max_attempts: 1          # first implementation attempt
   max_repairs: 2           # Evergreen repairs after the first attempt

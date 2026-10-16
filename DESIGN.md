@@ -58,7 +58,7 @@ Pause and rethink if any of these is true after two weeks of running:
 - PR branches are deleted after merge. The code lives on `main` and the PR keeps its commits. The `audit` branch and any ledger branches are protected.
 
 - Org: `sabbasi3-factory-lab`. Free plan, public repos (needed for the merge queue).
-- Free plan limit: 20 concurrent jobs, so run at most 5 tasks at once.
+- Free plan limit: 20 concurrent jobs for the whole org. WIP is adaptive (up to 10) and backs off when Actions is busy.
 - **Visibility choice:** code, issues, the audit log and cost numbers are public. This is accepted for the demo.
 
 ### Layout of `chrono-node-rs`
@@ -98,7 +98,7 @@ NOTICE               attribution to chrono-node
 | 1 · Agent run | one task | s–min | the agent | its tests pass, or turn, time or AIC limits are hit |
 | 2 · Task | one task | min–h | controller, CI gates, merge queue | merged, or 2 failed repairs → `needs-human` |
 | 3 · Delivery | all tasks | h–days | controller rules and you | backlog empty, budget hit, kill switch |
-| 4 · Improvement | all tasks | days–weeks | you approve; a weekly review proposes | never |
+| 4 · Improvement | all tasks | days–weeks | you approve; a review every 3 days proposes | never |
 
 Loops 0–2 are inner loops. Loops 3–4 are outer loops. Change loop 4 slowly, because outcomes arrive days late.
 
@@ -155,7 +155,7 @@ The controller runs every 5 minutes and on events: issue labelled, CI completed,
 **Responsibilities**
 
 1. **Admit:** a task is ready only if `factory:ready` is set, its contract is on `main`, its dependencies are merged, and budget remains.
-2. **Schedule:** WIP ≤ 3 to start (maximum 5), one task per area lock, dependency order, then priority.
+2. **Schedule:** WIP starts at 3 and can rise to **10, adaptively**. Before each dispatch, the controller checks the org's running and queued Actions jobs (the Free plan allows 20 at once) and waits if more than 14 are busy. It also applies one task per area lock, dependency order, then priority. CI is designed as one or two jobs per PR, so more tasks fit.
 3. **Dispatch:** `workflow_dispatch` with the issue number, attempt number and contract SHA.
 4. **Track:** keeps the status comment on the issue up to date and appends audit events.
 5. **Merge stage:** checks readiness, verifies the contract SHA is current, and queues the PR (merge queue plus auto-merge for the `tier: auto` paths).
@@ -188,7 +188,7 @@ Side states: `repairing`, `stale-contract`, `needs-human`, `blocked`, `cancelled
 |---|---|---|---|
 | `implement` | Copilot, **one pinned coding model** (never `auto`) | dispatch | `create-pull-request` (max 1), `add-comment` |
 | `repair` (Evergreen) | same pinned model | dispatch by the controller, plus a 15-min safety schedule | push to the PR branch, `add-comment` |
-| `factory-review` (Loop 4) | pinned reasoning model | weekly | draft PR to `factory` policy or prompts, `create-discussion` report |
+| `factory-review` (Loop 4) | pinned reasoning model | every 3 days | draft PR to `factory` policy or prompts, `create-discussion` report |
 | `monitor` | **plain code, no AI** | nightly | `create-issue` from a script |
 | `daily-digest` | plain code (optional cheap model for the summary) | daily | `create-discussion` or an issue comment: yesterday's merged and failed tasks, `needs-human`, spend vs. budget, drills, anomalies |
 | `outcomes-collector` | plain code (`gh aw outcomes`) | daily | updates the dashboard data; re-checks `pending` items |
@@ -323,7 +323,7 @@ An event is one fact the controller observed, or one decision it made, that chan
 | People | `human_action` (review, approval, label), observed from GitHub with who and when |
 | Factory | `budget_alert`, `budget_pause`, `kill_switch`, `policy_changed`, `drill_result`, `dependency_decision`, `token_expiry_warning`, `chain_verified`/`chain_broken`, `heartbeat` (hourly) |
 
-Polls where nothing changed are **not** recorded; the hourly `heartbeat` proves the controller is alive.
+Polls where nothing changed are **not** recorded; the hourly `heartbeat` proves the controller is alive. A separate workflow (the daily digest) alerts you if there has been no heartbeat for 2 hours. A dead controller can't report itself, and GitHub disables scheduled workflows in public repos after 60 days without repo activity.
 
 **IDs:**
 - `id` is a random UUID v4 from a cryptographic generator (`crypto.randomUUID()`).
@@ -440,13 +440,13 @@ The repo is public, so the audit log, Actions logs, run artifacts (prompts, agen
 ## 15. Maintainability (keeping the code healthy)
 
 - Quality metrics on the dashboard: clippy pedantic count, function size, duplication.
-- **Cadence:** data is collected **daily** (outcomes collector and daily digest). Changes to the factory are proposed **weekly**, because outcomes arrive days late and daily rule changes would make the factory swing back and forth. Tightening (pausing an area, lowering WIP) is automatic and immediate at any time.
-- **Weekly factory review (Loop 4):**
+- **Cadence:** data is collected **daily** (outcomes collector and daily digest). The factory review runs **every 3 days**. It always looks at a rolling 7-day window, and proposes a change to an area only if at least 15 tasks have finished since that area last changed. Otherwise it reports "no change". This avoids chasing noise, because outcomes arrive days late. Tightening (pausing an area, lowering WIP) is automatic and immediate at any time.
+- **Factory review every 3 days (Loop 4):**
   - proposes cleanup tasks and changes to prompts, gates and budgets, as draft PRs
   - you approve
   - later, a change is promoted only if it beats the current version on held-out tasks (the "ratchet")
 - **A monthly human architecture review** of `src/core/**`.
-- **Lessons inbox (planned, Stage 2):** parallel agents append candidate lessons to a gh-aw **ledger** (many writers, validated and size-limited safe outputs). The weekly factory review curates the good ones into `PORTING.md` through a PR you approve. The inbox is never a source of truth. It exercises a real gh-aw feature where several writers is the right fit.
+- **Lessons inbox (planned, Stage 2):** parallel agents append candidate lessons to a gh-aw **ledger** (many writers, validated and size-limited safe outputs). The factory review curates the good ones into `PORTING.md` through a PR you approve. The inbox is never a source of truth. It exercises a real gh-aw feature where several writers is the right fit.
 
 ## 16. Stages
 
@@ -456,7 +456,7 @@ The repo is public, so the audit log, Actions logs, run artifacts (prompts, agen
 | 1 · Agents propose, you merge | ~10 English parsers; measure the baseline; compare the two models | 10 merged; the baseline is recorded |
 | 2 · Auto-merge tier | Merge queue auto-merge for `tier: auto`; WIP 3; Evergreen repair; reverts; fire drills; lessons inbox (gh-aw ledger) | Zero-touch ≥ 80% over 20 tasks; all fire drills caught |
 | 3 · Close the delivery loop | Pages deploy on merge; nightly monitor; daily outcomes; alerts | One monitor-found bug fixed end to end with no human involved |
-| 4 · Improve and scale | Weekly factory review; more languages, one batch at a time; scenarios 2 and 3 | Owner decision |
+| 4 · Improve and scale | Factory review every 3 days; more languages, one batch at a time; scenarios 2 and 3 | Owner decision |
 
 ## 17. Open decisions and risks
 
