@@ -1,0 +1,21 @@
+# What implement and repair agents can reach. Blocked by default.
+version: 1
+agents:
+  allowed:
+    - copilot-api                 # inference, through gh-aw's API proxy
+    - github-tools-own-repo-only  # tools.github.allowed-repos: [sabbasi3-factory-lab/chrono-node-rs]
+    - local: vendor/              # vendored crates, plus offline docs built by setup steps
+    - local: upstream/            # pinned chrono-node source
+  blocked:
+    - crates.io
+    - docs.rs
+    - general-web
+    - other-github-repos
+    - web-search-tools
+  new_dependency: dependency-request-issue   # handled by the dependency steward
+setup_steps_outside_sandbox:
+  - cargo vendor (approved crates only)
+  - cargo doc --offline
+evidence:
+  - blocked network requests are logged per run (gh aw logs) and written to the audit log
+  - CI similarity check against other Rust date crates

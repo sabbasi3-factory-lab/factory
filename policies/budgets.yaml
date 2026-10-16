@@ -1,0 +1,20 @@
+# AI Credits (AIC). gh-aw's unit: 1 AIC = $0.01 USD, estimated from public model prices.
+# Actual billing goes through the owner's Copilot seat.
+version: 1
+per_run:                  # gh-aw frontmatter max-ai-credits
+  implement: 500
+  repair: 300
+  reviewer_agent: 200
+  factory_review: 500
+  threat_detection: 400   # gh-aw default
+per_workflow_per_day:     # gh-aw frontmatter max-daily-ai-credits
+  implement: 3000
+  repair: 1500
+  reviewer_agent: 1000
+  factory_review: 1000
+per_task:
+  max_aic: 1000           # all attempts, repairs and detection for one task
+factory_per_day:          # enforced by the controller across all workflows
+  max_aic: 10000          # about $100/day during the test week; reset from week-1 data
+  alert_at_pct: 80
+  pause_at_pct: 100

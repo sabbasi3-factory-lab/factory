@@ -1,0 +1,29 @@
+# Dependency steward policy. Agents cannot edit Cargo.toml; they file a dependency-request issue.
+version: 1
+hard_checks:              # any failure -> automatic reject
+  licence_allowlist: [MIT, Apache-2.0, "MIT OR Apache-2.0", BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Unicode-DFS-2016, Zlib]
+  rustsec_advisories: none
+  yanked: false
+  typosquat_check: true   # near-miss names of popular crates are rejected
+  network_in_build_script: false
+  denylist:               # competing natural-language date crates (contamination)
+    - chrono-english
+    - interim
+    - whichtime
+    - natural-date-parser
+    - two_timer
+    - dateparser
+soft_checks:              # any failure (with all hard checks passing) -> borderline -> owner, auto-reject after 24 h
+  min_crate_age_days: 90
+  min_downloads: 100000
+  max_months_since_release: 12
+  max_new_transitive: 5
+  native_code: false      # C/C++ builds are borderline
+trusted_audits:           # crates covered by these cargo-vet audit sets pass the soft checks
+  - mozilla
+  - google
+  - bytecode-alliance
+preapproved:              # proposed for Stage 0; edit in review
+  runtime: [chrono, regex, fancy-regex, serde, serde_json, once_cell, thiserror]
+  wasm: [wasm-bindgen, js-sys]
+  dev: [proptest, criterion, cargo-mutants]

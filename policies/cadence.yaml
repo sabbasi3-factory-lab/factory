@@ -1,0 +1,11 @@
+version: 1
+controller: "every 5 minutes, plus events (issue labelled, CI completed, pull_request dequeued, push to contracts/**)"
+heartbeat: hourly
+outcomes_collector: daily
+daily_digest: daily
+monitor: nightly          # plain code: random phrases compared with chrono-node
+audit_chain_verifier: daily
+factory_review: weekly    # proposes factory changes as draft PRs; the owner approves
+fire_drills: "weekly, at random times, from Stage 2; and after every factory change (dry-run first)"
+token_expiry_warning_days: 14
+key_rotation_days: 90
