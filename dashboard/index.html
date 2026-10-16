@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Live control room for the software factory, built from its public audit log.">
+  <title>Factory control room</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="heading">
+      <h1>Factory control room</h1>
+      <p class="sub">Audit log of <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a> · last <span id="window-days">7</span> UTC days · times in UTC</p>
+    </div>
+    <div class="badges">
+      <span id="chain-badge" class="badge">Chain: not loaded</span>
+      <span id="dry-badge" class="badge" hidden></span>
+      <span id="mode-badge" class="badge badge--info" hidden></span>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite">Loading…</p>
+    <p id="meta" class="meta"></p>
+    <div class="controls">
+      <button id="refresh" type="button">Refresh now</button>
+      <details id="settings">
+        <summary>Settings</summary>
+        <form id="token-form" class="token-form">
+          <label for="token">Read-only GitHub token (optional)</label>
+          <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" placeholder="not set">
+          <div class="row">
+            <button type="submit">Save token</button>
+            <button id="forget" type="button">Forget token</button>
+          </div>
+          <p class="hint">Never required. Raises the API limit from 60 to 5,000 requests an hour. It stays in this browser's localStorage and is sent only to api.github.com, never to raw.githubusercontent.com. Use a fine-grained token with public read-only access and no other permissions.</p>
+          <p class="hint" id="poll-hint"></p>
+        </form>
+      </details>
+    </div>
+  </header>
+
+  <main id="main">
+    <section aria-labelledby="tiles-h">
+      <h2 id="tiles-h">Now</h2>
+      <div id="tiles" class="tiles"></div>
+    </section>
+
+    <section aria-labelledby="needs-h">
+      <h2 id="needs-h">Needs you</h2>
+      <div id="needs"></div>
+    </section>
+
+    <section aria-labelledby="running-h">
+      <h2 id="running-h">Running now</h2>
+      <div id="running"></div>
+    </section>
+
+    <section aria-labelledby="tokens-h">
+      <h2 id="tokens-h">Tokens and AIC per task</h2>
+      <div id="tokens"></div>
+    </section>
+
+    <section aria-labelledby="stages-h">
+      <h2 id="stages-h">Time per stage</h2>
+      <div id="stages"></div>
+    </section>
+
+    <section aria-labelledby="checks-h">
+      <h2 id="checks-h">Latest check results</h2>
+      <div id="checks"></div>
+    </section>
+
+    <section aria-labelledby="timeline-h">
+      <h2 id="timeline-h">Timeline</h2>
+      <div class="field">
+        <label for="subject">Task or PR</label>
+        <select id="subject"></select>
+      </div>
+      <div id="timeline"></div>
+    </section>
+
+    <section aria-labelledby="events-h">
+      <h2 id="events-h">Recent events</h2>
+      <div class="field">
+        <label for="type-filter">Type</label>
+        <select id="type-filter"></select>
+      </div>
+      <div id="events"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Read-only. Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser. Add <code>?fixture=1</code> to the address to see sample data.</p>
+  </footer>
+</body>
+</html>
