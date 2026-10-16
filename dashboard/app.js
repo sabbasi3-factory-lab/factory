@@ -2,9 +2,9 @@
 // and renders the panels. All DOM writes use textContent or createElement(NS), never
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
-  DEFAULTS, STAGES, STAGE_LABELS, canonicalize, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge,
+  DEFAULTS, STAGES, STAGE_LABELS, canonicalize, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge,
   formatDuration, parseJsonl, parseTime, pipeline, shortSha, stageBreakdown, statusSummary, subjectLabel,
-  timelineFor, typicalRunMs, utcDay, verifyChain,
+  reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -16,6 +16,17 @@ const TOKEN_KEY = 'factory-dashboard.github-token';
 const THEME_KEY = 'factory-dashboard.theme';
 const FIXTURE_URL = 'test/fixtures/sample.jsonl'; // relative, so it works locally and on Pages
 const MISSING_BRANCH_POLL_S = 300;
+// Open-PR lists (product repo for PR lanes; both repos for owner reviews). v1 audit events
+// have no "closed" PR event and no human-tier PR events, so these come from GitHub directly.
+const FACTORY_REPO = 'sabbasi3-factory-lab/factory';
+const PR_REPOS = [REPO, FACTORY_REPO];
+// Two list calls per refresh: after an audit head change but at most every ~5 min, and at
+// least every 15 min so the state doesn't go stale. Unauthenticated, that's 4 to 12 of
+// the 60 requests an hour; nextDelayMs() then spreads the branch polls over the rest.
+const PR_MIN_AGE_MS = 5 * 60000;
+const PR_MAX_AGE_MS = 15 * 60000;
+const PR_RETRY_MS = 60000;
+const PR_STALE_MS = 20 * 60000; // older than this, PR state counts as unknown
 
 const params = new URLSearchParams(location.search);
 const FIXTURE = params.get('fixture') === '1';
@@ -43,6 +54,8 @@ const state = {
   busy: false,
   dataVersion: 0,
   renderedVersion: -1,
+  prs: { fetchedAt: null, lastOk: false, error: null, lists: new Map() }, // repo -> { etag, prs }
+  prsKnownRendered: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -338,6 +351,62 @@ async function loadFixture() {
   await setRecords(records);
 }
 
+async function fetchOpenPrs(repo) {
+  const cached = state.prs.lists.get(repo);
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (cached?.etag) headers['If-None-Match'] = cached.etag;
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/repos/${repo}/pulls?state=open&per_page=100`, {
+    headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+  });
+  readRate(res);
+  if (res.status === 304 && cached) return cached;
+  if (!res.ok) throw new Error(`${repo.split('/')[1]} PR list: HTTP ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body)) throw new Error(`${repo.split('/')[1]} PR list: unexpected response`);
+  // Keep only what's shown or matched; PR bodies are used for the tier match and dropped.
+  return { etag: res.headers.get('etag'), prs: body.map(summarizePr).filter((p) => p.number != null) };
+}
+
+async function maybeRefreshPrs(headChanged) {
+  const p = state.prs;
+  if (headChanged) p.headDirty = true;
+  const age = p.fetchedAt == null ? Infinity : Date.now() - p.fetchedAt;
+  const due = !p.lastOk || age >= PR_MAX_AGE_MS || (p.headDirty && age >= PR_MIN_AGE_MS);
+  if (!due) return;
+  if (!p.lastOk && p.attemptedAt && Date.now() - p.attemptedAt < PR_RETRY_MS) return;
+  p.attemptedAt = Date.now();
+  if (state.rate && state.rate.remaining < PR_REPOS.length + 1) {
+    p.lastOk = false;
+    p.error = 'GitHub API rate limit is too low to read the PR lists';
+    state.dataVersion++;
+    return;
+  }
+  try {
+    const lists = await Promise.all(PR_REPOS.map(fetchOpenPrs));
+    PR_REPOS.forEach((repo, i) => p.lists.set(repo, lists[i]));
+    p.fetchedAt = Date.now();
+    p.lastOk = true;
+    p.error = null;
+    p.headDirty = false;
+  } catch (err) {
+    p.lastOk = false;
+    p.error = err instanceof Error ? err.message : String(err);
+  }
+  state.dataVersion++;
+}
+
+/** True only if the latest PR-list read succeeded and is recent; never guess from stale data. */
+function prsKnown() {
+  return state.prs.lastOk && state.prs.fetchedAt != null && Date.now() - state.prs.fetchedAt <= PR_STALE_MS;
+}
+
+function openPrSet() {
+  if (FIXTURE) return unmergedPrs(state.events); // sample data: opened and never merged
+  return prsKnown() ? new Set((state.prs.lists.get(REPO)?.prs ?? []).map((p) => p.number)) : null;
+}
+
 async function tick() {
   clearTimeout(state.timer);
   if (state.busy) return;
@@ -349,7 +418,12 @@ async function tick() {
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
-      delayS = await pollGitHub();
+      const headBefore = state.headSha;
+      try {
+        delayS = await pollGitHub();
+      } finally {
+        await maybeRefreshPrs(state.headSha !== headBefore);
+      }
     }
     state.error = null;
   } catch (err) {
@@ -442,8 +516,10 @@ function render({ full = false } = {}) {
     setStatus(`Problem showing the header: ${err?.message ?? err}`, 'alert');
   }
   safe('kpis', withMetrics(renderKpis)); // KPI tiles hold no focusable elements
-  if (full || state.renderedVersion !== state.dataVersion) {
+  const known = FIXTURE || prsKnown();
+  if (full || state.renderedVersion !== state.dataVersion || state.prsKnownRendered !== known) {
     state.renderedVersion = state.dataVersion;
+    state.prsKnownRendered = known;
     safe('needs', withMetrics(renderNeeds));
     safe('pipeline', renderPipeline);
     safe('agents', withMetrics(renderAgents));
@@ -588,17 +664,47 @@ function needsSubject(it) {
   return it.issue != null ? `issue #${it.issue}` : '—';
 }
 
+function reviewState() {
+  if (FIXTURE) return 'sample';
+  if (prsKnown()) return 'ok';
+  return state.prs.fetchedAt == null && !state.prs.error ? 'pending' : 'unavailable';
+}
+
+function reviewItem(it) {
+  const repoShort = it.repo.split('/')[1];
+  const action = link(it.url, 'Open PR →');
+  action.classList.add('btn', 'btn--small');
+  return h('li', { 'data-row-key': it.key },
+    icon('person', 'needs-icon'),
+    h('div', { class: 'needs-main' },
+      h('p', { class: 'needs-title' }, h('b', {}, 'Review and merge'), ' · ', link(it.url, `${repoShort}#${it.number}`)),
+      h('p', { class: 'why' }, it.title || '(no title)')),
+    h('div', { class: 'needs-side' },
+      it.since ? h('p', { class: 'age' }, 'waiting ', clockCell(parseTime(it.since))) : null,
+      action));
+}
+
 function renderNeeds(m) {
-  const items = m.needsYou.items;
   const cap = DEFAULTS.humanQueueMax;
-  $('needs').classList.toggle('needs--clear', !items.length);
+  const rs = reviewState();
+  const reviews = rs === 'ok' ? reviewItems(PR_REPOS.map((repo) => ({ repo, prs: state.prs.lists.get(repo)?.prs ?? [] })), now()) : [];
+  const items = combineNeedsYou(m.needsYou.items, reviews, REPO);
+  const reviewNote = rs === 'unavailable'
+    ? h('p', { class: 'problem' }, icon('warn'), ` Review list unavailable (${state.prs.error ?? 'the PR lists are out of date'}), so PRs waiting for your review aren't shown.`)
+    : rs === 'pending' ? h('p', { class: 'hint' }, 'Checking GitHub for PRs waiting for your review…')
+      : rs === 'sample' ? h('p', { class: 'hint' }, 'Sample data: PRs waiting for your review are read live from GitHub, so none are shown here.')
+        : null;
+  const clear = !items.length && (rs === 'ok' || rs === 'sample');
+  $('needs').classList.toggle('needs--clear', clear);
   if (!items.length) {
     replaceSection('needs',
-      h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you right now.'),
-      h('p', { class: 'hint' }, `Open needs-human items and stale contracts show up here, oldest first. Above ${cap}, the controller stops admitting new human-tier work. Human-tier PRs aren't in v1 events yet.`));
+      clear ? h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you right now.') : h('p', { class: 'needs-unknown' }, icon('question'), 'No audit items need you, but the review list is incomplete.'),
+      reviewNote,
+      h('p', { class: 'hint' }, `Needs-human items, stale contracts and human-tier PRs waiting for review show up here, oldest first. Above ${cap}, the controller stops admitting new human-tier work.`));
     return;
   }
   const list = h('ul', { class: 'needs-list' }, items.map((it) => {
+    if (it.kind === 'review') return reviewItem(it);
     const action = it.issue != null ? link(`${GH}/${REPO}/issues/${it.issue}`, `Open issue #${it.issue} →`)
       : it.pr != null ? link(`${GH}/${REPO}/pull/${it.pr}`, `Open PR #${it.pr} →`) : null;
     action?.classList.add('btn', 'btn--small');
@@ -621,8 +727,9 @@ function renderNeeds(m) {
       h('span', { class: 'lbl' }, items.length === 1 ? 'item is waiting for you' : 'items are waiting for you'),
       h('span', { class: 'cap' }, `review queue cap ${cap}`)),
     items.length > cap ? h('p', { class: 'problem' }, 'Over the cap: the controller stops admitting new human-tier work until you catch up.') : null,
+    reviewNote,
     list,
-    h('p', { class: 'hint' }, "Human-tier PRs aren't in v1 events yet, so they aren't counted here."));
+    rs === 'ok' ? h('p', { class: 'hint' }, 'Review items come from the open, non-draft PRs of both repos whose body says "Tier: human" or "Tier: owner", or that carry an owner-review label.') : null);
 }
 
 const LANE_CAP = 6;
@@ -647,8 +754,12 @@ function laneCard(c) {
 }
 
 function renderPipeline() {
-  const pl = pipeline(state.events);
+  const pl = pipeline(state.events, { openPrs: openPrSet() });
   $('pipe-count').textContent = `${pl.total} item${pl.total === 1 ? '' : 's'}`;
+  const closedEl = $('pipe-closed');
+  closedEl.hidden = !pl.closed.length;
+  closedEl.textContent = `Closed ${pl.closed.length}`;
+  closedEl.title = `Closed without merging: ${pl.closed.map((c) => c.label).join(', ')}`;
   $('pipe-foot').textContent = `One card per task, or per PR without a task, in the lane of its latest stage; the time shown is how long it has been there. WIP limit ${DEFAULTS.wipLimit} · review queue cap ${DEFAULTS.humanQueueMax}.`;
   if (!pl.total) {
     replaceSection('pipeline', empty(state.noLog ? 'No audit log yet, so the pipeline is empty.' : 'No tasks or PRs in the window yet.'));
@@ -656,6 +767,7 @@ function renderPipeline() {
   }
   const lanes = pl.lanes.map((l) => h('div', { class: `lane st-${l.key}`, role: 'group', 'aria-label': `${l.label}: ${l.cards.length}` },
     h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), l.label, h('span', { class: 'n' }, String(l.cards.length))),
+    l.prStateUnknown ? h('p', { class: 'lane-note', title: "The open-PR list couldn't be read, so these PRs may have been closed." }, icon('question'), 'PR state unknown') : null,
     l.cards.length ? l.cards.slice(0, LANE_CAP).map((c) => {
       try {
         return laneCard(c);

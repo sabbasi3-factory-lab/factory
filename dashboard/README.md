@@ -70,6 +70,14 @@ module and fails. After changing `make-fixture.mjs`, regenerate the fixture with
    files. Skipping missing days keeps the console free of 404 errors. If the listing
    fails, it falls back to fetching all 7 days and treats a 404 as an empty day.
 3. A missing `audit` branch shows "No audit log yet" and is re-checked every 5 minutes.
+4. It reads the open-PR lists of `sabbasi3-factory-lab/chrono-node-rs` and
+   `sabbasi3-factory-lab/factory` (`GET /pulls?state=open&per_page=100`, with ETags):
+   after an audit head change but at most every 5 minutes, and at least every 15. v1
+   events have no "closed" PR event and no human-tier PR events, so these lists decide
+   which PRs are still open and which owner reviews are waiting. PR bodies are only
+   matched for a tier line and never shown or kept. If a list can't be read, or the last
+   good read is over 20 minutes old, the page says the PR state is unknown instead of
+   guessing.
 
 **Rate limits.** Without a token, GitHub allows 60 API requests an hour per IP, and
 conditional requests that return 304 still count against it (they're only free when
@@ -117,12 +125,13 @@ schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timesta
 | Factory version, dry run | `factory_version` and `dry_run` from the latest event's payload |
 | Heartbeat age | Minutes since the latest `heartbeat`. Amber after 70 min, red after 120 min (the DESIGN alert threshold) |
 | Trend lines | Per UTC day over the window: zero-touch rate so far (cumulative), share of `check_result` events with `success`, `run_finished.aic` sum, `merged` count, median PR `opened_at` → `merged_at`, and `heartbeat` count (24 expected) |
-| Pipeline lane | The latest stage event for the task (or task-less PR): `ready` → Ready; `picked`, `dispatched`, `run_started`, `repair_dispatched`, `run_finished` → Running; `pr_opened`, `dequeued` → PR open; `check_result` → Checks; `queued` → Merge queue; `merged` → Merged; `deployed`, `accepted` → Deployed. `cancelled` removes the card. Dry-run decisions never move a card |
+| Owner reviews ("Review and merge") | Open, non-draft PRs in either repo whose body has a `Tier:` line saying `human` or `owner` (markdown bold allowed, case-insensitive), or with an `owner-review`, `human-tier` or `needs-human` label. Listed with the audit items, oldest first, and counted toward the review-queue cap. If the lists can't be read, the panel says the review list is unavailable instead of "Nothing needs you" |
+| Pipeline lane | The latest stage event for the task (or task-less PR): `ready` → Ready; `picked`, `dispatched`, `run_started`, `repair_dispatched`, `run_finished` → Running; `pr_opened`, `dequeued` → PR open; `check_result` → Checks; `queued` → Merge queue; `merged` → Merged; `deployed`, `accepted` → Deployed. `cancelled` removes the card. Dry-run decisions never move a card. A card stays in PR open, Checks or Merge queue only if one of its PRs is open on GitHub now; otherwise it goes to the muted "Closed" count. Without a current open-PR list, those lanes say "PR state unknown". With `?fixture=1`, PRs opened and never merged count as open |
 | Time per stage | First time each stage (ready → picked → running → pr-open → checks → queued → merged → deployed) was reached, per task, or per PR when the PR has no task. Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp. A skipped stage shows "(to …)" |
 
 **Not derivable from v1 events yet:**
 
-- *Human-tier PRs* in the needs-you count: v1 events don't carry a risk tier. The Needs-you panel says so.
+- *Human-tier PRs* and *closed PRs*: v1 events carry neither, so they're read from the open-PR lists (see above) until the audit log records them.
 - *Whether an agent is still running*: v1 has no `run_finished`, so "Agents running" shows "unavailable".
 - *Tokens and AIC* while a run is in progress: they arrive only with `run_finished`, so
   agent cards show elapsed time only until then. Empty states say "No runs yet" / "No finished runs yet".

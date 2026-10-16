@@ -190,6 +190,7 @@ h2 {
 }
 .count { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; font-size: 0.75rem; letter-spacing: 0; text-transform: none; }
 .count:empty { display: none; }
+.count--muted { color: var(--muted); background: transparent; border-style: dashed; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .grid { display: grid; gap: 16px; }
 .grid > section { margin: 0; min-width: 0; }
@@ -225,6 +226,8 @@ h2 {
 }
 .needs.needs--clear { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: linear-gradient(180deg, var(--ok-bg), var(--panel) 80%); }
 .needs-clear { margin: 0; display: flex; gap: 8px; align-items: center; color: var(--ok); font-weight: 600; }
+.needs-unknown { margin: 0; display: flex; gap: 8px; align-items: center; color: var(--warn); font-weight: 600; }
+.needs .problem { display: flex; gap: 6px; align-items: flex-start; font-size: 0.85rem; margin: 10px 0 0; }
 .needs-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .needs-head .big { font-size: 2.3rem; font-weight: 700; color: var(--warn); line-height: 1; }
 .needs-head .lbl { font-weight: 600; }
@@ -295,6 +298,8 @@ h2 {
 .lane-h .dot { width: 9px; height: 9px; border-radius: 3px; background: var(--c); }
 .lane-h .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 500; }
 .lane-empty, .more { margin: 0; font-size: 0.76rem; color: var(--muted); }
+.lane-note { margin: -4px 0 8px; font-size: 0.74rem; color: var(--warn); display: flex; align-items: center; gap: 4px; }
+.lane-note svg.i { width: 13px; height: 13px; }
 .task {
   background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--c);
   border-radius: 8px; padding: 7px 9px; margin-bottom: 7px; font-size: 0.82rem;

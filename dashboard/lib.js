@@ -800,12 +800,18 @@ const LANE_OF = {
 const SIDE_STATE = { needs_human: 'needs human', stale_contract: 'stale contract', blocked: 'blocked' };
 const DONE_LANES = new Set(['merged', 'deployed']);
 
+const PR_LANES = new Set(['pr-open', 'checks', 'queued']);
+
 /**
  * One card per task (or per PR that has no task) in the lane of its latest stage.
+ * v1 has no "closed" event, so `openPrs` (a Set of PR numbers that are open on GitHub
+ * right now) decides PR lanes: a card in PR open, Checks or Merge queue stays only if one
+ * of its PRs is open; otherwise it's counted in `closed`. Without `openPrs` (the list
+ * couldn't be fetched) cards stay, and those lanes are flagged `prStateUnknown`.
  * Side states (needs-human, stale contract, blocked) become tags on the card; dry-run
  * decisions never move a card, because nothing was launched.
  */
-export function pipeline(events) {
+export function pipeline(events, { openPrs = null } = {}) {
   const prTask = prTaskMap(events);
   const cards = new Map();
   const card = (key) => {
@@ -864,10 +870,19 @@ export function pipeline(events) {
     }
   }
 
-  const lanes = PIPELINE_LANES.map((l) => ({ ...l, cards: [] }));
+  const lanes = PIPELINE_LANES.map((l) => ({ ...l, cards: [], prStateUnknown: false }));
   const byKey = new Map(lanes.map((l) => [l.key, l]));
+  const known = openPrs instanceof Set;
+  const closed = [];
   for (const c of cards.values()) {
     if (c.removed || !c.lane) continue;
+    if (PR_LANES.has(c.lane) && c.prs.length) {
+      if (!known) byKey.get(c.lane).prStateUnknown = true;
+      else if (!c.prs.some((pr) => openPrs.has(pr))) {
+        closed.push({ key: c.key, label: c.label, prs: c.prs.slice(), lane: c.lane });
+        continue;
+      }
+    }
     const tags = [];
     if (c.side) tags.push({ text: c.side.label, tone: 'fail', title: c.side.reason });
     if (c.lane === 'running' && c.workflow === 'repair') tags.push({ text: `repair${c.attempt ? ` a${c.attempt}` : ''}`, tone: 'warn', title: null });
@@ -881,7 +896,89 @@ export function pipeline(events) {
     // Active lanes: longest-waiting first. Done lanes: most recent first.
     l.cards.sort((a, b) => (DONE_LANES.has(l.key) ? (b.enteredAt ?? 0) - (a.enteredAt ?? 0) : (a.enteredAt ?? 0) - (b.enteredAt ?? 0)));
   }
-  return { lanes, total: lanes.reduce((n, l) => n + l.cards.length, 0) };
+  closed.sort((a, b) => (a.prs[0] ?? 0) - (b.prs[0] ?? 0));
+  return { lanes, total: lanes.reduce((n, l) => n + l.cards.length, 0), closed, prStateKnown: known };
+}
+
+/** PR numbers opened in the events and never merged: the "open" set for sample data. */
+export function unmergedPrs(events) {
+  const open = new Set();
+  for (const ev of events) {
+    const pr = ev.payload?.pr;
+    if (!isNum(pr)) continue;
+    if (ev.type === 'pr_opened') open.add(pr);
+    if (ev.type === 'merged') open.delete(pr);
+  }
+  return open;
+}
+
+// ---------------------------------------------------------------------------
+// Owner reviews: open human-tier PRs, read from GitHub's open-PR lists until the
+// audit log records human-tier PR events.
+
+export const HUMAN_TIER_LABELS = Object.freeze(['owner-review', 'human-tier', 'needs-human']);
+// "Tier:" then "human" or "owner", allowing markdown bold/italics around either part.
+const TIER_LINE = /(?<![A-Za-z0-9])Tier(?![A-Za-z0-9])\s*(?:\*\*|__|\*|_)?\s*:\s*(?:\*\*|__|\*|_|`)?\s*(human|owner)\b/i;
+
+/** True for an open, non-draft PR whose body has a human/owner tier line or a human-tier label. */
+export function isHumanTierPr(pr) {
+  if (!pr || pr.draft === true) return false;
+  const labels = (Array.isArray(pr.labels) ? pr.labels : []).map((l) => String(typeof l === 'string' ? l : l?.name ?? '').toLowerCase());
+  if (labels.some((l) => HUMAN_TIER_LABELS.includes(l))) return true;
+  return typeof pr.body === 'string' && TIER_LINE.test(pr.body);
+}
+
+/**
+ * The fields the dashboard keeps from a GitHub PR-list entry. The body is used only for
+ * the tier match and then dropped; it is never rendered.
+ */
+export function summarizePr(pr) {
+  return {
+    number: isNum(pr?.number) ? pr.number : null,
+    title: typeof pr?.title === 'string' ? pr.title : '',
+    draft: pr?.draft === true,
+    createdAt: typeof pr?.created_at === 'string' && parseTime(pr.created_at) != null ? pr.created_at : null,
+    humanTier: isHumanTierPr(pr),
+  };
+}
+
+const REPO_NAME = /^[\w.-]+\/[\w.-]+$/;
+
+/** "Review and merge" items from summarized open-PR lists ([{ repo, prs }]), oldest first. */
+export function reviewItems(lists, now = Date.now()) {
+  const items = [];
+  for (const { repo, prs } of lists || []) {
+    if (typeof repo !== 'string' || !REPO_NAME.test(repo)) continue;
+    for (const pr of prs || []) {
+      if (!pr || pr.draft || !pr.humanTier || !isNum(pr.number)) continue;
+      items.push({
+        key: `review:${repo}#${pr.number}`,
+        kind: 'review',
+        repo,
+        number: pr.number,
+        title: pr.title,
+        url: `https://github.com/${repo}/pull/${pr.number}`,
+        since: pr.createdAt,
+        ageMs: pr.createdAt ? now - parseTime(pr.createdAt) : null,
+      });
+    }
+  }
+  return items.sort(bySince);
+}
+
+function bySince(a, b) {
+  if (a.since == null || b.since == null) return a.since == null ? (b.since == null ? 0 : 1) : -1;
+  return a.since.localeCompare(b.since) || String(a.key).localeCompare(String(b.key));
+}
+
+/**
+ * The Needs-you list: audit items plus owner reviews, oldest first. A review of a
+ * product-repo PR that already has an audit item isn't listed twice.
+ */
+export function combineNeedsYou(auditItems, reviews, sourceRepo) {
+  const auditPrs = new Set((auditItems || []).map((i) => i.pr).filter(isNum));
+  const extra = (reviews || []).filter((r) => !(r.repo === sourceRepo && auditPrs.has(r.number)));
+  return [...(auditItems || []), ...extra].sort(bySince);
 }
 
 export const STAGE_LABELS = Object.freeze({

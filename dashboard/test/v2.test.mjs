@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  PIPELINE_LANES, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, parseJsonl, pipeline, shortSha, stageBreakdown, typicalRunMs,
+  PIPELINE_LANES, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, isHumanTierPr,
+  parseJsonl, reviewItems, summarizePr, unmergedPrs, pipeline, shortSha, stageBreakdown, typicalRunMs,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH } from './make-fixture.mjs';
 
@@ -126,4 +127,97 @@ test('only day files listed in the audit tree are fetched, so missing days cause
   assert.deepEqual(existingDayPaths(tree, wanted), ['audit/2026/10/15.jsonl', 'audit/2026/10/16.jsonl']);
   assert.deepEqual(existingDayPaths([], wanted), []);
   assert.deepEqual(existingDayPaths(null, wanted), []);
+});
+
+// --- closed PRs and owner reviews (factory#4 data fixes) ----------------------------
+
+const prEvents = () => [
+  mk('pr_opened', '2026-10-16T08:00:00Z', { pr: 16, author: 'owner' }),
+  mk('pr_opened', '2026-10-16T08:01:00Z', { pr: 17, author: 'owner' }),
+  mk('check_result', '2026-10-16T08:10:00Z', { workflow: 'ci', prs: [17], conclusion: 'success' }),
+  mk('pr_opened', '2026-10-16T08:02:00Z', { pr: 20, author: 'owner' }),
+  mk('check_result', '2026-10-16T08:12:00Z', { workflow: 'ci', prs: [20], conclusion: 'success' }),
+  mk('pr_opened', '2026-10-16T08:03:00Z', { pr: 21, author: 'owner' }),
+  mk('queued', '2026-10-16T08:20:00Z', { pr: 21, actor: 'owner', at: '2026-10-16T08:20:00Z' }),
+  mk('pr_opened', '2026-10-16T08:04:00Z', { pr: 22, author: 'owner' }),
+  mk('pr_opened', '2026-10-16T08:05:00Z', { pr: 5, author: 'owner' }),
+  mk('merged', '2026-10-16T08:30:00Z', { pr: 5, merge_commit_sha: 'a'.repeat(40) }),
+  mk('pr_opened', '2026-10-16T08:06:00Z', { pr: 30, task: 't/x', author: 'bot' }),
+  mk('check_result', '2026-10-16T08:40:00Z', { workflow: 'gates', prs: [30], conclusion: 'failure' }),
+];
+
+test('closed PRs: only open PRs stay in PR lanes; closed ones are counted, merged ones untouched', () => {
+  const pl = pipeline(prEvents(), { openPrs: new Set([20, 22]) });
+  const where = Object.fromEntries(pl.lanes.flatMap((l) => l.cards.map((c) => [c.label, l.key])));
+  assert.deepEqual(where, { 'PR #20': 'checks', 'PR #22': 'pr-open', 'PR #5': 'merged' });
+  assert.deepEqual(pl.closed.map((c) => c.label), ['PR #16', 'PR #17', 'PR #21', 't/x']);
+  assert.equal(pl.prStateKnown, true);
+  assert.ok(pl.lanes.every((l) => !l.prStateUnknown));
+  assert.equal(pl.total, 3);
+});
+
+test('closed PRs: without the open-PR list, cards stay and PR lanes say the state is unknown', () => {
+  for (const pl of [pipeline(prEvents()), pipeline(prEvents(), { openPrs: null })]) {
+    assert.equal(pl.prStateKnown, false);
+    assert.deepEqual(pl.closed, []);
+    const unknown = pl.lanes.filter((l) => l.prStateUnknown).map((l) => l.key);
+    assert.deepEqual(unknown, ['pr-open', 'checks', 'queued']);
+    assert.equal(pl.lanes.find((l) => l.key === 'merged').prStateUnknown, false);
+    assert.equal(pl.total, 7);
+  }
+  // Sample data: PRs opened and never merged count as open.
+  assert.deepEqual([...unmergedPrs(prEvents())].sort((a, b) => a - b), [16, 17, 20, 21, 22, 30]);
+  assert.equal(pipeline(fixture(), { openPrs: unmergedPrs(fixture()) }).closed.length, 0);
+});
+
+test('tier matcher: bold or plain "Tier:" with human or owner, labels, drafts excluded', () => {
+  const yes = [
+    '**Tier:** human (controller + workflow); **owner merges.**',
+    '**Tier:** owner-tier (factory repo).',
+    'Some text\nTier: Human\nmore',
+    '**Tier**: owner',
+    'Tier: **human**',
+    '__Tier:__ OWNER',
+  ];
+  for (const body of yes) assert.equal(isHumanTierPr({ body }), true, body);
+  const no = ['Tier: auto', '**Tier:** auto-strict', 'frontier: human', 'No tier line here', '', null];
+  for (const body of no) assert.equal(isHumanTierPr({ body }), false, String(body));
+  assert.equal(isHumanTierPr({ body: 'Tier: auto', labels: [{ name: 'owner-review' }] }), true);
+  assert.equal(isHumanTierPr({ labels: ['Human-Tier'] }), true);
+  assert.equal(isHumanTierPr({ labels: [{ name: 'needs-human' }] }), true);
+  assert.equal(isHumanTierPr({ labels: [{ name: 'bug' }] }), false);
+  assert.equal(isHumanTierPr({ draft: true, body: '**Tier:** human' }), false);
+  assert.equal(isHumanTierPr({ draft: true, labels: ['owner-review'] }), false);
+  assert.equal(isHumanTierPr(null), false);
+  const sum = summarizePr({ number: 20, title: 'T', draft: false, created_at: '2026-10-16T22:14:03Z', body: '**Tier:** human', labels: [] });
+  assert.deepEqual(sum, { number: 20, title: 'T', draft: false, createdAt: '2026-10-16T22:14:03Z', humanTier: true });
+  assert.equal('body' in sum, false, 'the body is not kept');
+});
+
+test('needs-you: owner reviews are listed oldest first, after deduping audit items', () => {
+  const now = at('2026-10-16T23:00:00Z');
+  const pr = (number, createdAt, humanTier = true, draft = false) => ({ number, title: `PR ${number}`, draft, createdAt, humanTier });
+  const reviews = reviewItems([
+    { repo: 'sabbasi3-factory-lab/chrono-node-rs', prs: [pr(23, '2026-10-16T22:26:13Z', true, true), pr(22, '2026-10-16T22:21:26Z'), pr(20, '2026-10-16T22:14:03Z'), pr(19, '2026-10-16T21:00:00Z', false)] },
+    { repo: 'sabbasi3-factory-lab/factory', prs: [pr(4, '2026-10-16T22:43:47Z'), pr(3, '2026-10-16T22:22:55Z')] },
+    { repo: 'not a repo', prs: [pr(1, '2026-10-16T20:00:00Z')] },
+  ], now);
+  assert.deepEqual(reviews.map((r) => `${r.repo.split('/')[1]}#${r.number}`), ['chrono-node-rs#20', 'chrono-node-rs#22', 'factory#3', 'factory#4']);
+  assert.equal(reviews[0].url, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/pull/20');
+  assert.equal(reviews[0].kind, 'review');
+  assert.equal(Math.round(reviews[0].ageMs / 60000), 46);
+
+  const audit = [
+    { key: 'task:t/a', kind: 'needs_human', pr: null, since: '2026-10-16T22:00:00Z' },
+    { key: 'pr:22', kind: 'needs_human', pr: 22, since: '2026-10-16T22:30:00Z' },
+  ];
+  const all = combineNeedsYou(audit, reviews, 'sabbasi3-factory-lab/chrono-node-rs');
+  assert.deepEqual(all.map((i) => i.key), [
+    'task:t/a',
+    'review:sabbasi3-factory-lab/chrono-node-rs#20',
+    'review:sabbasi3-factory-lab/factory#3',
+    'pr:22', // the audit item replaces the chrono-node-rs#22 review
+    'review:sabbasi3-factory-lab/factory#4',
+  ]);
+  assert.deepEqual(combineNeedsYou([], [], 'x/y'), []);
 });
