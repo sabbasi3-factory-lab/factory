@@ -123,6 +123,25 @@ describe('glance: rendered sample page', { skip, timeout: 120000 }, () => {
     for (const label of found.outbound) assert.match(label, /^View (PR|issue)$/);
   });
 
+  test('cursors: nothing uses the "help" cursor; tooltip-only elements use the default, clickable ones the pointer', async () => {
+    await page.setViewport(1440, 900);
+    const r = await page.evaluate(`(() => {
+      const help = [], tipPointer = [], clickNoPointer = [];
+      const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+      const clickable = (el) => el.matches('a[href], button, summary, [role="button"]');
+      for (const el of document.querySelectorAll('*')) {
+        const c = getComputedStyle(el).cursor;
+        if (c === 'help') help.push(name(el));
+        if (el.classList.contains('has-tip') && !clickable(el) && !el.closest('a[href], button, summary') && c !== 'default' && c !== 'auto') tipPointer.push(name(el) + ':' + c);
+        if (clickable(el) && !el.disabled && el.getBoundingClientRect().width && c !== 'pointer') clickNoPointer.push(name(el) + ':' + c);
+      }
+      return { help, tipPointer, clickNoPointer };
+    })()`);
+    assert.deepEqual(r.help, [], 'no element may use cursor: help');
+    assert.deepEqual(r.tipPointer, [], 'tooltip-only elements use the default cursor');
+    assert.deepEqual(r.clickNoPointer, [], 'clickable elements use the pointer cursor');
+  });
+
   test('layout at 1440x900: agents/time and checks/cost are independent column stacks', async () => {
     await page.setViewport(1440, 900);
     const { cols, slack } = await page.call(measureLayout);

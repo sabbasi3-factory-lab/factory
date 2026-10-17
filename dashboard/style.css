@@ -189,7 +189,8 @@ details#settings > summary::-webkit-details-marker { display: none; }
 .token-form .hint { margin: 0; font-size: 0.8rem; }
 
 /* ---- Tooltips ----------------------------------------------------------- */
-.has-tip { cursor: help; }
+/* Tooltip-only elements keep the normal cursor; only clickable things get the pointer. */
+.has-tip { cursor: default; }
 a.has-tip, button.has-tip, summary.has-tip { cursor: pointer; }
 .tip {
   position: fixed; z-index: 30; max-width: min(24rem, calc(100vw - 16px)); padding: 8px 10px;
@@ -292,7 +293,6 @@ h2 {
 @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 700px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { padding: 14px 16px 10px; display: flex; flex-direction: column; min-width: 0; }
-.kpi.has-tip { cursor: default; }
 .kpi p, .kpi h3 { margin: 0; }
 .kpi-t { font-size: 0.8rem; font-weight: 500; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .kpi-v { font-size: 2.6rem; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; margin-top: 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 0 6px; }
