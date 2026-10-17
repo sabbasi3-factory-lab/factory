@@ -161,6 +161,8 @@ svg.i {
 .chip--ok { color: var(--ok); background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .chip--warn { color: var(--warn); background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
 .chip--alert { color: var(--alert); background: var(--alert-bg); border-color: color-mix(in srgb, var(--alert) 50%, var(--line)); }
+/* Neutral: a deliberate state (factory off) or not known yet (loading). */
+.chip--muted { color: var(--muted); }
 .chip--info { color: var(--info); background: var(--info-bg); border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
 
 .btn, button, select, input {
@@ -286,8 +288,8 @@ h2 {
 }
 
 /* ---- KPI tiles ---------------------------------------------------------- */
-.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
-@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 700px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { padding: 14px 16px 10px; display: flex; flex-direction: column; min-width: 0; }
 .kpi.has-tip { cursor: default; }
@@ -445,6 +447,7 @@ h2 {
 .fold[open] > summary::after { content: "▾"; }
 .fold[open] > summary { border-bottom: 1px solid var(--line); }
 .fold-body { padding: 12px 16px 16px; }
+.verifier-line { margin: 0 0 10px; }
 .field { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
 .field label { font-weight: 600; font-size: 0.85rem; }
 

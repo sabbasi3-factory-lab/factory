@@ -202,6 +202,7 @@ export class Page {
     this.nextId = 1;
     this.pending = new Map();
     this.console = []; // { level, text } for console calls, log entries and exceptions
+    this.listeners = new Map(); // DevTools event name -> Set of callbacks
     ws.addEventListener('message', (e) => this.#onMessage(JSON.parse(String(e.data))));
     ws.addEventListener('close', () => {
       for (const { fail } of this.pending.values()) fail(new Error('DevTools connection closed'));
@@ -218,6 +219,7 @@ export class Page {
       else p.ok(msg.result);
       return;
     }
+    for (const fn of this.listeners.get(msg.method) ?? []) fn(msg.params);
     if (msg.method === 'Runtime.consoleAPICalled') {
       const text = msg.params.args.map((a) => a.value ?? a.description ?? '').join(' ');
       this.console.push({ level: msg.params.type, text });
@@ -228,6 +230,20 @@ export class Page {
       const d = msg.params.exceptionDetails;
       this.console.push({ level: 'error', text: `exception: ${d.exception?.description ?? d.text}` });
     }
+  }
+
+  /** Resolves with the params of the next `method` event (rejects after the timeout). */
+  once(method, timeoutMs = this.timeoutMs) {
+    let fn;
+    const p = new Promise((ok) => {
+      fn = (params) => {
+        this.listeners.get(method)?.delete(fn);
+        ok(params);
+      };
+      if (!this.listeners.has(method)) this.listeners.set(method, new Set());
+      this.listeners.get(method).add(fn);
+    });
+    return withTimeout(p, timeoutMs, `waiting for ${method}`).finally(() => this.listeners.get(method)?.delete(fn));
   }
 
   send(method, params = {}) {
