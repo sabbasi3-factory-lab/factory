@@ -1,5 +1,6 @@
 // Builds dashboard/test/fixtures/sample.jsonl: a small, hash-chained audit log
-// with real SHA-256 values, used by the tests and by the ?fixture=1 preview.
+// with real SHA-256 values, used by the tests and by the ?fixture=1 preview, and
+// dashboard/test/fixtures/anchors.jsonl: hourly independent-verifier anchors over it.
 //
 //   node dashboard/test/make-fixture.mjs
 //
@@ -10,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalize } from '../lib.js';
 
 export const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample.jsonl', import.meta.url));
+export const ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/anchors.jsonl', import.meta.url));
 // The preview pins its clock here, so ages and "today" read as they would live.
 export const FIXTURE_NOW = '2026-10-16T11:12:00Z';
 
@@ -108,8 +110,34 @@ export function buildFixtureLines() {
   return lines;
 }
 
+// One anchor an hour at :47, as the audit-verify workflow would append them, each
+// covering the sample events logged by then.
+export function buildAnchorLines() {
+  const events = buildFixtureLines().map((l) => JSON.parse(l));
+  const lines = [];
+  const first = Date.parse('2026-10-15T09:47:12Z');
+  const last = Date.parse('2026-10-16T10:47:12Z');
+  for (let ms = first, i = 0; ms <= last; ms += 3600000, i++) {
+    const at = new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const covered = events.filter((e) => e.timestamp <= at);
+    lines.push(canonicalize({
+      at,
+      audit_head: covered.length ? hex(`audit-head:${covered.length}`) : null,
+      events: covered.length,
+      last_sha: covered.length ? covered.at(-1).sha : null,
+      run_id: 5001 + i,
+      source: 'sabbasi3-factory-lab/chrono-node-rs',
+      v: 1,
+    }));
+  }
+  return lines;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const lines = buildFixtureLines();
   writeFileSync(FIXTURE_PATH, lines.join('\n') + '\n');
   console.log(`wrote ${lines.length} events to dashboard/test/fixtures/sample.jsonl`);
+  const anchors = buildAnchorLines();
+  writeFileSync(ANCHORS_FIXTURE_PATH, anchors.join('\n') + '\n');
+  console.log(`wrote ${anchors.length} anchors to dashboard/test/fixtures/anchors.jsonl`);
 }

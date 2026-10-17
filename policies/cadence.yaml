@@ -5,7 +5,7 @@ heartbeat_alert_after_hours: 2   # raised by the daily-digest workflow, not the 
 outcomes_collector: daily # gh aw outcomes + gh aw logs -> acceptance, zero-touch, cost per merged PR -> audit log + dashboard
 daily_digest: daily       # one-page summary mentioning the owner: merged/failed, needs-you, spend, drills, anomalies
 monitor: nightly          # plain code: random phrases compared with chrono-node
-audit_chain_verifier: daily
+audit_chain_verifier: hourly  # factory repo, audit-verify: verifies the whole log, then appends one anchor
 factory_review:
   every_days: 3           # proposes factory changes as draft PRs; the owner approves
   data_window_days: 7     # always a rolling 7-day window

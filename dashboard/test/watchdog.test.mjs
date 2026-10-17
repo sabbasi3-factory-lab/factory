@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { canonicalize } from '../lib.js';
 import {
-  LABEL, MAX_AGE_MIN, TITLE, decide, main, newestHeartbeat, planIssueActions, readAudit, syncIssue,
+  LABEL, MAX_AGE_MIN, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, main, newestHeartbeat, planIssueActions,
+  readAudit, readVerifier, syncIssue,
 } from '../watchdog.mjs';
 
 const NOW = Date.parse('2026-10-16T12:00:00Z');
@@ -199,7 +200,11 @@ test('workflows default to no permissions and pin every action to a commit SHA',
     for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${name}: ${u}`);
   }
   const watchdog = readFileSync(new URL('../../.github/workflows/heartbeat-watchdog.yml', import.meta.url), 'utf8');
-  assert.match(watchdog, /permissions:\n\s+contents: read\n\s+issues: write\n/);
+  // Job permissions: contents read, issues write, and actions read for the verifier's runs.
+  const block = watchdog.match(/^ {4}permissions:\n((?: {6}[\w-]+: \w+(?: +#[^\n]*)?\n)+)/m);
+  assert.ok(block, 'job-level permissions block');
+  const perms = block[1].trim().split('\n').map((l) => l.replace(/#.*/, '').trim()).sort();
+  assert.deepEqual(perms, ['actions: read', 'contents: read', 'issues: write']);
   assert.match(watchdog, /cron:/);
   assert.match(watchdog, /60 days/);
 });
@@ -215,4 +220,140 @@ test('review #3: an incomplete heartbeat record, a future one or an impossible d
   assert.equal(decide(audit(ok('audit/2026/10/01.jsonl', line('heartbeat', '2026-09-31T23:30:00Z'))), oct2).status, 'stale');
   // A valid one exactly at now is fresh.
   assert.equal(decide(audit(ok(TODAY, line('heartbeat', '2026-10-16T12:00:00Z'))), NOW).status, 'fresh');
+});
+
+// --- the independent verifier (audit-verify) ----------------------------------------------
+
+const RUNS = '/actions/workflows/audit-verify.yml/runs?branch=main&status=success&per_page=1';
+const run = (startedMinAgo, over = {}) => ({
+  id: 9001, head_branch: 'main', status: 'completed', conclusion: 'success', run_started_at: minutesAgo(startedMinAgo),
+  updated_at: minutesAgo(startedMinAgo - 2), html_url: 'https://github.com/example/factory/actions/runs/9001', ...over,
+});
+const verifierAt = (min) => decideVerifier({ workflow: 'ok', run: run(min) }, NOW);
+
+test('verifier fresh: a success within 26 h, timed by run_started_at', () => {
+  assert.equal(VERIFIER_MAX_AGE_MIN, 1560);
+  const v = verifierAt(45);
+  assert.deepEqual([v.status, v.alert, v.reason], ['fresh', false, 'verifier-fresh']);
+  assert.equal(Math.round(v.ageMin), 45);
+  assert.deepEqual(v.last, { id: 9001, startedAt: minutesAgo(45), url: 'https://github.com/example/factory/actions/runs/9001' });
+  assert.equal(verifierAt(1560).status, 'fresh');
+});
+
+test('verifier stale: the newest success is more than 26 h old', () => {
+  const v = verifierAt(1561);
+  assert.deepEqual([v.status, v.alert, v.reason], ['stale', true, 'verifier-too-old']);
+  // updated_at doesn't rescue an old run.
+  assert.equal(decideVerifier({ workflow: 'ok', run: run(1600, { updated_at: minutesAgo(1) }) }, NOW).status, 'stale');
+});
+
+test('verifier never succeeded, 404 and API errors alert (fail closed)', () => {
+  const never = decideVerifier({ workflow: 'ok', run: null }, NOW);
+  assert.deepEqual([never.status, never.alert, never.reason], ['missing', true, 'verifier-never-succeeded']);
+  const missing = decideVerifier({ workflow: 'missing' }, NOW);
+  assert.deepEqual([missing.status, missing.alert, missing.reason], ['missing', true, 'verifier-workflow-missing']);
+  const err = decideVerifier({ workflow: 'error', detail: 'HTTP 502' }, NOW);
+  assert.deepEqual([err.status, err.alert, err.reason, err.detail], ['unknown', true, 'verifier-unreadable', 'HTTP 502']);
+  assert.equal(decideVerifier(undefined, NOW).status, 'unknown');
+  // A run that isn't a completed success, has no usable time, or starts in the future is unknown.
+  for (const bad of [{ head_branch: 'feature' }, { head_branch: undefined }, { conclusion: 'failure' }, { status: 'in_progress' }, { run_started_at: null }, { run_started_at: '2026-10-16T11:00:00.000Z' }, { run_started_at: minutesAgo(-5) }, { id: '9001' }]) {
+    const d = decideVerifier({ workflow: 'ok', run: run(30, bad) }, NOW);
+    assert.deepEqual([d.status, d.alert], ['unknown', true], JSON.stringify(bad));
+  }
+});
+
+test('readVerifier: newest successful run with the token; 404 is missing, API errors are errors', async () => {
+  const repo = 'example/factory';
+  assert.deepEqual(await readVerifier({ fetch: fakeFetch([]), repo }), { workflow: 'missing' });
+  assert.deepEqual(await readVerifier({ fetch: fakeFetch([[RUNS, { status: 500 }]]), repo }), { workflow: 'error', detail: 'HTTP 500' });
+  assert.equal((await readVerifier({ fetch: fakeFetch([[RUNS, new Error('offline')]]), repo })).workflow, 'error');
+  assert.equal((await readVerifier({ fetch: fakeFetch([[RUNS, { body: { total_count: 0 } }]]), repo })).workflow, 'error');
+  assert.deepEqual(await readVerifier({ fetch: fakeFetch([[RUNS, { body: { total_count: 0, workflow_runs: [] } }]]), repo }), { workflow: 'ok', run: null });
+
+  const calls = [];
+  const res = await readVerifier({ fetch: fakeFetch([[RUNS, { body: { total_count: 1, workflow_runs: [run(30)] } }]], calls), token: 'test-token', repo });
+  assert.equal(res.run.id, 9001);
+  assert.equal(calls[0].url, `https://api.github.com/repos/${repo}${RUNS}`);
+  assert.equal(calls[0].headers.Authorization, 'Bearer test-token');
+  assert.equal(decideVerifier(res, NOW).status, 'fresh');
+});
+
+test('one issue lists every failing check, stays open while either fails, and closes only when both are healthy', async () => {
+  const hbFresh = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(3)))), NOW);
+  const hbStale = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(185)))), NOW);
+  const vFresh = verifierAt(30);
+  const vStale = verifierAt(1600);
+
+  const both = combine(hbStale, vStale);
+  assert.deepEqual([both.alert, both.failing], [true, ['heartbeat-too-old', 'verifier-too-old']]);
+  const [create] = planIssueActions(both, [], 'https://example.test/run/1');
+  assert.equal(create.op, 'create');
+  assert.equal(create.title, 'Factory liveness alert');
+  assert.deepEqual(create.labels, ['heartbeat-alert']);
+  assert.match(create.body, /Failing: `heartbeat-too-old`, `verifier-too-old`/);
+  assert.match(create.body, /#### Controller heartbeat\n- Status: \*\*stale\*\*/);
+  assert.match(create.body, /#### Audit verifier \(`audit-verify\.yml`\)\n- Status: \*\*stale\*\*/);
+  assert.match(create.body, /Last success: run \[9001\]\(https:\/\/github\.com\/example\/factory\/actions\/runs\/9001\)/);
+  assert.match(create.body, /Watchdog run: https:\/\/example\.test\/run\/1/);
+
+  // Only the verifier failing still alerts; the heartbeat section reads healthy.
+  const onlyVerifier = planIssueActions(combine(hbFresh, decideVerifier({ workflow: 'missing' }, NOW)), []);
+  assert.equal(onlyVerifier[0].op, 'create');
+  assert.match(onlyVerifier[0].body, /Failing: `verifier-workflow-missing`\n/);
+  assert.match(onlyVerifier[0].body, /- Status: \*\*fresh\*\* \(`heartbeat-fresh`\)/);
+
+  // Stateful run: open once, comment while either fails, close only when both are healthy.
+  const issues = [];
+  const fetch = fakeFetch([
+    ['/issues?state=open', () => ({ body: issues.filter((i) => i.state === 'open') })],
+    ['/labels/heartbeat-alert', { body: {} }],
+    ['/issues/7/comments', { status: 201, body: {} }],
+    ['/issues/7', (url, init) => {
+      issues[0].state = JSON.parse(init.body).state;
+      return { body: issues[0] };
+    }],
+    ['/issues', (url, init) => {
+      issues.push({ number: 7, state: 'open', ...JSON.parse(init.body) });
+      return { status: 201, body: issues[0] };
+    }],
+  ]);
+  const sync = (hb, v) => syncIssue({ fetch, token: 't', repo: 'example/factory', decision: combine(hb, v) });
+  assert.deepEqual((await sync(hbStale, vFresh)).map((a) => a.op), ['create']);
+  assert.deepEqual((await sync(hbFresh, vStale)).map((a) => a.op), ['comment'], 'heartbeat recovered, verifier still failing');
+  assert.equal(issues[0].state, 'open');
+  assert.deepEqual((await sync(hbStale, vFresh)).map((a) => a.op), ['comment'], 'verifier recovered, heartbeat failing');
+  assert.equal(issues[0].state, 'open');
+  const closing = await sync(hbFresh, vFresh);
+  assert.deepEqual(closing.map((a) => a.op), ['comment', 'close']);
+  assert.match(closing[0].body, /^Heartbeat and audit verifier both healthy again/);
+  assert.equal(issues[0].state, 'closed');
+  assert.equal(issues.length, 1);
+});
+
+test('main checks the heartbeat and the verifier, in dry-run mode without writing', async () => {
+  const repo = 'example/factory';
+  const routes = (verifierRoute) => [
+    ['/branches/audit', { body: { commit: { sha: SHA } } }],
+    [`/${SHA}/${TODAY}`, { body: line('heartbeat', minutesAgo(20)) }],
+    [`/${SHA}/${YESTERDAY}`, { status: 404 }],
+    ['/issues?state=open', { body: [{ number: 3, title: 'Controller heartbeat stale' }] }],
+    ...(verifierRoute ? [[RUNS, verifierRoute]] : []),
+  ];
+  const env = { GITHUB_REPOSITORY: repo, WATCHDOG_DRY_RUN: '1' };
+  const calls = [];
+  const healthy = await main(env, fakeFetch(routes({ body: { workflow_runs: [run(50)] } }), calls), NOW);
+  assert.deepEqual([healthy.decision.status, healthy.verifier.status, healthy.liveness.alert], ['fresh', 'fresh', false]);
+  assert.deepEqual(healthy.actions.map((a) => [a.op, a.number]), [['comment', 3], ['close', 3]]);
+  assert.ok(calls.every((c) => c.method === 'GET'), 'dry run writes nothing');
+
+  const stale = await main(env, fakeFetch(routes({ body: { workflow_runs: [run(1700)] } })), NOW);
+  assert.deepEqual([stale.verifier.reason, stale.liveness.alert], ['verifier-too-old', true]);
+  assert.deepEqual(stale.actions.map((a) => [a.op, a.number]), [['comment', 3]], 'the existing issue is found by label, whatever its title');
+
+  const apiError = await main(env, fakeFetch(routes({ status: 503 })), NOW);
+  assert.deepEqual([apiError.verifier.reason, apiError.liveness.alert], ['verifier-unreadable', true]);
+  const never = await main(env, fakeFetch(routes({ body: { workflow_runs: [] } })), NOW);
+  assert.deepEqual([never.verifier.reason, never.liveness.alert], ['verifier-never-succeeded', true]);
+  const notFound = await main(env, fakeFetch(routes(null)), NOW);
+  assert.deepEqual([notFound.verifier.reason, notFound.liveness.alert], ['verifier-workflow-missing', true]);
 });

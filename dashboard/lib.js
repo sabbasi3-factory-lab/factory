@@ -271,25 +271,30 @@ export function statusSummary({ loaded = false, noLog = false, error = null, fix
 // ---------------------------------------------------------------------------
 // Glance view: one health word, compact ages, short titles
 
-export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', info: 'Checking' });
+export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', loading: 'Loading' });
 export const STALE_DATA_MIN = 10; // live data older than this is not fresh
 
 /**
- * The single health chip, from data freshness, the controller heartbeat and the chain check.
- * Returns { level, label, reasons } with level "ok" (Healthy), "warn" (Degraded), "alert"
- * (Down) or "info" (Checking: nothing loaded yet). The worst condition wins:
+ * The single health chip, from data freshness, the controller heartbeat, the chain check
+ * and the independent verifier (`verifier` is a verifierStatus() result; omit it to leave
+ * the verifier out). Returns { level, label, reasons } with level "ok" (Healthy), "warn"
+ * (Degraded), "alert" (Down) or "loading" (neutral: nothing loaded yet and no error, so
+ * nothing is known to be wrong). The worst condition wins:
  *
  * - Down: no audit log; nothing loaded because of an error; the chain is broken; the
- *   heartbeat is missing from the window or stale (over 120 min).
+ *   heartbeat is missing from the window or stale (over 120 min); the verifier is
+ *   stale (over 26 h) or unknown (unreadable, empty, malformed, out of order or in the
+ *   future).
  * - Degraded: the last refresh failed, so older data is shown; the data is over
  *   10 min old (`dataAgeMin`); the heartbeat is late (over 70 min) or unknown; the chain
- *   isn't verified (not loaded or empty).
- * - Healthy: fresh data, a verified chain and a heartbeat within 70 min.
+ *   isn't verified (not loaded or empty); the verifier is late (over 2 h) or not set up.
+ * - Healthy: fresh data, a verified chain, a heartbeat within 70 min and, when given, a
+ *   verifier anchor within 2 h. A verifier still being checked doesn't count either way.
  *
  * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
  */
-export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null } = {}) {
-  if (!loaded && !error) return { level: 'info', label: HEALTH_LABELS.info, reasons: ['Loading the audit log'] };
+export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null, verifier = null } = {}) {
+  if (!loaded && !error) return { level: 'loading', label: HEALTH_LABELS.loading, reasons: ['Loading the audit log'] };
   const found = [];
   const add = (level, text) => found.push({ level, text });
   if (noLog) add('alert', 'No audit log yet');
@@ -304,9 +309,22 @@ export function healthSummary({ loaded = false, noLog = false, error = null, cha
     else if (level === 'warn') add('warn', `Heartbeat late (${formatAge(heartbeat.ageMin)})`);
     else if (level !== 'ok') add('warn', 'Heartbeat unknown');
   }
+  if (verifier && (verifier.level === 'warn' || verifier.level === 'alert')) add(verifier.level, verifierReason(verifier));
   const worst = found.reduce((a, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[a] ? f.level : a), 'ok');
   const reasons = found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]).map((f) => f.text);
   return { level: worst, label: HEALTH_LABELS[worst], reasons };
+}
+
+/**
+ * The heartbeat tile: { level, value }. Until the first load it's the neutral "loading"
+ * level with "…", never a red alarm; after it, ok/warn/alert from heartbeat.level, and a
+ * missing heartbeat is an alert with "—".
+ */
+export function heartbeatTile(heartbeat, loaded) {
+  if (!loaded) return { level: 'loading', value: '…' };
+  if (heartbeat?.ageMin == null) return { level: 'alert', value: '—' };
+  const level = heartbeat.level === 'ok' ? 'ok' : heartbeat.level === 'warn' ? 'warn' : 'alert';
+  return { level, value: compactAge(heartbeat.ageMin * 60000) };
 }
 
 /** One-token age: "45s", "12m", "7h", "3d"; "—" when unknown. */
@@ -335,6 +353,162 @@ export function shortTitle(text, maxWords = 5, maxChars = 48) {
 export function prRef(repo, number, homeRepo) {
   if (!isNum(number)) return '—';
   return repo && repo !== homeRepo ? `${String(repo).split('/').pop()}#${number}` : `#${number}`;
+}
+
+// ---------------------------------------------------------------------------
+// Independent verifier anchors
+//
+// The factory's audit-verify workflow fully re-verifies the audit log and, on success,
+// appends one canonical-JSON line to anchors/chrono-node-rs.jsonl on the `anchors` branch
+// of the factory repo. The page only checks the shape and order of those lines; it doesn't
+// recompute any hash.
+
+export const ANCHOR_FIELDS = ['at', 'audit_head', 'events', 'last_sha', 'run_id', 'source', 'v'];
+export const ANCHOR_SOURCE = 'sabbasi3-factory-lab/chrono-node-rs';
+export const VERIFIER_LIMITS = Object.freeze({
+  warnMin: 120, // a verification runs hourly; amber after 2 h
+  alertMin: 26 * 60, // red after 26 h, the same limit as the watchdog
+});
+
+/** Exact UTC second-precision time ("2026-10-17T05:47:12Z") that round-trips, or null. */
+export function parseUtcSeconds(value) {
+  if (typeof value !== 'string' || !TIMESTAMP.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z') !== value) return null;
+  return ms;
+}
+
+/** Problems with one parsed anchor line (an empty list means valid). */
+export function validateAnchor(anchor, source = ANCHOR_SOURCE) {
+  if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor)) return ['not an object'];
+  const errors = [];
+  const keys = Object.keys(anchor);
+  const missing = ANCHOR_FIELDS.filter((k) => !keys.includes(k));
+  const extra = keys.filter((k) => !ANCHOR_FIELDS.includes(k));
+  if (missing.length) errors.push(`missing ${missing.join(', ')}`);
+  if (extra.length) errors.push(`unexpected ${extra.join(', ')}`);
+  if (anchor.v !== 1) errors.push('v is not 1');
+  if (parseUtcSeconds(anchor.at) == null) errors.push('at is not a UTC time with seconds');
+  if (anchor.audit_head !== null && !(typeof anchor.audit_head === 'string' && /^[0-9a-f]{40}$/.test(anchor.audit_head))) {
+    errors.push('audit_head is not a 40-character commit SHA or null');
+  }
+  const eventsOk = Number.isSafeInteger(anchor.events) && anchor.events >= 0;
+  if (!eventsOk) errors.push('events is not an integer ≥ 0');
+  if (eventsOk && anchor.events === 0 ? anchor.last_sha !== null : !(typeof anchor.last_sha === 'string' && SHA_REF.test(anchor.last_sha))) {
+    errors.push(eventsOk && anchor.events === 0 ? 'last_sha is not null with 0 events' : 'last_sha is not sha256:<hex>');
+  }
+  if (!(Number.isSafeInteger(anchor.run_id) && anchor.run_id > 0)) errors.push('run_id is not a positive integer');
+  if (anchor.source !== source) errors.push(`source is not ${source}`);
+  return errors;
+}
+
+/**
+ * Parses the whole anchors file. Every line must be valid, canonical JSON (sorted keys, no
+ * whitespace) and the lines must not go back in `at` or `events`. A trailing newline is
+ * allowed; any other blank line is a problem.
+ * Returns { anchors, problem } where problem is null or { line, reason }.
+ */
+export function parseAnchors(text, source = ANCHOR_SOURCE) {
+  const lines = String(text ?? '').split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const anchors = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const fail = (reason) => ({ anchors, problem: { line: i + 1, reason } });
+    let anchor;
+    try {
+      anchor = JSON.parse(raw);
+    } catch {
+      return fail(raw.trim() === '' ? 'blank line' : 'invalid JSON');
+    }
+    const errors = validateAnchor(anchor, source);
+    if (errors.length) return fail(errors.join('; '));
+    if (canonicalize(anchor) !== raw) return fail('not canonical JSON');
+    const prev = anchors.at(-1);
+    if (prev && anchor.at < prev.at) return fail('at goes back in time');
+    if (prev && anchor.events < prev.events) return fail('events goes down');
+    anchors.push(anchor);
+  }
+  return { anchors, problem: null };
+}
+
+/**
+ * The verifier chip, from the result of reading the anchors file:
+ * fetched: { status: 'pending' | 'ok' | 'missing' | 'error', text?, detail? }.
+ * Returns { level, reason, chip, title, line, count, newest, ageMin }. Only a readable,
+ * fully valid file whose newest anchor is recent reads as "ok"; anything unreadable is
+ * "unknown" and alerts. A 404 (the branch or file isn't created yet) is a warning.
+ */
+export function verifierStatus(fetched, now, limits = VERIFIER_LIMITS) {
+  const base = { count: 0, newest: null, ageMin: null };
+  const status = fetched?.status;
+  if (status === 'pending') {
+    return { ...base, level: 'info', reason: 'verifier-loading', chip: 'Verifier: checking…', title: null, line: 'Independent verifier: checking…' };
+  }
+  if (status === 'missing') {
+    return {
+      ...base, level: 'warn', reason: 'verifier-not-set-up', chip: 'Verifier not set up yet',
+      title: 'No anchors file yet: the audit-verify workflow creates it on its first successful run.',
+      line: 'Independent verifier: not set up yet. The audit-verify workflow creates its anchors file on the first successful run.',
+    };
+  }
+  const unknown = (reason, short, why) => ({
+    ...base, level: 'alert', reason, chip: `Verifier unknown · ${short}`, title: why, line: `Independent verifier: unknown (${why}).`,
+  });
+  if (status !== 'ok') return unknown('verifier-unreadable', 'unreadable', `couldn't read the anchors file${fetched?.detail ? `: ${fetched.detail}` : ''}`);
+
+  const { anchors, problem } = parseAnchors(fetched.text);
+  if (problem) {
+    const reason = /goes (back|down)/.test(problem.reason) ? 'verifier-out-of-order' : 'verifier-malformed';
+    return unknown(reason, `bad anchor line ${problem.line}`, `anchor line ${problem.line}: ${problem.reason}`);
+  }
+  if (!anchors.length) return unknown('verifier-empty', 'no anchors', 'the anchors file is empty');
+
+  const newest = anchors.at(-1);
+  const ms = parseUtcSeconds(newest.at);
+  if (ms > now) {
+    return { ...unknown('verifier-future', 'anchor in the future', `the newest anchor (${newest.at}) is in the future`), count: anchors.length, newest };
+  }
+  const ageMin = (now - ms) / 60000;
+  const level = ageMin > limits.alertMin ? 'alert' : ageMin > limits.warnMin ? 'warn' : 'ok';
+  const n = anchors.length;
+  const plural = `${n.toLocaleString('en-US')} anchor${n === 1 ? '' : 's'}`;
+  const head = newest.audit_head ? `audit head ${newest.audit_head.slice(0, 7)}` : 'no audit head';
+  return {
+    count: n, newest, ageMin, level,
+    reason: level === 'ok' ? 'verifier-fresh' : level === 'warn' ? 'verifier-late' : 'verifier-stale',
+    chip: `Verified ${formatAge(ageMin)} ago · ${plural}`,
+    title: `Last independent verification ${newest.at} (run ${newest.run_id}). Amber after ${limits.warnMin / 60} h, red after ${limits.alertMin / 60} h.`,
+    line: `Independent verifier: last run ${formatAge(ageMin)} ago, ${plural}, newest covers ${newest.events.toLocaleString('en-US')} event${newest.events === 1 ? '' : 's'} (${head}).`,
+  };
+}
+
+const AGED_REASONS = new Set(['verifier-fresh', 'verifier-late', 'verifier-stale']);
+
+/** A short line for the health tooltip: "Verified 23m ago · 41 anchors", "Verifier not set up", … */
+export function verifierReason(v) {
+  if (!v) return 'Verifier: unknown';
+  if (v.reason === 'verifier-not-set-up') return 'Verifier not set up';
+  if (v.level === 'info') return 'Verifier: checking';
+  if (AGED_REASONS.has(v.reason) && isNum(v.ageMin)) {
+    return `Verified ${compactAge(v.ageMin * 60000)} ago · ${v.count.toLocaleString('en-US')} anchor${v.count === 1 ? '' : 's'}`;
+  }
+  return `Verifier unknown: ${v.title ?? v.reason}`;
+}
+
+/** Anchors per UTC day over the window, oldest first: the "Verified" tile's trend (24 expected). */
+export function anchorsPerDay(anchors, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
+  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
+  const labels = [];
+  for (let i = days - 1; i >= 0; i--) labels.push(utcDay(end - i * 86400000));
+  const index = new Map(labels.map((d, i) => [d, i]));
+  const counts = labels.map(() => 0);
+  for (const a of anchors || []) {
+    const ms = parseUtcSeconds(a?.at);
+    const i = ms == null ? undefined : index.get(utcDay(ms));
+    if (i != null) counts[i]++;
+  }
+  return { days: labels, counts };
 }
 
 // ---------------------------------------------------------------------------
@@ -971,6 +1145,9 @@ export function pipeline(events, { openPrs = null } = {}) {
         c.checkHead = head;
         c.checks = new Map();
       }
+      // A cancelled task stays out of the pipeline until real new work reopens it; a late
+      // run_finished or check result after the cancellation doesn't bring it back.
+      if (c.removed && !REOPENS.has(ev.type)) continue;
       c.removed = false;
       if (c.lane !== lane && laneMoveAllowed(ev.type, c.lane, lane)) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
       if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {

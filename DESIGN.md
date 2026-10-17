@@ -342,7 +342,7 @@ Each event is **canonical JSON on one line** with exactly these fields:
 - `payload`
 - `sha`: the SHA-256 of the canonical record, with `sha` left out
 
-A **daily verifier** recomputes every hash and the chain, and alerts you if anything was altered, even by an admin who rewrote the branch.
+An **independent verifier** in the `factory` repo (`audit-verify`, hourly, its own `GITHUB_TOKEN`, no App key) reads the whole `audit` branch from git objects, recomputes every hash and the chain from the first event, and checks the log against **anchors**: one line per successful run on the append-only `anchors` branch of the `factory` repo (`{at, audit_head, events, last_sha, run_id}`). That branch has a no-bypass ruleset (no deletion, no force-push), and the verifier rejects any commit that edits rather than appends. A cut-off tail, rewritten history or a deleted branch then fails, even if the new log is consistent with itself. The controller App is installed on the product repo only, so it can't touch the anchors, the verifier or the watchdog. A failed run is the alert of record; the heartbeat watchdog also alerts if the verifier hasn't succeeded for 26 hours, and the dashboard shows the last verification and the anchor count.
 
 The audit log is **never compacted or rewritten.** It matches the gh-aw ledger's record format (spec v1.1, working draft), so we can switch to the ledger later if we need several writers. The ledger itself isn't used for the audit log, for three reasons:
 

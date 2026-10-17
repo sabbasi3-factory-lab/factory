@@ -5,8 +5,10 @@
 // app; without it the test is skipped locally and fails in CI (process.env.CI).
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { findChrome, launchChrome, serveDir } from './headless.mjs';
+import { FIXTURE_PATH } from './make-fixture.mjs';
 import { BUDGETS, READY_EXPR, formatDetails, formatMeasurement, measureGlance, measureLayout } from './glance-measure.mjs';
 
 const chrome = findChrome();
@@ -121,6 +123,25 @@ describe('glance: rendered sample page', { skip, timeout: 120000 }, () => {
     for (const label of found.outbound) assert.match(label, /^View (PR|issue)$/);
   });
 
+  test('cursors: nothing uses the "help" cursor; tooltip-only elements use the default, clickable ones the pointer', async () => {
+    await page.setViewport(1440, 900);
+    const r = await page.evaluate(`(() => {
+      const help = [], tipPointer = [], clickNoPointer = [];
+      const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+      const clickable = (el) => el.matches('a[href], button, summary, [role="button"]');
+      for (const el of document.querySelectorAll('*')) {
+        const c = getComputedStyle(el).cursor;
+        if (c === 'help') help.push(name(el));
+        if (el.classList.contains('has-tip') && !clickable(el) && !el.closest('a[href], button, summary') && c !== 'default' && c !== 'auto') tipPointer.push(name(el) + ':' + c);
+        if (clickable(el) && !el.disabled && el.getBoundingClientRect().width && c !== 'pointer') clickNoPointer.push(name(el) + ':' + c);
+      }
+      return { help, tipPointer, clickNoPointer };
+    })()`);
+    assert.deepEqual(r.help, [], 'no element may use cursor: help');
+    assert.deepEqual(r.tipPointer, [], 'tooltip-only elements use the default cursor');
+    assert.deepEqual(r.clickNoPointer, [], 'clickable elements use the pointer cursor');
+  });
+
   test('layout at 1440x900: agents/time and checks/cost are independent column stacks', async () => {
     await page.setViewport(1440, 900);
     const { cols, slack } = await page.call(measureLayout);
@@ -179,6 +200,83 @@ describe('glance: rendered sample page', { skip, timeout: 120000 }, () => {
     await page.waitFor('document.activeElement !== window.__glanceOld && document.activeElement?.closest("#needs") != null', { timeoutMs: 10000, what: 'the re-render' });
     assert.equal(await page.evaluate('document.activeElement.getAttribute("data-focus-key")'), key);
     assert.equal(await page.evaluate('window.__glanceOld.isConnected'), false, 'the section really was rebuilt');
+  });
+
+  test('before the data arrives nothing is red or amber: "… Loading" is neutral', async () => {
+    await page.setViewport(1440, 900);
+    // Hold the sample data so the page stays in its first, not-loaded-yet render.
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*test/fixtures/sample.jsonl*' }] });
+    let requestId = null;
+    try {
+      const paused = page.once('Fetch.requestPaused', 30000);
+      await page.navigate(`${server.url}index.html?fixture=1`);
+      ({ requestId } = await paused);
+      await page.waitFor("document.querySelectorAll('#kpis .kpi').length > 0", { what: 'the first render' });
+      const seen = await page.evaluate(`(() => {
+        const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+        const bad = new Set([probe('var(--alert)'), probe('var(--warn)')]);
+        const badBg = new Set([probe('var(--alert-bg)'), probe('var(--warn-bg)')]);
+        const out = [];
+        for (const el of document.body.querySelectorAll('*')) {
+          if (el.closest('#tip, .sprite, details:not([open]) > :not(summary)')) continue;
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          if (!r.width || !r.height || cs.visibility === 'hidden') continue;
+          const own = [...el.childNodes].some((n) => n.nodeType === 3 && n.data.trim()) || el.matches('svg.i');
+          if ((own && bad.has(cs.color)) || badBg.has(cs.backgroundColor)) out.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '.' + [...el.classList].join('.') + ' ' + (el.textContent || '').trim().slice(0, 30));
+        }
+        return {
+          health: document.getElementById('health').innerText.trim(),
+          heartbeat: [...document.querySelectorAll('#kpis .kpi')].find((k) => /Heartbeat/.test(k.innerText))?.querySelector('.kpi-v').innerText.trim(),
+          stateIcons: document.querySelectorAll('.kpi-state').length,
+          ready: document.documentElement.dataset.ready ?? null,
+          out,
+        };
+      })()`);
+      assert.equal(seen.ready, null, 'still loading');
+      assert.equal(seen.health, '… Loading');
+      assert.equal(seen.heartbeat, '…');
+      assert.equal(seen.stateIcons, 0, 'no ✓/⚠/✗ before the data arrives');
+      assert.deepEqual(seen.out, [], 'no alert- or warning-coloured elements while loading');
+    } finally {
+      if (requestId) await page.send('Fetch.continueRequest', { requestId });
+      await page.send('Fetch.disable');
+    }
+    await page.waitFor(READY_EXPR, { timeoutMs: 30000, what: 'the data to load after the pause' });
+    assert.equal(await page.evaluate("document.getElementById('health').innerText.trim()"), 'Healthy');
+  });
+
+  test('"Factory off" is neutral grey with its power icon, not red', async () => {
+    // Serve the sample with the kill switch off. (Its hashes no longer match, so the chain
+    // reads as broken; only the kill-switch chip is checked here.)
+    const off = readFileSync(FIXTURE_PATH, 'utf8').replaceAll('"factory_enabled":true', '"factory_enabled":false');
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*test/fixtures/sample.jsonl*' }] });
+    try {
+      const paused = page.once('Fetch.requestPaused', 30000);
+      await page.navigate(`${server.url}index.html?fixture=1`);
+      const { requestId } = await paused;
+      await page.send('Fetch.fulfillRequest', {
+        requestId, responseCode: 200, responseHeaders: [{ name: 'content-type', value: 'text/plain; charset=utf-8' }],
+        body: Buffer.from(off).toString('base64'),
+      });
+      await page.waitFor(READY_EXPR, { timeoutMs: 30000, what: 'the modified sample to render' });
+    } finally {
+      await page.send('Fetch.disable');
+    }
+    const r = await page.evaluate(`(() => {
+      const chip = document.getElementById('kill-chip');
+      const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+      return { text: chip.innerText.trim(), icon: !!chip.querySelector('svg use[href="#i-power"]'), color: getComputedStyle(chip).color,
+        muted: probe('var(--muted)'), alert: probe('var(--alert)'), alertBg: probe('var(--alert-bg)'), bg: getComputedStyle(chip).backgroundColor };
+    })()`);
+    assert.equal(r.text, 'Factory off');
+    assert.ok(r.icon, 'keeps the power icon');
+    assert.equal(r.color, r.muted, 'neutral grey text');
+    assert.notEqual(r.color, r.alert);
+    assert.notEqual(r.bg, r.alertBg);
+    // Back to the untouched sample for the remaining checks.
+    await page.navigate(`${server.url}index.html?fixture=1`);
+    await page.waitFor(READY_EXPR, { timeoutMs: 30000 });
   });
 
   test('the console stays clean', () => {

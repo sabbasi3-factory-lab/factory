@@ -1,0 +1,132 @@
+name: audit-verify
+
+# Independent audit-chain verifier (DESIGN §11). Plain code, no AI, no App key: this repo's own
+# GITHUB_TOKEN. Hourly, it reads the WHOLE `audit` branch of chrono-node-rs (public) from git
+# objects, verifies every event and the hash chain from genesis, checks the log against every
+# anchor on this repo's append-only `anchors` branch, then appends one anchor. The anchors branch
+# has a no-bypass ruleset (no deletion, no non-fast-forward), and the verifier rejects any commit
+# that edits instead of appends. The product repo's controller App is not installed on this repo,
+# so it can't touch the anchors, this code or this workflow.
+#
+# A failed run is the alert of record (and the heartbeat watchdog alerts when this workflow
+# hasn't succeeded for 26 h). Creating the anchors branch needs a manual run with bootstrap=true;
+# a scheduled run never creates it, so a missing branch always fails.
+#
+# GitHub disables scheduled workflows in public repos after 60 days without repository activity;
+# the watchdog's "verifier stale" alert covers that.
+
+on:
+  schedule:
+    - cron: "47 * * * *"
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "Create the anchors branch (first run only)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: audit-verify
+  cancel-in-progress: false
+
+env:
+  SOURCE_URL: https://github.com/sabbasi3-factory-lab/chrono-node-rs.git
+
+jobs:
+  verify:
+    if: github.repository == 'sabbasi3-factory-lab/factory' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main (the verifier code)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Verifier unit tests
+        run: node --test "verifier/test/*.test.mjs"
+
+      # ls-remote: exit 0 = found, 2 = no such branch; anything else (network, auth) fails the run.
+      - name: Fetch the audit branch (git objects only)
+        id: audit
+        run: |
+          src="$RUNNER_TEMP/audit-src"
+          git init -q "$src"
+          set +e
+          git ls-remote --exit-code --heads "$SOURCE_URL" audit > /dev/null
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              git -C "$src" fetch -q --no-tags "$SOURCE_URL" +refs/heads/audit:refs/heads/audit
+              echo "head=$(git -C "$src" rev-parse refs/heads/audit)" >> "$GITHUB_OUTPUT"
+              ;;
+            2) echo "no audit branch" ;;
+            *) echo "::error::git ls-remote failed (exit $rc)"; exit 1 ;;
+          esac
+          echo "dir=$src" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the anchors branch (full history)
+        id: anchors
+        run: |
+          dst="$RUNNER_TEMP/anchors-src"
+          git init -q "$dst"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$url" anchors > /dev/null
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              git -C "$dst" fetch -q --no-tags "$url" +refs/heads/anchors:refs/heads/anchors
+              echo "ref=refs/heads/anchors" >> "$GITHUB_OUTPUT"
+              ;;
+            2) echo "no anchors branch" ;;
+            *) echo "::error::git ls-remote failed (exit $rc)"; exit 1 ;;
+          esac
+          echo "dir=$dst" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the whole log against every anchor
+        env:
+          AUDIT_HEAD: ${{ steps.audit.outputs.head }}
+          AUDIT_GIT_DIR: ${{ steps.audit.outputs.dir }}
+          ANCHORS_REF: ${{ steps.anchors.outputs.ref }}
+          ANCHORS_GIT_DIR: ${{ steps.anchors.outputs.dir }}
+          BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap && 'true' || 'false' }}
+          NEXT_FILE: ${{ runner.temp }}/anchors-next.jsonl
+        run: node verifier/verify.mjs
+
+      # Fast-forward only (no --force); the ruleset rejects anything else anyway.
+      - name: Append the anchor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANCHORS_REF: ${{ steps.anchors.outputs.ref }}
+          ANCHORS_GIT_DIR: ${{ steps.anchors.outputs.dir }}
+          NEXT_FILE: ${{ runner.temp }}/anchors-next.jsonl
+        run: |
+          wt="$RUNNER_TEMP/anchors-wt"
+          git init -q "$wt"
+          cd "$wt"
+          if [ -n "$ANCHORS_REF" ]; then
+            git fetch -q "$ANCHORS_GIT_DIR" "$ANCHORS_REF"
+            git checkout -q -b anchors FETCH_HEAD
+          else
+            git checkout -q --orphan anchors
+          fi
+          mkdir -p anchors
+          cp "$NEXT_FILE" anchors/chrono-node-rs.jsonl
+          git add anchors/chrono-node-rs.jsonl
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "anchor: run ${GITHUB_RUN_ID}"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            push -q "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/anchors

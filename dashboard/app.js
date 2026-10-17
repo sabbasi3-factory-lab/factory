@@ -2,9 +2,10 @@
 // and renders the panels. All DOM writes use textContent or createElement(NS), never
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
-  DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, canonicalize, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths, deriveMetrics,
-  existingDayPaths, formatAge, formatDuration, healthSummary, parseJsonl, parseTime, pipeline, prRef, shortTitle, sparkSegments, stageBreakdown,
-  statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay, verifyChain,
+  DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorsPerDay, canonicalize, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths,
+  deriveMetrics, existingDayPaths, formatAge, formatDuration, healthSummary, parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
+  VERIFIER_LIMITS, heartbeatTile, sparkSegments, stageBreakdown, statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay,
+  verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -27,6 +28,16 @@ const PR_MIN_AGE_MS = 5 * 60000;
 const PR_MAX_AGE_MS = 15 * 60000;
 const PR_RETRY_MS = 60000;
 const PR_STALE_MS = 20 * 60000; // older than this, PR state counts as unknown
+// Independent verifier: the audit-verify workflow appends an anchor line per successful
+// verification to this file. It's read from raw.githubusercontent.com (outside the API
+// limit) at most every 5 min. Until the branch exists, one API call at most every 15 min
+// checks for it instead, so the page doesn't keep logging 404s for the raw file.
+const ANCHORS_BRANCH = 'anchors';
+const ANCHORS_PATH = 'anchors/chrono-node-rs.jsonl';
+const ANCHORS_FIXTURE_URL = 'test/fixtures/anchors.jsonl';
+const VERIFIER_MIN_MS = 5 * 60000;
+const VERIFIER_PROBE_MS = 15 * 60000;
+const VERIFIER_RETRY_MS = 60000;
 
 const params = new URLSearchParams(location.search);
 const FIXTURE = params.get('fixture') === '1';
@@ -60,6 +71,8 @@ const state = {
   renderedVersion: -1,
   prs: { fetchedAt: null, lastOk: false, error: null, lists: new Map() }, // repo -> { etag, prs }
   prsKnownRendered: null,
+  // status: 'pending' | 'ok' | 'missing' | 'error'; branchSeen skips the API probe once the branch exists.
+  verifier: { status: 'pending', text: null, detail: null, attemptedAt: null, branchSeen: false },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -403,6 +416,59 @@ function openPrSet() {
   return prsKnown() ? new Set((state.prs.lists.get(REPO)?.prs ?? []).map((p) => p.number)) : null;
 }
 
+// True if the anchors branch exists; one API call (matching-refs answers 200 with [] when
+// it doesn't, so nothing is logged as an error).
+async function anchorsBranchExists() {
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/repos/${FACTORY_REPO}/git/matching-refs/heads/${ANCHORS_BRANCH}`, {
+    headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+  });
+  readRate(res);
+  if (!res.ok) throw new Error(`anchors branch check: HTTP ${res.status}`);
+  const refs = await res.json();
+  if (!Array.isArray(refs)) throw new Error('anchors branch check: unexpected response');
+  return refs.some((r) => r?.ref === `refs/heads/${ANCHORS_BRANCH}`);
+}
+
+// Never throws: a problem here only changes the verifier chip, not the page status.
+async function maybeRefreshVerifier() {
+  const v = state.verifier;
+  const wait = v.status === 'missing' ? VERIFIER_PROBE_MS : v.status === 'error' && v.branchSeen ? VERIFIER_RETRY_MS : VERIFIER_MIN_MS;
+  if (v.attemptedAt != null && Date.now() - v.attemptedAt < wait) return;
+  const set = (status, { text = null, detail = null } = {}) => Object.assign(v, { status, text, detail });
+  try {
+    if (FIXTURE) {
+      v.attemptedAt = Date.now();
+      const res = await fetch(ANCHORS_FIXTURE_URL, { cache: 'no-store' });
+      if (!res.ok) set('error', { detail: `HTTP ${res.status}` });
+      else set('ok', { text: await res.text() });
+      return;
+    }
+    if (!v.branchSeen) {
+      if (state.rate && state.rate.remaining < 2) return; // try again on a later tick
+      v.attemptedAt = Date.now();
+      if (!(await anchorsBranchExists())) {
+        set('missing');
+        return;
+      }
+      v.branchSeen = true;
+    }
+    v.attemptedAt = Date.now();
+    const res = await fetch(`${RAW}/${FACTORY_REPO}/${ANCHORS_BRANCH}/${ANCHORS_PATH}`, {
+      cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+    });
+    if (res.status === 404) {
+      v.branchSeen = false;
+      set('missing');
+    } else if (!res.ok) set('error', { detail: `HTTP ${res.status}` });
+    else set('ok', { text: await res.text() });
+  } catch (err) {
+    set('error', { detail: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 async function tick() {
   clearTimeout(state.timer);
   if (state.busy) return;
@@ -411,6 +477,7 @@ async function tick() {
   try {
     if (FIXTURE) {
       if (!state.loaded) await loadFixture();
+      await maybeRefreshVerifier();
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
@@ -419,6 +486,7 @@ async function tick() {
         delayS = await pollGitHub();
       } finally {
         await maybeRefreshPrs(state.headSha !== headBefore);
+        await maybeRefreshVerifier();
       }
     }
     state.error = null;
@@ -638,13 +706,15 @@ function initTips() {
 // ---------------------------------------------------------------------------
 // Header: one glance line (health, needs you, kill switch, dry run)
 
-const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info' };
-const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot' };
-const LEVEL_WORD = { ok: 'ok', warn: 'warning', alert: 'alert', info: 'checking' };
+// "loading" is neutral on purpose: before the first load nothing is known to be wrong.
+const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info', loading: 'muted' };
+const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot', loading: null };
+const LEVEL_WORD = { ok: 'ok', warn: 'warning', alert: 'alert', info: 'checking', loading: 'loading' };
 const HEALTH_RULE = 'Healthy: fresh data, verified chain, heartbeat within '
-  + `${DEFAULTS.heartbeatWarnMin} min.\nDegraded: last refresh failed, data over ${STALE_DATA_MIN} min old, `
-  + `heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min) or chain not verified.\nDown: no audit log, broken chain, `
-  + `or heartbeat missing or over ${DEFAULTS.heartbeatAlertMin} min.`;
+  + `${DEFAULTS.heartbeatWarnMin} min, verifier anchor within ${VERIFIER_LIMITS.warnMin / 60} h.\nDegraded: last refresh failed, data over ${STALE_DATA_MIN} min old, `
+  + `heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min), chain not verified, verifier late (over ${VERIFIER_LIMITS.warnMin / 60} h) or not set up.\n`
+  + `Down: no audit log, broken chain, heartbeat missing or over ${DEFAULTS.heartbeatAlertMin} min, `
+  + `verifier over ${VERIFIER_LIMITS.alertMin / 60} h or unreadable.`;
 
 function setStatus(text) {
   const el = $('status');
@@ -665,7 +735,8 @@ function renderHeader(m, needs) {
   const chain = state.chain;
   const hb = m?.heartbeat ?? null;
   const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
-  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin });
+  const verifier = verifierStatus(state.verifier, now());
+  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin, verifier });
   const detail = statusSummary({
     loaded: state.loaded, noLog: state.noLog, error: state.error, fixture: FIXTURE,
     eventCount: state.events.length, headSha: state.headSha, days: DAYS, heartbeat: hb,
@@ -675,12 +746,13 @@ function renderHeader(m, needs) {
       ? `Chain verified: ${chain.total} event${chain.total === 1 ? '' : 's'}, ${chain.windowStart === 'genesis' ? 'back to the first event of the log' : 'every hash and parent link in the window'}`
       : `Chain broken at event ${chain.brokenAt} (${chain.brokenSource}: ${chain.brokenReason})`;
   setChip('health', {
-    tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.label,
-    tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine, '', HEALTH_RULE].join('\n'),
+    tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.level === 'loading' ? `… ${health.label}` : health.label,
+    tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine,
+      ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE].join('\n'),
   });
   setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
 
-  if (needs) {
+  if (needs && (state.loaded || state.error)) {
     const n = needs.items.length;
     const reviews = needs.items.filter((it) => it.kind === 'review').length;
     const unknown = needs.rs === 'unavailable';
@@ -696,9 +768,12 @@ function renderHeader(m, needs) {
     setChip('needs-link', { hidden: true });
   }
 
+  renderVerifierLine(verifier);
+
   const enabled = m?.killSwitch?.enabled ?? null;
   setChip('kill-chip', {
-    hidden: enabled == null, tone: enabled ? 'ok' : 'alert', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
+    // Off is the deliberate, safe state: neutral grey, not red (red means Down).
+    hidden: enabled == null, tone: enabled ? 'ok' : 'muted', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
     tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${m.killSwitch.at})` : ''}; off means no new dispatches`,
   });
   const dryRun = m?.dryRun ?? null;
@@ -732,6 +807,13 @@ function renderHeader(m, needs) {
   $('kpi-days').textContent = String(DAYS);
 }
 
+// The independent verifier has no chip of its own: it's part of the health chip (and
+// its tooltip) and the "Verified" tile. The audit-log section keeps a muted detail line.
+function renderVerifierLine(v) {
+  const line = $('verifier-line');
+  if (line.textContent !== v.line) line.textContent = v.line;
+}
+
 // ---------------------------------------------------------------------------
 // KPI tiles: label, big number, trend line; everything else is in the tile's tooltip
 
@@ -743,6 +825,7 @@ const FORMATS = {
 };
 
 function kpi({ title, iconName, value, unit = null, level = null, tipText, spark }) {
+  if (level === 'loading') level = null; // neutral "…" until the first load
   const el = h('article', { class: `panel kpi${level ? ` kpi--${level}` : ''}` },
     h('h3', { class: 'kpi-t' }, icon(iconName), title),
     h('p', { class: 'kpi-v' },
@@ -753,13 +836,25 @@ function kpi({ title, iconName, value, unit = null, level = null, tipText, spark
   return tip(el, tipText);
 }
 
+function verifiedTile() {
+  const v = verifierStatus(state.verifier, now());
+  const parsed = state.verifier.status === 'ok' ? parseAnchors(state.verifier.text) : null;
+  const perDay = anchorsPerDay(parsed && !parsed.problem ? parsed.anchors : [], { now: now(), days: DAYS });
+  return {
+    title: 'Verified', iconName: 'shield', value: v.level === 'info' ? '…' : v.ageMin == null ? '—' : compactAge(v.ageMin * 60000),
+    level: v.level === 'info' ? null : v.level,
+    tipText: `${verifierReason(v)}\n${v.line}\nIndependent audit-verify run: green up to ${VERIFIER_LIMITS.warnMin / 60} h, amber after, red after ${VERIFIER_LIMITS.alertMin / 60} h or if the anchors file is unreadable\nTrend counts anchors per day (24 expected)`,
+    spark: { values: perDay.counts, days: perDay.days, label: 'Verifier anchors per day (24 expected)', tone: 'green', fmt: 'n' },
+  };
+}
+
 function renderKpis(m) {
   const s = dailySeries(state.events, { now: now(), days: DAYS });
   const zt = m.zeroTouch;
   const hb = m.heartbeat;
   const aic = m.aicToday;
   const mergedWeek = s.merged.reduce((a, b) => a + b, 0);
-  const hbLevel = hb.level === 'ok' ? 'ok' : hb.level === 'warn' ? 'warn' : 'alert';
+  const hbTile = heartbeatTile(hb, state.loaded);
   const hbIso = hb.at ? ` (${hb.at})` : '';
   const tiles = [
     {
@@ -789,11 +884,12 @@ function renderKpis(m) {
       spark: { values: s.mergeMedianMin, days: s.days, label: 'Median time to merge, by day', tone: 'blue', fmt: 'dur' },
     },
     {
-      title: 'Heartbeat', iconName: 'pulse', value: hb.ageMin == null ? '—' : compactAge(hb.ageMin * 60000), level: hbLevel,
+      title: 'Heartbeat', iconName: 'pulse', value: hbTile.value, level: hbTile.level,
       tipText: `${hb.ageMin == null ? `No heartbeat in the last ${DAYS} days` : `Last heartbeat ${formatAge(hb.ageMin)} ago${hbIso}`}\nGreen up to ${DEFAULTS.heartbeatWarnMin} min, amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min\nTrend counts heartbeats per day (24 expected)`,
       spark: { values: s.heartbeats, days: s.days, label: 'Heartbeats per day (24 expected)', tone: 'green', fmt: 'n' },
     },
   ];
+  tiles.push(verifiedTile());
   for (const t of tiles) t.tipText += `\nTrend: last ${DAYS} UTC days`;
   // Rebuild only when something shown changed, so focus and an open tooltip stay put.
   const sig = JSON.stringify(tiles);
@@ -863,6 +959,11 @@ function needsRow(it) {
 function renderNeeds(m, view = needsView(m)) {
   const cap = DEFAULTS.humanQueueMax;
   const { rs, items } = view;
+  if (!state.loaded && !state.error) {
+    $('needs-panel').classList.remove('needs--clear');
+    replaceSection('needs', h('p', { class: 'needs-note' }, '… Loading'));
+    return;
+  }
   setTip('needs-info', [
     'Needs-human items, stale contracts and human-tier PRs waiting for your review, oldest first.',
     'Review items: open, non-draft PRs in either repo whose body says "Tier: human" or "Tier: owner", or with an owner-review, human-tier or needs-human label.',

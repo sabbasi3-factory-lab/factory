@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read # newest successful audit-verify run
       contents: read
       issues: write
     steps:

@@ -155,6 +155,7 @@
       <details id="events-fold" class="panel fold">
         <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="events-h">Audit log</span> <span class="muted" id="events-sum"></span></summary>
         <div class="fold-body">
+          <p class="hint verifier-line" id="verifier-line">Independent verifier: checking…</p>
           <div class="field">
             <label for="type-filter">Type</label>
             <select id="type-filter"></select>
@@ -168,7 +169,7 @@
   <footer class="foot wrap">
     <svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>
     <span>Read-only · verified in your browser</span>
-    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser. Add ?fixture=1 to the address to see sample data.</span></button>
+    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser, and an independent verifier re-checks the whole log every hour (its anchors file is read from raw.githubusercontent.com). Add ?fixture=1 to the address to see sample data.</span></button>
   </footer>
 
   <div id="tip" class="tip" aria-hidden="true" hidden></div>

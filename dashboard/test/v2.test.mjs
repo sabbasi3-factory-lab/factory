@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  HEALTH_LABELS, PIPELINE_LANES, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths,
+  HEALTH_LABELS, PIPELINE_LANES, anchorsPerDay, canonicalize, combineNeedsYou, compactAge, heartbeatTile, verifierReason, verifierStatus, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths,
   healthSummary, isHumanTierPr, parseJsonl, prRef, reviewItems, shortTitle, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha,
   stageBreakdown, typicalRunMs,
 } from '../lib.js';
@@ -83,6 +83,18 @@ test('pipeline: dry-run decisions never move a card; cancelled removes it', () =
   assert.deepEqual(ready.map((c) => c.label), ['t/a']);
   assert.deepEqual(ready[0].tags.map((t) => t.text), ['dry-run plan']);
   assert.equal(lanes.find((l) => l.key === 'running').cards.length, 0);
+});
+
+test('pipeline: a delayed completion after cancellation keeps the card out; a reopening event brings it back', () => {
+  const base = [
+    mk('dispatched', '2026-10-16T08:05:00Z', { task: 't/c', issue: 3, attempt: 1 }),
+    mk('cancelled', '2026-10-16T08:10:00Z', { task: 't/c', issue: 3, effect: 'close', reason: 'owner' }),
+    mk('run_finished', '2026-10-16T09:00:00Z', { task: 't/c', issue: 3, attempt: 1, aic: 40 }),
+    mk('run_started', '2026-10-16T09:01:00Z', { task: 't/c', issue: 3, attempt: 1 }),
+  ];
+  assert.equal(pipeline(base).total, 0);
+  const reopened = pipeline([...base, mk('dispatched', '2026-10-16T10:00:00Z', { task: 't/c', issue: 3, attempt: 2 })]);
+  assert.deepEqual(reopened.lanes.find((l) => l.key === 'running').cards.map((c) => [c.label, c.attempt]), [['t/c', 2]]);
 });
 
 test('stage breakdown: stacked segments per task and the stage with the largest share', () => {
@@ -336,8 +348,7 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.equal(both.level, 'alert');
   assert.deepEqual(both.reasons, ['Chain broken at event 3', 'Heartbeat late (75 min)']);
 
-  assert.deepEqual(healthSummary({ loaded: false }), { level: 'info', label: 'Checking', reasons: ['Loading the audit log'] });
-  assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Checking']);
+  assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading']);
 });
 
 test('compact ages are one token; short titles keep at most N words; refs are repo-prefixed off the home repo', () => {
@@ -362,4 +373,72 @@ test('compact ages are one token; short titles keep at most N words; refs are re
   assert.equal(prRef(home, 22, home), '#22');
   assert.equal(prRef('sabbasi3-factory-lab/factory', 3, home), 'factory#3');
   assert.equal(prRef(home, null, home), '—');
+});
+
+test('not loaded yet is neutral: the health chip says Loading and the heartbeat tile "…", never red', () => {
+  // Before the first load there are no events, so the raw heartbeat level is "none" (an alert).
+  const hb = deriveMetrics([], { now: at(FIXTURE_NOW) }).heartbeat;
+  assert.equal(hb.level, 'none');
+  assert.deepEqual(heartbeatTile(hb, false), { level: 'loading', value: '…' });
+  assert.deepEqual(healthSummary({ loaded: false, heartbeat: hb, chain: null }), { level: 'loading', label: 'Loading', reasons: ['Loading the audit log'] });
+  // Even a stale verifier doesn't turn the loading state red; a real failure does.
+  const stale = { level: 'alert', reason: 'verifier-stale', ageMin: 30 * 60, count: 3 };
+  assert.equal(healthSummary({ loaded: false, verifier: stale }).level, 'loading');
+  assert.equal(healthSummary({ loaded: false, error: 'offline' }).level, 'alert');
+  // After the load: real levels, and a missing heartbeat is an alert.
+  assert.deepEqual(heartbeatTile(hb, true), { level: 'alert', value: '—' });
+  const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
+  assert.deepEqual(heartbeatTile(m.heartbeat, true), { level: 'ok', value: '11m' });
+  const late = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 70 * 60000 }).heartbeat;
+  assert.deepEqual(heartbeatTile(late, true), { level: 'warn', value: '1h' });
+});
+
+test('health chip folds in the verifier: stale or unknown is Down, late or not set up is Degraded', () => {
+  const NOW = at('2026-10-17T06:00:00Z');
+  const line = (min, n = 41) => canonicalize({
+    at: new Date(NOW - min * 60000).toISOString().replace(/\.\d{3}Z$/, 'Z'), audit_head: 'a'.repeat(40), events: n,
+    last_sha: 'sha256:' + 'e'.repeat(64), run_id: 7, source: 'sabbasi3-factory-lab/chrono-node-rs', v: 1,
+  });
+  const v = (fetched) => verifierStatus(fetched, NOW);
+  const fresh = v({ status: 'ok', text: `${line(30, 40)}\n${line(23)}\n` });
+  const lateV = v({ status: 'ok', text: `${line(150)}\n` });
+  const staleV = v({ status: 'ok', text: `${line(27 * 60)}\n` });
+  const missing = v({ status: 'missing' });
+  const unreadable = v({ status: 'error', detail: 'HTTP 500' });
+  const malformed = v({ status: 'ok', text: '{not json\n' });
+  const future = v({ status: 'ok', text: `${line(-10)}\n` });
+  const outOfOrder = v({ status: 'ok', text: `${line(20, 50)}\n${line(10, 40)}\n` });
+
+  assert.equal(verifierReason(fresh), 'Verified 23m ago · 2 anchors');
+  assert.equal(verifierReason(lateV), 'Verified 2h ago · 1 anchor');
+  assert.equal(verifierReason(missing), 'Verifier not set up');
+  assert.match(verifierReason(unreadable), /^Verifier unknown: couldn't read the anchors file: HTTP 500$/);
+  assert.equal(verifierReason(v({ status: 'pending' })), 'Verifier: checking');
+
+  const verifiedChain = { status: 'verified', total: 46 };
+  const hb = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) }).heartbeat;
+  const health = (verifier) => healthSummary({ loaded: true, chain: verifiedChain, heartbeat: hb, dataAgeMin: 1, verifier });
+  assert.deepEqual(health(fresh), { level: 'ok', label: 'Healthy', reasons: [] });
+  assert.deepEqual(health(lateV), { level: 'warn', label: 'Degraded', reasons: ['Verified 2h ago · 1 anchor'] });
+  assert.deepEqual(health(missing), { level: 'warn', label: 'Degraded', reasons: ['Verifier not set up'] });
+  for (const bad of [staleV, unreadable, malformed, future, outOfOrder]) {
+    const r = health(bad);
+    assert.equal(r.level, 'alert', JSON.stringify(bad));
+    assert.equal(r.label, 'Down');
+    assert.equal(r.reasons.length, 1);
+  }
+  assert.equal(health(staleV).reasons[0], 'Verified 27h ago · 1 anchor');
+  assert.match(health(malformed).reasons[0], /^Verifier unknown: anchor line 1: invalid JSON$/);
+  // Still being checked, or left out: no effect either way.
+  assert.equal(health(v({ status: 'pending' })).level, 'ok');
+  assert.equal(health(null).level, 'ok');
+});
+
+test('anchors per day: counts per UTC day over the window, ignoring anchors outside it', () => {
+  const now = at('2026-10-16T12:00:00Z');
+  const a = (t) => ({ at: t });
+  const r = anchorsPerDay([a('2026-10-09T23:00:00Z'), a('2026-10-15T01:00:00Z'), a('2026-10-16T00:00:00Z'), a('2026-10-16T11:00:00Z'), a('bad')], { now, days: 3 });
+  assert.deepEqual(r.days, ['2026-10-14', '2026-10-15', '2026-10-16']);
+  assert.deepEqual(r.counts, [0, 1, 2]);
+  assert.deepEqual(anchorsPerDay([], { now, days: 2 }).counts, [0, 0]);
 });
