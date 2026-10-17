@@ -10,6 +10,8 @@ export const DEFAULTS = Object.freeze({
   heartbeatWarnMin: 70,
   heartbeatAlertMin: 120, // DESIGN §11: alert after 2 h without a heartbeat
   windowDays: 7,
+  perTaskAic: 1000, // policies/budgets.yaml per_task.max_aic
+  humanQueueMax: 5, // policies/limits.yaml human_queue.max_items
 });
 
 // Task stages in DESIGN §7 order, up to deployed.
@@ -174,6 +176,15 @@ export function dayPaths(now, days = DEFAULTS.windowDays) {
   return out;
 }
 
+/**
+ * Keeps only the wanted day-file paths that exist, given the entries of a recursive
+ * git tree listing of `audit/` (paths relative to it, like "2026/10/16.jsonl").
+ */
+export function existingDayPaths(treeEntries, wanted) {
+  const have = new Set((treeEntries || []).filter((t) => t && t.type === 'blob' && typeof t.path === 'string').map((t) => `audit/${t.path}`));
+  return wanted.filter((p) => have.has(p));
+}
+
 export function parseTime(value) {
   if (typeof value !== 'string') return null;
   const ms = Date.parse(value);
@@ -255,6 +266,75 @@ export function statusSummary({ loaded = false, noLog = false, error = null, fix
   else [hb, hbLevel] = ['controller heartbeat unknown', 'warn'];
 
   return { text: `${data} · ${hb}`, level: LEVEL_RANK[hbLevel] > LEVEL_RANK[dataLevel] ? hbLevel : dataLevel };
+}
+
+// ---------------------------------------------------------------------------
+// Glance view: one health word, compact ages, short titles
+
+export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', info: 'Checking' });
+export const STALE_DATA_MIN = 10; // live data older than this is not fresh
+
+/**
+ * The single health chip, from data freshness, the controller heartbeat and the chain check.
+ * Returns { level, label, reasons } with level "ok" (Healthy), "warn" (Degraded), "alert"
+ * (Down) or "info" (Checking: nothing loaded yet). The worst condition wins:
+ *
+ * - Down: no audit log; nothing loaded because of an error; the chain is broken; the
+ *   heartbeat is missing from the window or stale (over 120 min).
+ * - Degraded: the last refresh failed, so older data is shown; the data is over
+ *   10 min old (`dataAgeMin`); the heartbeat is late (over 70 min) or unknown; the chain
+ *   isn't verified (not loaded or empty).
+ * - Healthy: fresh data, a verified chain and a heartbeat within 70 min.
+ *
+ * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
+ */
+export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null } = {}) {
+  if (!loaded && !error) return { level: 'info', label: HEALTH_LABELS.info, reasons: ['Loading the audit log'] };
+  const found = [];
+  const add = (level, text) => found.push({ level, text });
+  if (noLog) add('alert', 'No audit log yet');
+  if (error) add(loaded ? 'warn' : 'alert', `${loaded ? 'Last refresh failed' : "Couldn't load the audit log"}: ${error}`);
+  if (!error && isNum(dataAgeMin) && dataAgeMin > STALE_DATA_MIN) add('warn', `Data is ${formatAge(dataAgeMin)} old`);
+  if (loaded && !noLog) {
+    if (chain?.status === 'broken') add('alert', `Chain broken at event ${chain.brokenAt}`);
+    else if (chain?.status !== 'verified') add('warn', 'Chain not verified');
+    const level = heartbeat?.level ?? 'unknown';
+    if (level === 'alert') add('alert', `Heartbeat stale (${formatAge(heartbeat.ageMin)})`);
+    else if (level === 'none') add('alert', 'No heartbeat in the window');
+    else if (level === 'warn') add('warn', `Heartbeat late (${formatAge(heartbeat.ageMin)})`);
+    else if (level !== 'ok') add('warn', 'Heartbeat unknown');
+  }
+  const worst = found.reduce((a, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[a] ? f.level : a), 'ok');
+  const reasons = found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]).map((f) => f.text);
+  return { level: worst, label: HEALTH_LABELS[worst], reasons };
+}
+
+/** One-token age: "45s", "12m", "7h", "3d"; "—" when unknown. */
+export function compactAge(ms) {
+  if (!isNum(ms) || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** At most `maxWords` whitespace-separated words (and 48 characters), with "…" when cut. */
+export function shortTitle(text, maxWords = 5, maxChars = 48) {
+  const words = String(text ?? '').trim().split(/\s+/).filter(Boolean);
+  let out = words.slice(0, maxWords).join(' ');
+  let cut = words.length > maxWords;
+  if (out.length > maxChars) {
+    out = out.slice(0, maxChars - 1).trimEnd();
+    cut = true;
+  }
+  return cut ? `${out.replace(/[\s,.;:–-]+$/, '')}…` : out;
+}
+
+/** "#22" for a PR in the home repo, "factory#3" for one elsewhere. */
+export function prRef(repo, number, homeRepo) {
+  if (!isNum(number)) return '—';
+  return repo && repo !== homeRepo ? `${String(repo).split('/').pop()}#${number}` : `#${number}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -661,4 +741,417 @@ export function timelineFor(events, subjectKey) {
     prev = ms;
   }
   return out;
+}
+
+/**
+ * Sparkline geometry: every valid point gets a marker; lines join only consecutive
+ * valid points, so a gap (null) is never bridged.
+ */
+export function sparkSegments(values) {
+  const points = [];
+  const segments = [];
+  let run = [];
+  (values || []).forEach((v, i) => {
+    if (isNum(v)) {
+      points.push({ i, v });
+      run.push({ i, v });
+    } else {
+      if (run.length > 1) segments.push(run);
+      run = [];
+    }
+  });
+  if (run.length > 1) segments.push(run);
+  return { points, segments };
+}
+
+// ---------------------------------------------------------------------------
+// v2 views: short SHAs, 7-day series, pipeline lanes, stage and cost charts
+
+/** First 7 characters of a hex SHA; anything else is returned unchanged. */
+export function shortSha(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8,64}$/i.test(value) ? value.slice(0, 7) : value;
+}
+
+function median(values) {
+  const v = values.filter(isNum).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+/**
+ * Per-UTC-day series for the KPI trend lines, oldest day first. Rates are null on days
+ * with nothing to measure, so a trend line shows a gap instead of a fake zero.
+ */
+export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
+  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
+  const labels = [];
+  for (let i = days - 1; i >= 0; i--) labels.push(utcDay(end - i * 86400000));
+  const index = new Map(labels.map((d, i) => [d, i]));
+  const zeros = () => labels.map(() => 0);
+  const dayOf = (ms) => (ms == null ? null : index.get(utcDay(ms)) ?? null);
+
+  const prTask = prTaskMap(events);
+  const merged = zeros();
+  const aic = zeros();
+  const heartbeats = zeros();
+  const checksPassed = zeros();
+  const checksTotal = zeros();
+  const mergeMinutes = labels.map(() => []);
+  const factoryMerged = zeros();
+  const factoryMergedPrs = labels.map(() => []);
+  const opened = new Map();
+  const touched = new Set();
+
+  for (const ev of events) {
+    const p = ev.payload || {};
+    if (ev.type === 'human_action' && isNum(p.pr)) touched.add(p.pr);
+    if (ev.type === 'pr_opened' && isNum(p.pr) && !opened.has(p.pr)) opened.set(p.pr, eventTime(ev));
+  }
+  for (const ev of events) {
+    const p = ev.payload || {};
+    const d = dayOf(ev.type === 'run_finished' || ev.type === 'heartbeat' ? parseTime(ev.timestamp) : eventTime(ev));
+    if (d == null) continue;
+    switch (ev.type) {
+      case 'merged': {
+        merged[d]++;
+        const at = eventTime(ev);
+        if (isNum(p.pr) && opened.get(p.pr) != null && at != null) mergeMinutes[d].push((at - opened.get(p.pr)) / 60000);
+        if (isStr(p.task) || prTask.has(p.pr)) {
+          factoryMerged[d]++;
+          factoryMergedPrs[d].push(p.pr);
+        }
+        break;
+      }
+      case 'run_finished':
+        if (isNum(p.aic)) aic[d] += p.aic;
+        break;
+      case 'heartbeat':
+        heartbeats[d]++;
+        break;
+      case 'check_result':
+        checksTotal[d]++;
+        if (p.conclusion === 'success') checksPassed[d]++;
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Zero-touch is cumulative across the window, so each point is "rate so far".
+  const zeroTouchPct = [];
+  let fm = 0;
+  let untouched = 0;
+  for (let i = 0; i < labels.length; i++) {
+    fm += factoryMerged[i];
+    untouched += factoryMergedPrs[i].filter((pr) => !touched.has(pr)).length;
+    zeroTouchPct.push(fm ? (untouched / fm) * 100 : null);
+  }
+  const passed = checksPassed.reduce((a, b) => a + b, 0);
+  const total = checksTotal.reduce((a, b) => a + b, 0);
+  return {
+    days: labels,
+    merged,
+    aic,
+    heartbeats,
+    checksPassPct: checksTotal.map((t, i) => (t ? (checksPassed[i] / t) * 100 : null)),
+    checks: { passed, total, pct: total ? (passed / total) * 100 : null },
+    mergeMedianMin: mergeMinutes.map(median),
+    mergeMedianAllMin: median(mergeMinutes.flat()),
+    zeroTouchPct,
+  };
+}
+
+export const PIPELINE_LANES = Object.freeze([
+  { key: 'ready', label: 'Ready' },
+  { key: 'running', label: 'Running' },
+  { key: 'pr-open', label: 'PR open' },
+  { key: 'checks', label: 'Checks' },
+  { key: 'queued', label: 'Merge queue' },
+  { key: 'merged', label: 'Merged' },
+  { key: 'deployed', label: 'Deployed' },
+]);
+
+const LANE_OF = {
+  ready: 'ready',
+  picked: 'running',
+  dispatched: 'running',
+  run_started: 'running',
+  repair_dispatched: 'running',
+  run_finished: 'running',
+  pr_opened: 'pr-open',
+  check_result: 'checks',
+  queued: 'queued',
+  dequeued: 'pr-open',
+  merged: 'merged',
+  deployed: 'deployed',
+  accepted: 'deployed',
+};
+const SIDE_STATE = { needs_human: 'needs human', stale_contract: 'stale contract', blocked: 'blocked' };
+const DONE_LANES = new Set(['merged', 'deployed']);
+
+const PR_LANES = new Set(['pr-open', 'checks', 'queued']);
+const LANE_RANK = { ready: 0, running: 1, 'pr-open': 2, checks: 3, queued: 4, merged: 5, deployed: 6 };
+// Records of something that already happened (the daily collector may append run_finished
+// hours later); they may move a card forward but never back.
+const RECORD_ONLY = new Set(['run_started', 'run_finished']);
+// After a merge, only real new work moves a card back: a new attempt, a new PR, re-admission.
+const REOPENS = new Set(['ready', 'picked', 'dispatched', 'repair_dispatched', 'pr_opened']);
+const CHECK_OK = new Set(['success', 'neutral', 'skipped']);
+
+/** Whether an event of `type` may move a card from lane `from` to lane `to`. */
+function laneMoveAllowed(type, from, to) {
+  if (from == null || from === to || LANE_RANK[to] >= LANE_RANK[from]) return true;
+  if (RECORD_ONLY.has(type)) return false;
+  if (DONE_LANES.has(from)) return REOPENS.has(type);
+  return true;
+}
+
+/**
+ * One card per task (or per PR that has no task) in the lane of its latest stage.
+ * v1 has no "closed" event, so `openPrs` (a Set of PR numbers that are open on GitHub
+ * right now) decides PR lanes: a card in PR open, Checks or Merge queue stays only if one
+ * of its PRs is open; otherwise it's counted in `closed`. Without `openPrs` (the list
+ * couldn't be fetched) cards stay, and those lanes are flagged `prStateUnknown`.
+ * Side states (needs-human, stale contract, blocked) become tags on the card; dry-run
+ * decisions never move a card, because nothing was launched.
+ */
+export function pipeline(events, { openPrs = null } = {}) {
+  const prTask = prTaskMap(events);
+  const cards = new Map();
+  const card = (key) => {
+    if (!cards.has(key)) {
+      cards.set(key, {
+        key,
+        kind: key.startsWith('task:') ? 'task' : 'pr',
+        label: key.startsWith('task:') ? key.slice(5) : `PR #${key.slice(3)}`,
+        issue: null, prs: [], lane: null, enteredAt: null, attempt: null, model: null, workflow: null,
+        side: null, checkHead: null, oldHeads: new Set(), checks: new Map(), planned: false, removed: false,
+      });
+    }
+    return cards.get(key);
+  };
+
+  for (const ev of events) {
+    const p = ev.payload || {};
+    const subjects = eventSubjects(ev, prTask);
+    let keys = [...subjects].filter((s) => s.startsWith('task:'));
+    if (!keys.length) keys = [...subjects].filter((s) => s.startsWith('pr:'));
+    if (!keys.length) continue;
+    const planOnly = isPlanOnly(ev);
+    const lane = LANE_OF[ev.type];
+    for (const key of keys) {
+      const c = card(key);
+      if (isNum(p.issue)) c.issue = p.issue;
+      for (const pr of eventPrs(ev)) if (!c.prs.includes(pr)) c.prs.push(pr);
+      if (ev.type === 'cancelled' && !planOnly) {
+        c.removed = true;
+        continue;
+      }
+      if (SIDE_STATE[ev.type]) {
+        c.side = { label: SIDE_STATE[ev.type], reason: isStr(p.reason) ? p.reason : null };
+        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
+        continue;
+      }
+      // Resolutions without a lane (human_action, contract_pinned) still clear the side
+      // state; plan-only (dry-run) decisions never resolve anything.
+      if (RESOLVES_NEEDS_YOU.has(ev.type) && !planOnly) c.side = null;
+      if (!lane) continue;
+      if (planOnly) {
+        c.planned = true;
+        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
+        continue;
+      }
+      // Latest result per workflow for the PR's current head: a success from one
+      // workflow doesn't hide another workflow's failure; a new head starts afresh.
+      const head = isStr(p.head_sha) ? p.head_sha : null;
+      if ((ev.type === 'check_result' || ev.type === 'pr_opened') && head && head !== c.checkHead) {
+        if (c.oldHeads.has(head)) continue; // a late result for a head that's been replaced
+        if (c.checkHead) c.oldHeads.add(c.checkHead);
+        c.checkHead = head;
+        c.checks = new Map();
+      }
+      c.removed = false;
+      if (c.lane !== lane && laneMoveAllowed(ev.type, c.lane, lane)) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
+      if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {
+        if (isNum(p.attempt)) c.attempt = p.attempt;
+        if (isStr(p.model)) c.model = p.model;
+        c.workflow = isStr(p.workflow) ? p.workflow : ev.type === 'repair_dispatched' ? 'repair' : 'implement';
+        c.planned = false;
+      }
+      if (ev.type === 'pr_opened' && !head) c.checks = new Map();
+      if (ev.type === 'check_result') {
+        c.checks.set(isStr(p.workflow) ? p.workflow : 'check', {
+          conclusion: isStr(p.conclusion) ? p.conclusion : null,
+          signature: isStr(p.failure_signature) ? p.failure_signature : null,
+        });
+      }
+    }
+  }
+
+  const lanes = PIPELINE_LANES.map((l) => ({ ...l, cards: [], prStateUnknown: false }));
+  const byKey = new Map(lanes.map((l) => [l.key, l]));
+  const known = openPrs instanceof Set;
+  const closed = [];
+  for (const c of cards.values()) {
+    if (c.removed || !c.lane) continue;
+    if (PR_LANES.has(c.lane) && c.prs.length) {
+      if (!known) byKey.get(c.lane).prStateUnknown = true;
+      else if (!c.prs.some((pr) => openPrs.has(pr))) {
+        closed.push({ key: c.key, label: c.label, prs: c.prs.slice(), lane: c.lane });
+        continue;
+      }
+    }
+    const tags = [];
+    if (c.side) tags.push({ text: c.side.label, tone: 'fail', title: c.side.reason });
+    if (c.lane === 'running' && c.workflow === 'repair') tags.push({ text: `repair${c.attempt ? ` a${c.attempt}` : ''}`, tone: 'warn', title: null });
+    if (!DONE_LANES.has(c.lane)) {
+      for (const [wf, r] of c.checks) {
+        if (r.conclusion && !CHECK_OK.has(r.conclusion)) tags.push({ text: `${wf} ${r.conclusion}`, tone: 'fail', title: r.signature });
+      }
+    }
+    if (c.planned) tags.push({ text: 'dry-run plan', tone: 'info', title: null });
+    byKey.get(c.lane).cards.push({ ...c, tags });
+  }
+  for (const l of lanes) {
+    // Active lanes: longest-waiting first. Done lanes: most recent first.
+    l.cards.sort((a, b) => (DONE_LANES.has(l.key) ? (b.enteredAt ?? 0) - (a.enteredAt ?? 0) : (a.enteredAt ?? 0) - (b.enteredAt ?? 0)));
+  }
+  closed.sort((a, b) => (a.prs[0] ?? 0) - (b.prs[0] ?? 0));
+  return { lanes, total: lanes.reduce((n, l) => n + l.cards.length, 0), closed, prStateKnown: known };
+}
+
+/** PR numbers opened in the events and never merged: the "open" set for sample data. */
+export function unmergedPrs(events) {
+  const open = new Set();
+  for (const ev of events) {
+    const pr = ev.payload?.pr;
+    if (!isNum(pr)) continue;
+    if (ev.type === 'pr_opened') open.add(pr);
+    if (ev.type === 'merged') open.delete(pr);
+  }
+  return open;
+}
+
+// ---------------------------------------------------------------------------
+// Owner reviews: open human-tier PRs, read from GitHub's open-PR lists until the
+// audit log records human-tier PR events.
+
+export const HUMAN_TIER_LABELS = Object.freeze(['owner-review', 'human-tier', 'needs-human']);
+// "Tier:" then "human" or "owner", allowing markdown bold/italics around either part.
+const TIER_LINE = /(?<![A-Za-z0-9])Tier(?![A-Za-z0-9])\s*(?:\*\*|__|\*|_)?\s*:\s*(?:\*\*|__|\*|_|`)?\s*(human|owner)\b/i;
+
+/** True for an open, non-draft PR whose body has a human/owner tier line or a human-tier label. */
+export function isHumanTierPr(pr) {
+  if (!pr || pr.draft === true) return false;
+  const labels = (Array.isArray(pr.labels) ? pr.labels : []).map((l) => String(typeof l === 'string' ? l : l?.name ?? '').toLowerCase());
+  if (labels.some((l) => HUMAN_TIER_LABELS.includes(l))) return true;
+  return typeof pr.body === 'string' && TIER_LINE.test(pr.body);
+}
+
+/**
+ * The fields the dashboard keeps from a GitHub PR-list entry. The body is used only for
+ * the tier match and then dropped; it is never rendered.
+ */
+export function summarizePr(pr) {
+  return {
+    number: isNum(pr?.number) ? pr.number : null,
+    title: typeof pr?.title === 'string' ? pr.title : '',
+    draft: pr?.draft === true,
+    createdAt: typeof pr?.created_at === 'string' && parseTime(pr.created_at) != null ? pr.created_at : null,
+    humanTier: isHumanTierPr(pr),
+  };
+}
+
+const REPO_NAME = /^[\w.-]+\/[\w.-]+$/;
+
+/** "Review and merge" items from summarized open-PR lists ([{ repo, prs }]), oldest first. */
+export function reviewItems(lists, now = Date.now()) {
+  const items = [];
+  for (const { repo, prs } of lists || []) {
+    if (typeof repo !== 'string' || !REPO_NAME.test(repo)) continue;
+    for (const pr of prs || []) {
+      if (!pr || pr.draft || !pr.humanTier || !isNum(pr.number)) continue;
+      items.push({
+        key: `review:${repo}#${pr.number}`,
+        kind: 'review',
+        repo,
+        number: pr.number,
+        title: pr.title,
+        url: `https://github.com/${repo}/pull/${pr.number}`,
+        since: pr.createdAt,
+        ageMs: pr.createdAt ? now - parseTime(pr.createdAt) : null,
+      });
+    }
+  }
+  return items.sort(bySince);
+}
+
+function bySince(a, b) {
+  if (a.since == null || b.since == null) return a.since == null ? (b.since == null ? 0 : 1) : -1;
+  return a.since.localeCompare(b.since) || String(a.key).localeCompare(String(b.key));
+}
+
+/**
+ * The Needs-you list: audit items plus owner reviews, oldest first. A review of a
+ * product-repo PR that already has an audit item isn't listed twice.
+ */
+export function combineNeedsYou(auditItems, reviews, sourceRepo) {
+  const auditPrs = new Set((auditItems || []).map((i) => i.pr).filter(isNum));
+  const extra = (reviews || []).filter((r) => !(r.repo === sourceRepo && auditPrs.has(r.number)));
+  return [...(auditItems || []), ...extra].sort(bySince);
+}
+
+export const STAGE_LABELS = Object.freeze({
+  ready: 'Ready', picked: 'Picked', running: 'Agent running', 'pr-open': 'PR open',
+  checks: 'Checks', queued: 'Merge queue', merged: 'Merged, not yet deployed', deployed: 'Deployed',
+});
+
+/** Stacked-bar data from stageTimes(), plus the stage that takes the largest share. */
+export function stageBreakdown(rows) {
+  const out = [];
+  const sums = {};
+  for (const r of rows || []) {
+    const segments = [];
+    for (const st of STAGES) {
+      const d = r.durations?.[st];
+      if (d && isNum(d.ms) && d.ms > 0) {
+        segments.push({ stage: st, ms: d.ms, to: d.to });
+        sums[st] = (sums[st] ?? 0) + d.ms;
+      }
+    }
+    const totalMs = segments.reduce((a, s) => a + s.ms, 0);
+    if (totalMs > 0) out.push({ key: r.key, label: r.label, segments, totalMs, current: r.current });
+  }
+  const grand = Object.values(sums).reduce((a, b) => a + b, 0);
+  let insight = null;
+  if (grand > 0) {
+    const [stage, ms] = Object.entries(sums).sort((a, b) => b[1] - a[1])[0];
+    insight = { stage, label: STAGE_LABELS[stage], pct: (ms / grand) * 100, totalMs: grand, tasks: out.length };
+  }
+  // Average per task and PR across the window: each stage's total divided by the row count.
+  const average = out.length
+    ? { key: 'average', label: 'Average', segments: STAGES.filter((st) => sums[st]).map((st) => ({ stage: st, ms: sums[st] / out.length })), totalMs: grand / out.length }
+    : null;
+  return { rows: out, average, maxMs: Math.max(0, ...out.map((r) => r.totalMs)), insight };
+}
+
+/** Cost bars from deriveMetrics().tokensPerTask, highest first, with an average-vs-budget line. */
+export function costSummary(tokens, perTaskBudget = DEFAULTS.perTaskAic) {
+  const rows = (tokens?.rows ?? []).filter((r) => r.task !== '(no task)').slice().sort((a, b) => b.aic - a.aic);
+  if (!rows.length) return { rows: [], maxAic: 0, avgAic: null, pct: null, overBudget: [] };
+  const total = rows.reduce((a, r) => a + r.aic, 0);
+  const avgAic = total / rows.length;
+  return {
+    rows,
+    maxAic: rows[0].aic,
+    avgAic,
+    pct: perTaskBudget > 0 ? (avgAic / perTaskBudget) * 100 : null,
+    overBudget: rows.filter((r) => r.aic > perTaskBudget).map((r) => r.task),
+  };
+}
+
+/** Median run_finished duration (ms), used as the "typical run" for agent progress bars. */
+export function typicalRunMs(events) {
+  return median(events.filter((e) => e.type === 'run_finished').map((e) => e.payload?.duration_ms));
 }
