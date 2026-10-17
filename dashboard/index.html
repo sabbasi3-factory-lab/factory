@@ -41,24 +41,14 @@
     <div class="hbar">
       <div class="brand">
         <span class="logo" aria-hidden="true"><svg class="i"><use href="#i-factory"></use></svg></span>
-        <div>
-          <h1>Factory control room</h1>
-          <p class="sub"><a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a><span class="wide"> · last <span id="window-days">7</span> UTC days · <span id="meta"></span></span></p>
-        </div>
-      </div>
-      <div class="chips" aria-label="Factory state">
-        <span id="status" class="chip status" role="status" aria-live="polite">Loading…</span>
-        <span id="chain-badge" class="chip">Chain: not loaded</span>
-        <span id="kill-chip" class="chip" hidden></span>
-        <span id="dry-badge" class="chip" hidden></span>
-        <span id="version-chip" class="chip" hidden></span>
-        <span id="mode-badge" class="chip chip--info" hidden></span>
+        <h1 class="sr-only">Factory control room</h1>
+        <span id="updated" class="updated has-tip" tabindex="0" aria-describedby="updated-tip"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="updated-text">loading…</span><svg class="i i-info" aria-hidden="true"><use href="#i-info"></use></svg><span id="updated-tip" class="tip-src" hidden></span></span>
       </div>
       <div class="actions">
-        <button id="refresh" class="btn" type="button"><svg class="i" aria-hidden="true"><use href="#i-refresh"></use></svg>Refresh</button>
-        <button id="theme" class="btn" type="button"><svg class="i" aria-hidden="true"><use href="#i-theme"></use></svg><span id="theme-label">Dark theme</span></button>
+        <button id="refresh" class="btn btn--icon has-tip" type="button" aria-label="Refresh now" data-tip="Refresh now"><svg class="i" aria-hidden="true"><use href="#i-refresh"></use></svg></button>
+        <button id="theme" class="btn btn--icon has-tip" type="button" aria-label="Switch to the dark theme" data-tip="Switch to the dark theme"><svg class="i" aria-hidden="true"><use href="#i-theme"></use></svg></button>
         <details id="settings">
-          <summary class="btn"><svg class="i" aria-hidden="true"><use href="#i-gear"></use></svg>Settings</summary>
+          <summary class="btn btn--icon has-tip" aria-label="Settings" data-tip="Settings: optional token, polling"><svg class="i" aria-hidden="true"><use href="#i-gear"></use></svg></summary>
           <form id="token-form" class="token-form">
             <label for="token">Read-only GitHub token (optional)</label>
             <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" placeholder="not set">
@@ -69,52 +59,83 @@
             <p class="hint">Never required. Raises the API limit from 60 to 5,000 requests an hour. It stays in this browser's localStorage and is sent only to api.github.com, never to raw.githubusercontent.com. Use a fine-grained token with public read-only access and no other permissions.</p>
             <p class="hint" id="poll-hint"></p>
             <p class="hint" id="meta-settings"></p>
+            <p class="hint">Source: <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a>, audit branch. Add <code>?fixture=1</code> to the address for sample data.</p>
           </form>
         </details>
       </div>
+      <p class="glance" aria-label="Factory at a glance">
+        <span id="health" class="chip chip--info" tabindex="0">Checking</span>
+        <span class="sep" aria-hidden="true">·</span>
+        <a id="needs-link" class="chip" href="#needs-h" hidden></a>
+        <span class="sep" aria-hidden="true">·</span>
+        <span id="kill-chip" class="chip" tabindex="0" hidden></span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span id="dry-badge" class="chip" tabindex="0" hidden></span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span id="mode-badge" class="chip chip--info" tabindex="0" hidden></span>
+      </p>
+      <p id="status" class="sr-only" role="status" aria-live="polite"></p>
     </div>
   </header>
 
   <main id="main" class="wrap">
-    <div class="grid g-top">
-      <section aria-labelledby="needs-h">
+    <section aria-labelledby="needs-h" class="panel needs" id="needs-panel">
+      <div class="sec-h">
         <h2 id="needs-h"><svg class="i" aria-hidden="true"><use href="#i-person"></use></svg>Needs you</h2>
-        <div id="needs" tabindex="-1" class="panel needs"></div>
-      </section>
-      <section aria-labelledby="kpis-h">
-        <h2 id="kpis-h"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg>Last <span id="kpi-days">7</span> days</h2>
-        <div id="kpis" tabindex="-1" class="kpis"></div>
-      </section>
-    </div>
+        <button type="button" class="info has-tip" aria-label="About Needs you" aria-describedby="needs-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="needs-info-tip" class="tip-src" hidden></span></button>
+      </div>
+      <div id="needs" tabindex="-1"></div>
+    </section>
+    <section aria-labelledby="kpis-h">
+      <!-- Each tile's tooltip names the window, so the heading is for screen readers only. -->
+      <h2 id="kpis-h" class="sr-only">Last <span id="kpi-days">7</span> days</h2>
+      <div id="kpis" tabindex="-1" class="kpis"></div>
+    </section>
 
     <section aria-labelledby="pipeline-h">
-      <h2 id="pipeline-h"><svg class="i" aria-hidden="true"><use href="#i-branch"></use></svg>Pipeline <span class="count" id="pipe-count"></span> <span class="count count--muted" id="pipe-closed" hidden></span></h2>
+      <div class="sec-h">
+        <h2 id="pipeline-h"><svg class="i" aria-hidden="true"><use href="#i-branch"></use></svg>Pipeline <span class="count count--muted has-tip" id="pipe-closed" tabindex="0" aria-describedby="pipe-closed-tip" hidden></span></h2>
+        <button type="button" class="info has-tip" aria-label="About the pipeline" aria-describedby="pipe-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="pipe-info-tip" class="tip-src" hidden></span></button>
+      </div>
       <div class="panel pipe">
         <div id="pipeline" tabindex="-1"></div>
-        <p class="pipe-foot" id="pipe-foot"></p>
       </div>
     </section>
 
-    <div class="grid g-2">
-      <section aria-labelledby="agents-h">
-        <h2 id="agents-h"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg>Agents running <span class="count" id="agents-count"></span></h2>
-        <div id="agents" tabindex="-1" class="panel"></div>
-      </section>
-      <section aria-labelledby="checks-h">
-        <h2 id="checks-h"><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>Latest checks <span class="count" id="checks-count"></span></h2>
-        <div id="checks" tabindex="-1" class="panel"></div>
-      </section>
-    </div>
-
-    <div class="grid g-2">
-      <section aria-labelledby="stages-h">
-        <h2 id="stages-h"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg>Where the time goes</h2>
-        <div id="stages" tabindex="-1" class="panel chart"></div>
-      </section>
-      <section aria-labelledby="cost-h">
-        <h2 id="cost-h"><svg class="i" aria-hidden="true"><use href="#i-coin"></use></svg>Cost per task (AIC)</h2>
-        <div id="cost" tabindex="-1" class="panel chart"></div>
-      </section>
+    <!-- Two independent column stacks, so a short panel never leaves a hole next to a tall one. -->
+    <div class="cols">
+      <div class="col">
+        <section aria-labelledby="agents-h">
+          <div class="sec-h">
+            <h2 id="agents-h"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg>Agents</h2>
+            <button type="button" class="info has-tip" aria-label="About agents" aria-describedby="agents-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="agents-info-tip" class="tip-src" hidden></span></button>
+          </div>
+          <div id="agents" tabindex="-1" class="panel"></div>
+        </section>
+        <section aria-labelledby="stages-h">
+          <div class="sec-h">
+            <h2 id="stages-h"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg>Where the time goes</h2>
+            <button type="button" class="info has-tip" aria-label="About this chart" aria-describedby="stages-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="stages-info-tip" class="tip-src" hidden></span></button>
+          </div>
+          <div id="stages" tabindex="-1" class="panel chart"></div>
+        </section>
+      </div>
+      <div class="col">
+        <section aria-labelledby="checks-h">
+          <div class="sec-h">
+            <h2 id="checks-h"><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>Latest checks <span class="count" id="checks-count"></span></h2>
+            <button type="button" class="info has-tip" aria-label="About checks" aria-describedby="checks-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="checks-info-tip" class="tip-src" hidden></span></button>
+          </div>
+          <div id="checks" tabindex="-1" class="panel"></div>
+        </section>
+        <section aria-labelledby="cost-h">
+          <div class="sec-h">
+            <h2 id="cost-h"><svg class="i" aria-hidden="true"><use href="#i-coin"></use></svg>Cost per task (AIC)</h2>
+            <button type="button" class="info has-tip" aria-label="About cost" aria-describedby="cost-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="cost-info-tip" class="tip-src" hidden>AIC from run_finished events, per task, highest first, against the 1,000 AIC per-task budget. Tokens and AIC arrive only when a run finishes.</span></button>
+          </div>
+          <div id="cost" tabindex="-1" class="panel chart"></div>
+        </section>
+      </div>
     </div>
 
     <section aria-labelledby="timeline-h">
@@ -146,7 +167,10 @@
 
   <footer class="foot wrap">
     <svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>
-    <p>Read-only. Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser. Add <code>?fixture=1</code> to the address to see sample data.</p>
+    <span>Read-only · verified in your browser</span>
+    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser. Add ?fixture=1 to the address to see sample data.</span></button>
   </footer>
+
+  <div id="tip" class="tip" aria-hidden="true" hidden></div>
 </body>
 </html>

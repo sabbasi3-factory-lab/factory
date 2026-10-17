@@ -2,9 +2,9 @@
 // and renders the panels. All DOM writes use textContent or createElement(NS), never
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
-  DEFAULTS, STAGES, STAGE_LABELS, canonicalize, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge,
-  formatDuration, parseJsonl, parseTime, pipeline, sparkSegments, shortSha, stageBreakdown, statusSummary, subjectLabel,
-  reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay, verifyChain,
+  DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, canonicalize, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths, deriveMetrics,
+  existingDayPaths, formatAge, formatDuration, healthSummary, parseJsonl, parseTime, pipeline, prRef, shortTitle, sparkSegments, stageBreakdown,
+  statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -45,9 +45,13 @@ const state = {
   error: null,
   windowDay: null,
   lastCheck: null,
+  lastOkAt: null, // last successful load or check (Date.now() ms), for "updated … ago"
   nextCheckAt: null,
   clockOffset: 0,
   expanded: new Set(),
+  expandedLanes: new Set(), // done lanes showing every card
+  checksExpanded: false,
+  kpiSig: null,
   subject: '',
   typeFilter: '',
   timer: null,
@@ -93,16 +97,8 @@ const fmtInt = (n) => (isNum(n) ? n.toLocaleString('en-US') : '—');
 function prLink(n) {
   return isNum(n) ? link(`${GH}/${REPO}/pull/${n}`, `#${n}`) : '—';
 }
-function issueLink(n) {
-  return isNum(n) ? link(`${GH}/${REPO}/issues/${n}`, `#${n}`) : null;
-}
 function commitLink(sha) {
   return isSha(sha) ? link(`${GH}/${REPO}/commit/${sha}`, h('code', {}, sha.slice(0, 7))) : '—';
-}
-function runLink(id, attempt) {
-  if (!isNum(id)) return '—';
-  const href = `${GH}/${REPO}/actions/runs/${id}` + (isNum(attempt) ? `/attempts/${attempt}` : '');
-  return link(href, isNum(attempt) && attempt > 1 ? `${id} (#${attempt})` : String(id));
 }
 
 function timeEl(ts) {
@@ -114,24 +110,16 @@ function timeEl(ts) {
   return h('time', { datetime: iso, title: iso }, text);
 }
 
-function subjectButton(key, label) {
-  return h('button', {
-    type: 'button',
-    class: 'linklike',
-    title: 'Show the timeline',
-    onclick: () => {
-      state.subject = key;
-      $('timeline-fold').open = true;
-      safe('timeline', () => renderTimeline(deriveMetrics(state.events, { now: now() })));
-      $('timeline-fold').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      $('subject').focus({ preventScroll: true });
-    },
-  }, label);
+function showTimeline(key) {
+  state.subject = key;
+  $('timeline-fold').open = true;
+  safe('timeline', () => renderTimeline(deriveMetrics(state.events, { now: now() })));
+  $('timeline-fold').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('subject').focus({ preventScroll: true });
 }
 
-function taskCell(task, issue) {
-  if (!task) return issue != null ? issueLink(issue) : '—';
-  return h('span', {}, subjectButton(`task:${task}`, task), issue != null ? [' ', issueLink(issue)] : null);
+function subjectButton(key, label, tipText = 'Show the timeline') {
+  return tip(h('button', { type: 'button', class: 'linklike', onclick: () => showTimeline(key) }, label), tipText);
 }
 
 function empty(text) {
@@ -156,14 +144,16 @@ function row(key, ...cells) {
 }
 
 // A duration that grows with the clock; clock-only refreshes update just its text.
-function clockCell(sinceMs) {
+// Compact cells show one token ("7h"); the exact duration is in the item's tooltip.
+function clockCell(sinceMs, compact = false) {
   if (sinceMs == null) return '—';
-  return h('span', { 'data-since': String(sinceMs) }, formatDuration(now() - sinceMs));
+  return h('span', { 'data-since': String(sinceMs), 'data-compact': compact ? '1' : null }, (compact ? compactAge : formatDuration)(now() - sinceMs));
 }
 
 function updateClockCells() {
   for (const el of document.querySelectorAll('[data-since]')) {
-    const text = formatDuration(now() - Number(el.getAttribute('data-since')));
+    const fmt = el.hasAttribute('data-compact') ? compactAge : formatDuration;
+    const text = fmt(now() - Number(el.getAttribute('data-since')));
     if (el.textContent !== text) el.textContent = text;
   }
   for (const el of document.querySelectorAll('[data-bar-since]')) setBar(el);
@@ -432,6 +422,7 @@ async function tick() {
       }
     }
     state.error = null;
+    if (state.loaded) state.lastOkAt = Date.now();
   } catch (err) {
     state.error = err instanceof Error ? err.message : String(err);
     state.etag = null;
@@ -466,13 +457,13 @@ function withWidth(el, pct) {
   return el;
 }
 
-const pctText = (v) => (v == null ? 'n/a' : `${Math.round(v)}%`);
+const pctText = (v) => (v == null ? '—' : `${Math.round(v)}%`);
 const millions = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 /** A 7-day trend line. Null values leave a gap rather than a fake zero. */
 function sparkline(values, days, { label, tone = 'blue', format = (v) => String(v) } = {}) {
   const w = 200;
-  const ht = 36;
+  const ht = 96;
   const pad = 4;
   const nums = values.filter(isNum);
   const described = days.map((d, i) => `${d.slice(5)} ${values[i] == null ? 'none' : format(values[i])}`).join(', ');
@@ -513,17 +504,23 @@ function render({ full = false } = {}) {
     if (!m) throw metricsError;
     fn(m);
   };
+  let needs = null;
   try {
-    renderHeader(m);
+    if (m) needs = needsView(m);
   } catch (err) {
-    setStatus(`Problem showing the header: ${err?.message ?? err}`, 'alert');
+    console.error('dashboard: deriving Needs you failed', err);
   }
-  safe('kpis', withMetrics(renderKpis)); // KPI tiles hold no focusable elements
+  try {
+    renderHeader(m, needs);
+  } catch (err) {
+    setStatus(`Problem showing the header: ${err?.message ?? err}`);
+  }
+  safe('kpis', withMetrics(renderKpis)); // rebuilt only when a shown value changes
   const known = FIXTURE || prsKnown();
   if (full || state.renderedVersion !== state.dataVersion || state.prsKnownRendered !== known) {
     state.renderedVersion = state.dataVersion;
     state.prsKnownRendered = known;
-    safe('needs', withMetrics(renderNeeds));
+    safe('needs', withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))));
     safe('pipeline', renderPipeline);
     safe('agents', withMetrics(renderAgents));
     safe('checks', withMetrics(renderChecks));
@@ -533,63 +530,185 @@ function render({ full = false } = {}) {
     safe('events', renderEvents);
   }
   updateClockCells();
+  refreshTip();
+  // Readiness marker for tests and tools: data (or its error) is shown, and in live mode
+  // the open-PR lists have been read or have failed.
+  const settled = state.loaded || state.error || state.noLog;
+  if (settled && (FIXTURE || state.prs.fetchedAt != null || state.prs.error)) document.documentElement.dataset.ready = '1';
 }
 
-function setStatus(text, level = 'warn') {
+// ---------------------------------------------------------------------------
+// Tooltips. Each tip's text sits in a hidden span that the target references with
+// aria-describedby (icon buttons may use data-tip next to their aria-label instead).
+// One shared popover (#tip, aria-hidden because the description already reaches
+// assistive tech) shows the text on hover and on keyboard focus; Escape hides it.
+
+let tipSeq = 0;
+const NATIVE_FOCUS = 'a[href], button, input, select, textarea, summary';
+
+function tip(el, text) {
+  if (text == null || text === '') return el;
+  const id = `tip-${++tipSeq}`;
+  el.append(h('span', { id, class: 'tip-src', hidden: true }, text));
+  el.setAttribute('aria-describedby', id);
+  el.classList.add('has-tip');
+  if (!el.matches(NATIVE_FOCUS) && !el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+  return el;
+}
+
+/** Sets the text of a static element's tip span (id `<id>-tip`). */
+function setTip(id, text) {
+  const src = $(`${id}-tip`);
+  if (src && src.textContent !== text) src.textContent = text;
+}
+
+function infoButton(label, text) {
+  return tip(h('button', { type: 'button', class: 'info', 'aria-label': label }, icon('info')), text);
+}
+
+function tipTextOf(el) {
+  if (el.dataset.tip) return el.dataset.tip;
+  return (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? '').filter(Boolean).join('\n');
+}
+
+const tipState = { target: null, hover: null };
+
+function showTip(target) {
+  const pop = $('tip');
+  const text = tipTextOf(target);
+  if (!text) {
+    hideTip();
+    return;
+  }
+  tipState.target = target;
+  if (pop.textContent !== text) pop.textContent = text;
+  pop.hidden = false;
+  placeTip();
+}
+
+function placeTip() {
+  const pop = $('tip');
+  const t = tipState.target;
+  if (!t || pop.hidden) return;
+  const r = t.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  const ht = pop.offsetHeight;
+  const below = r.bottom + 6;
+  const top = below + ht > innerHeight - 4 && r.top - ht - 6 > 0 ? r.top - ht - 6 : below;
+  pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - w - 8))}px`;
+  pop.style.top = `${top}px`;
+}
+
+function hideTip() {
+  tipState.target = null;
+  $('tip').hidden = true;
+}
+
+// After a re-render, keep the tip on the element that has focus (or hide it).
+function refreshTip() {
+  const t = tipState.target;
+  if (!t) return;
+  if (t.isConnected) showTip(t);
+  else if (document.activeElement?.classList?.contains('has-tip')) showTip(document.activeElement);
+  else hideTip();
+}
+
+function initTips() {
+  document.addEventListener('mouseover', (e) => {
+    const t = e.target.closest?.('.has-tip') ?? null;
+    tipState.hover = t;
+    if (t && t !== tipState.target) showTip(t);
+    else if (!t && tipState.target && !e.target.closest?.('#tip') && document.activeElement !== tipState.target) hideTip();
+  });
+  document.addEventListener('focusin', (e) => {
+    if (e.target.classList?.contains('has-tip')) showTip(e.target);
+    else if (tipState.target && tipState.target !== tipState.hover) hideTip();
+  });
+  document.addEventListener('focusout', (e) => {
+    if (e.target === tipState.target && tipState.hover !== e.target) hideTip();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && tipState.target) hideTip();
+  });
+  addEventListener('scroll', placeTip, { passive: true, capture: true });
+  addEventListener('resize', placeTip);
+}
+
+// ---------------------------------------------------------------------------
+// Header: one glance line (health, needs you, kill switch, dry run)
+
+const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info' };
+const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot' };
+const LEVEL_WORD = { ok: 'ok', warn: 'warning', alert: 'alert', info: 'checking' };
+const HEALTH_RULE = 'Healthy: fresh data, verified chain, heartbeat within '
+  + `${DEFAULTS.heartbeatWarnMin} min.\nDegraded: last refresh failed, data over ${STALE_DATA_MIN} min old, `
+  + `heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min) or chain not verified.\nDown: no audit log, broken chain, `
+  + `or heartbeat missing or over ${DEFAULTS.heartbeatAlertMin} min.`;
+
+function setStatus(text) {
   const el = $('status');
   if (el.textContent !== text) el.textContent = text; // only real changes are announced
-  el.className = `chip status status--${level}`;
 }
 
-function setChip(id, { hidden = false, tone = null, iconName = null, text = '', title = null }) {
+/** Fills a static chip: icon, text and the tip span `<id>-tip`. */
+function setChip(id, { hidden = false, tone = null, iconName = null, text = '', tipText = '' }) {
   const el = $(id);
   el.hidden = hidden;
   if (hidden) return;
-  el.className = `chip${tone ? ` chip--${tone}` : ''}`;
-  el.replaceChildren(...(iconName ? [icon(iconName)] : []), text);
-  if (title) el.title = title;
-  else el.removeAttribute('title');
+  el.className = `chip${tone ? ` chip--${tone}` : ''} has-tip`;
+  el.replaceChildren(...(iconName ? [icon(iconName)] : []), h('span', {}, text), h('span', { id: `${id}-tip`, class: 'tip-src', hidden: true }, tipText));
+  el.setAttribute('aria-describedby', `${id}-tip`);
 }
 
-function renderHeader(m) {
+function renderHeader(m, needs) {
   const chain = state.chain;
-  if (!chain || chain.status === 'empty') {
-    setChip('chain-badge', { iconName: 'shield', text: state.loaded ? 'Chain: no events' : 'Chain: not loaded' });
-  } else if (chain.status === 'verified') {
-    setChip('chain-badge', {
-      tone: 'ok', iconName: 'shield',
-      text: `Chain verified · ${chain.total} event${chain.total === 1 ? '' : 's'}`,
-      title: chain.windowStart === 'genesis' ? 'Every hash and parent link checks out, back to the first event of the log.' : 'Every hash and parent link in the loaded window checks out.',
-    });
+  const hb = m?.heartbeat ?? null;
+  const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
+  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin });
+  const detail = statusSummary({
+    loaded: state.loaded, noLog: state.noLog, error: state.error, fixture: FIXTURE,
+    eventCount: state.events.length, headSha: state.headSha, days: DAYS, heartbeat: hb,
+  });
+  const chainLine = !chain || chain.status === 'empty' ? (state.loaded ? 'Chain: no events' : 'Chain: not loaded')
+    : chain.status === 'verified'
+      ? `Chain verified: ${chain.total} event${chain.total === 1 ? '' : 's'}, ${chain.windowStart === 'genesis' ? 'back to the first event of the log' : 'every hash and parent link in the window'}`
+      : `Chain broken at event ${chain.brokenAt} (${chain.brokenSource}: ${chain.brokenReason})`;
+  setChip('health', {
+    tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.label,
+    tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine, '', HEALTH_RULE].join('\n'),
+  });
+  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
+
+  if (needs) {
+    const n = needs.items.length;
+    const reviews = needs.items.filter((it) => it.kind === 'review').length;
+    const unknown = needs.rs === 'unavailable';
+    const lines = [`${n - reviews} audit item${n - reviews === 1 ? '' : 's'}, ${reviews} PR review${reviews === 1 ? '' : 's'}`];
+    if (unknown) lines.push(`Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}`);
+    if (n > DEFAULTS.humanQueueMax) lines.push(`Over the review queue cap of ${DEFAULTS.humanQueueMax}`);
+    setChip('needs-link', n
+      ? { tone: 'warn', iconName: unknown ? 'warn' : 'person', text: `${n} need${n === 1 ? 's' : ''} you`, tipText: lines.join('\n') }
+      : unknown ? { tone: 'warn', iconName: 'question', text: 'Reviews unknown', tipText: lines.join('\n') }
+        : needs.rs === 'pending' ? { tone: 'info', iconName: 'dot', text: 'Checking reviews', tipText: 'Reading the open-PR lists' }
+          : { tone: 'ok', iconName: 'ok', text: 'Nothing needs you', tipText: lines.join('\n') });
   } else {
-    setChip('chain-badge', { tone: 'alert', iconName: 'warn', text: `Chain broken at event ${chain.brokenAt}`, title: `${chain.brokenSource}: ${chain.brokenReason}` });
+    setChip('needs-link', { hidden: true });
   }
 
   const enabled = m?.killSwitch?.enabled ?? null;
   setChip('kill-chip', {
-    hidden: enabled == null, tone: enabled ? 'ok' : 'alert', iconName: 'power',
-    text: enabled ? 'Factory on' : 'Factory off', title: 'factory_enabled from the latest heartbeat; off means no new dispatches',
+    hidden: enabled == null, tone: enabled ? 'ok' : 'alert', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
+    tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${m.killSwitch.at})` : ''}; off means no new dispatches`,
   });
   const dryRun = m?.dryRun ?? null;
-  setChip('dry-badge', {
-    hidden: dryRun == null, tone: dryRun ? 'warn' : 'ok', iconName: dryRun ? 'info' : 'bolt',
-    text: dryRun ? 'Dry run' : 'Live mode', title: dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect',
-  });
   const version = m?.factoryVersion ?? null;
-  setChip('version-chip', { hidden: !version, iconName: 'branch', text: `factory ${shortSha(version)}`, title: `Factory version ${version}` });
-  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: `Sample data · clock ${new Date(now()).toISOString().slice(11, 16)}Z` });
-
-  const summary = statusSummary({
-    loaded: state.loaded,
-    noLog: state.noLog,
-    error: state.error,
-    fixture: FIXTURE,
-    eventCount: state.events.length,
-    headSha: state.headSha,
-    days: DAYS,
-    heartbeat: m?.heartbeat ?? null,
+  setChip('dry-badge', {
+    hidden: dryRun == null, tone: dryRun ? 'warn' : 'ok', iconName: dryRun ? 'info' : 'bolt', text: dryRun ? 'Dry run' : 'Live',
+    tipText: `${dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect'}${version ? `\nFactory version ${version}` : ''}`,
   });
-  setStatus(summary.text, summary.level);
+  const clock = new Date(now()).toISOString().slice(11, 16);
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${clock}Z. Remove ?fixture=1 for live data.` });
 
   const meta = [];
   if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
@@ -600,20 +719,38 @@ function renderHeader(m) {
     if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${new Date(r.reset).toISOString().slice(11, 16)}Z` : ''));
     meta.push(getToken() ? 'your token' : 'no token');
   }
-  $('meta').textContent = meta.join(' · ');
+  const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
+  $('updated-text').textContent = age ? `updated ${age} ago` : state.error ? 'not updated' : 'loading…';
+  setTip('updated', [
+    `${REPO}, ${BRANCH} branch, last ${DAYS} UTC days`,
+    meta.join(' · '),
+    version ? `Factory version ${version}` : null,
+    `Checks every ${POLL_S} s at most, about once a minute without a token.`,
+  ].filter(Boolean).join('\n'));
   $('meta-settings').textContent = meta.length ? `Now: ${meta.join(' · ')}.` : '';
   $('poll-hint').textContent = `Checks every ${POLL_S} s at most (?poll=N), spread out to stay within the rate limit: about once a minute without a token. Window: ${DAYS} days (?days=N).`;
-  $('window-days').textContent = String(DAYS);
   $('kpi-days').textContent = String(DAYS);
 }
 
-function kpi({ title, iconName, value, unit = null, detail, level = null, levelText = null, extra = null, spark }) {
-  return h('article', { class: `panel kpi${level ? ` kpi--${level}` : ''}` },
+// ---------------------------------------------------------------------------
+// KPI tiles: label, big number, trend line; everything else is in the tile's tooltip
+
+const FORMATS = {
+  pct: pctText,
+  int: (v) => fmtInt(Math.round(v)),
+  dur: (v) => formatDuration(v * 60000),
+  n: (v) => String(v),
+};
+
+function kpi({ title, iconName, value, unit = null, level = null, tipText, spark }) {
+  const el = h('article', { class: `panel kpi${level ? ` kpi--${level}` : ''}` },
     h('h3', { class: 'kpi-t' }, icon(iconName), title),
-    h('p', { class: 'kpi-v' }, value, unit ? h('small', {}, ` ${unit}`) : null, levelText ? h('span', { class: 'kpi-level' }, levelText) : null),
-    h('p', { class: 'kpi-d' }, detail),
-    extra,
-    spark);
+    h('p', { class: 'kpi-v' },
+      level ? h('span', { class: 'kpi-state', role: 'img', 'aria-label': LEVEL_WORD[level] }, icon(LEVEL_ICON[level])) : null,
+      h('span', {}, value),
+      unit ? h('small', {}, unit) : null),
+    sparkline(spark.values, spark.days, { label: spark.label, tone: spark.tone, format: FORMATS[spark.fmt] }));
+  return tip(el, tipText);
 }
 
 function renderKpis(m) {
@@ -621,51 +758,52 @@ function renderKpis(m) {
   const zt = m.zeroTouch;
   const hb = m.heartbeat;
   const aic = m.aicToday;
-  const meter = withWidth(h('i'), aic.pct ?? 0);
   const mergedWeek = s.merged.reduce((a, b) => a + b, 0);
-  const hbLevel = hb.level === 'alert' ? 'alert' : hb.level === 'ok' ? null : 'warn';
-  replaceSection('kpis',
-    kpi({
-      title: 'Zero-touch rate', iconName: 'ok', value: zt.rate == null ? 'n/a' : pctText(zt.rate * 100),
-      detail: zt.merged ? `${zt.untouched} of ${zt.merged} merged factory PRs had no human action` : 'no merged factory PRs yet',
-      spark: sparkline(s.zeroTouchPct, s.days, { label: 'Zero-touch rate so far', tone: 'green', format: pctText }),
-    }),
-    kpi({
-      title: 'Checks passed', iconName: 'shield', value: pctText(s.checks.pct),
-      detail: s.checks.total ? `${s.checks.passed} of ${s.checks.total} check runs passed` : 'no check results yet',
-      spark: sparkline(s.checksPassPct, s.days, { label: 'Share of check runs that passed, by day', tone: 'green', format: pctText }),
-    }),
-    kpi({
-      title: 'AIC today (UTC)', iconName: 'coin', value: fmtInt(Math.round(aic.total)), unit: `/ ${fmtInt(aic.budget)}`,
-      detail: `${(aic.pct ?? 0).toFixed(1)}% of the daily budget${m.tokensPerTask.total.runs ? '' : ' · no run_finished events yet'}`,
-      level: aic.level === 'ok' ? null : aic.level, levelText: aic.level === 'alert' ? 'budget reached' : aic.level === 'warn' ? '≥ 80%' : null,
-      extra: h('div', { class: 'meter', role: 'meter', 'aria-label': 'AIC today vs. daily budget', 'aria-valuemin': '0', 'aria-valuemax': String(aic.budget), 'aria-valuenow': String(Math.round(aic.total)) }, meter),
-      spark: sparkline(s.aic, s.days, { label: 'AIC per day', tone: 'purple', format: (v) => fmtInt(Math.round(v)) }),
-    }),
-    kpi({
-      title: 'Merged today (UTC)', iconName: 'branch', value: String(m.mergedToday.count),
-      detail: `${m.mergedToday.count ? `PR ${m.mergedToday.prs.slice(0, 5).map((n) => `#${n}`).join(', ')}${m.mergedToday.prs.length > 5 ? ` +${m.mergedToday.prs.length - 5} more` : ''} · ` : ''}${mergedWeek} in ${DAYS} days`,
-      spark: sparkline(s.merged, s.days, { label: 'PRs merged per day' }),
-    }),
-    kpi({
-      title: 'Median time to merge', iconName: 'clock', value: s.mergeMedianAllMin == null ? 'n/a' : formatDuration(s.mergeMedianAllMin * 60000),
-      detail: 'from PR opened to merged',
-      spark: sparkline(s.mergeMedianMin, s.days, { label: 'Median time to merge, by day', format: (v) => formatDuration(v * 60000) }),
-    }),
-    kpi({
-      title: 'Heartbeat', iconName: 'pulse', value: hb.ageMin == null ? 'none' : formatAge(hb.ageMin), unit: hb.ageMin == null ? null : 'ago',
-      detail: `amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min`,
-      level: hbLevel, levelText: hb.level === 'alert' ? 'stale' : hb.level === 'warn' ? 'late' : hb.level === 'none' ? 'missing' : null,
-      spark: sparkline(s.heartbeats, s.days, { label: 'Heartbeats per day (24 expected)', tone: 'green' }),
-    }),
-  );
+  const hbLevel = hb.level === 'ok' ? 'ok' : hb.level === 'warn' ? 'warn' : 'alert';
+  const hbIso = hb.at ? ` (${hb.at})` : '';
+  const tiles = [
+    {
+      title: 'Zero-touch', iconName: 'ok', value: zt.rate == null ? '—' : pctText(zt.rate * 100),
+      tipText: zt.merged ? `${zt.untouched} of ${zt.merged} merged factory PRs had no human action` : 'No merged factory PRs yet',
+      spark: { values: s.zeroTouchPct, days: s.days, label: 'Zero-touch rate so far', tone: 'green', fmt: 'pct' },
+    },
+    {
+      title: 'Checks', iconName: 'shield', value: pctText(s.checks.pct),
+      tipText: s.checks.total ? `${s.checks.passed} of ${s.checks.total} check runs passed in ${DAYS} days` : 'No check results yet',
+      spark: { values: s.checksPassPct, days: s.days, label: 'Share of check runs that passed, by day', tone: 'green', fmt: 'pct' },
+    },
+    {
+      title: 'AIC today', iconName: 'coin', value: fmtInt(Math.round(aic.total)),
+      level: aic.level === 'ok' ? null : aic.level,
+      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${m.tokensPerTask.total.runs ? '' : '\nNo run_finished events yet'}`,
+      spark: { values: s.aic, days: s.days, label: 'AIC per day', tone: 'purple', fmt: 'int' },
+    },
+    {
+      title: 'Merged today', iconName: 'branch', value: String(m.mergedToday.count),
+      tipText: `${m.mergedToday.count ? `Today (UTC): PR ${m.mergedToday.prs.slice(0, 8).map((n) => `#${n}`).join(', ')}${m.mergedToday.prs.length > 8 ? ` +${m.mergedToday.prs.length - 8} more` : ''}\n` : ''}${mergedWeek} merged in ${DAYS} days`,
+      spark: { values: s.merged, days: s.days, label: 'PRs merged per day', tone: 'blue', fmt: 'n' },
+    },
+    {
+      title: 'Merge time', iconName: 'clock', value: s.mergeMedianAllMin == null ? '—' : compactAge(s.mergeMedianAllMin * 60000),
+      tipText: s.mergeMedianAllMin == null ? 'No merged PRs with an opened time yet' : `Median from PR opened to merged over ${DAYS} days: ${formatDuration(s.mergeMedianAllMin * 60000)}`,
+      spark: { values: s.mergeMedianMin, days: s.days, label: 'Median time to merge, by day', tone: 'blue', fmt: 'dur' },
+    },
+    {
+      title: 'Heartbeat', iconName: 'pulse', value: hb.ageMin == null ? '—' : compactAge(hb.ageMin * 60000), level: hbLevel,
+      tipText: `${hb.ageMin == null ? `No heartbeat in the last ${DAYS} days` : `Last heartbeat ${formatAge(hb.ageMin)} ago${hbIso}`}\nGreen up to ${DEFAULTS.heartbeatWarnMin} min, amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min\nTrend counts heartbeats per day (24 expected)`,
+      spark: { values: s.heartbeats, days: s.days, label: 'Heartbeats per day (24 expected)', tone: 'green', fmt: 'n' },
+    },
+  ];
+  for (const t of tiles) t.tipText += `\nTrend: last ${DAYS} UTC days`;
+  // Rebuild only when something shown changed, so focus and an open tooltip stay put.
+  const sig = JSON.stringify(tiles);
+  if (sig === state.kpiSig && $('kpis').children.length) return;
+  state.kpiSig = sig;
+  replaceSection('kpis', tiles.map(kpi));
 }
 
-function needsSubject(it) {
-  if (it.task) return subjectButton(`task:${it.task}`, it.task);
-  if (it.pr != null) return subjectButton(`pr:${it.pr}`, `PR #${it.pr}`);
-  return it.issue != null ? `issue #${it.issue}` : '—';
-}
+// ---------------------------------------------------------------------------
+// Needs you: one line per item
 
 function reviewState() {
   if (FIXTURE) return 'sample';
@@ -673,109 +811,157 @@ function reviewState() {
   return state.prs.fetchedAt == null && !state.prs.error ? 'pending' : 'unavailable';
 }
 
-function reviewItem(it) {
-  const repoShort = it.repo.split('/')[1];
-  const action = link(it.url, 'Open PR →');
-  action.classList.add('btn', 'btn--small');
-  return h('li', { 'data-row-key': it.key },
-    icon('person', 'needs-icon'),
-    h('div', { class: 'needs-main' },
-      h('p', { class: 'needs-title' }, h('b', {}, 'Review and merge'), ' · ', link(it.url, `${repoShort}#${it.number}`)),
-      h('p', { class: 'why' }, it.title || '(no title)')),
-    h('div', { class: 'needs-side' },
-      it.since ? h('p', { class: 'age' }, 'waiting ', clockCell(parseTime(it.since))) : null,
-      action));
-}
-
-function renderNeeds(m) {
-  const cap = DEFAULTS.humanQueueMax;
+function needsView(m) {
   const rs = reviewState();
   const reviews = rs === 'ok' ? reviewItems(PR_REPOS.map((repo) => ({ repo, prs: state.prs.lists.get(repo)?.prs ?? [] })), now()) : [];
-  const items = combineNeedsYou(m.needsYou.items, reviews, REPO);
+  return { rs, items: combineNeedsYou(m.needsYou.items, reviews, REPO) };
+}
+
+function viewLink(href, text) {
+  const a = link(href, text);
+  a.classList.add('btn', 'btn--small');
+  return a;
+}
+
+// Titles stay at 4 words so a few items fit the fold budget; the full title is in the tooltip.
+const NEEDS_TITLE_WORDS = 4;
+
+function needsRow(it) {
+  const since = it.since ? parseTime(it.since) : null;
+  const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${new Date(since).toISOString().slice(0, 16)}Z`;
+  let iconName;
+  let kind;
+  let ref;
+  let title;
+  let lines;
+  let action = null;
+  if (it.kind === 'review') {
+    iconName = 'person';
+    kind = 'Review and merge';
+    ref = prRef(it.repo, it.number, REPO);
+    title = it.title || '(no title)';
+    lines = [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, title];
+    action = viewLink(it.url, 'View PR');
+  } else {
+    iconName = it.kind === 'needs_human' ? 'warn' : 'clock';
+    kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
+    ref = it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—';
+    // The icon (and its tooltip) says which kind; the line shows just the task.
+    title = it.task ?? (it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`);
+    lines = [`${kind}: ${title}`, it.reason ? `Reason: ${it.reason}` : null, it.effect ? `Effect: ${it.effect}` : null];
+    if (it.issue != null) action = viewLink(`${GH}/${REPO}/issues/${it.issue}`, 'View issue');
+    else if (it.pr != null) action = viewLink(`${GH}/${REPO}/pull/${it.pr}`, 'View PR');
+  }
+  return h('li', { 'data-row-key': it.key },
+    h('span', { class: `needs-icon${it.kind === 'needs_human' ? ' needs-icon--alert' : ''}`, role: 'img', 'aria-label': kind }, icon(iconName)),
+    h('span', { class: 'needs-ref mono' }, ref),
+    tip(h('span', { class: 'needs-t' }, shortTitle(title, NEEDS_TITLE_WORDS)), [...lines, waited].filter(Boolean).join('\n')),
+    since != null ? h('span', { class: 'age-chip' }, clockCell(since, true)) : h('span'),
+    action ?? h('span'));
+}
+
+function renderNeeds(m, view = needsView(m)) {
+  const cap = DEFAULTS.humanQueueMax;
+  const { rs, items } = view;
+  setTip('needs-info', [
+    'Needs-human items, stale contracts and human-tier PRs waiting for your review, oldest first.',
+    'Review items: open, non-draft PRs in either repo whose body says "Tier: human" or "Tier: owner", or with an owner-review, human-tier or needs-human label.',
+    `Above ${cap}, the controller stops admitting new human-tier work.`,
+    rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
+  ].filter(Boolean).join('\n'));
   const reviewNote = rs === 'unavailable'
-    ? h('p', { class: 'problem' }, icon('warn'), ` Review list unavailable (${state.prs.error ?? 'the PR lists are out of date'}), so PRs waiting for your review aren't shown.`)
-    : rs === 'pending' ? h('p', { class: 'hint' }, 'Checking GitHub for PRs waiting for your review…')
-      : rs === 'sample' ? h('p', { class: 'hint' }, 'Sample data: PRs waiting for your review are read live from GitHub, so none are shown here.')
-        : null;
+    ? tip(h('p', { class: 'needs-note needs-note--warn' }, icon('warn'), 'Review list unavailable'),
+      `${state.prs.error ?? 'The PR lists are out of date'}, so PRs waiting for your review aren't shown.`)
+    : rs === 'pending' ? h('p', { class: 'needs-note' }, icon('dot'), 'Checking reviews…') : null;
   const clear = !items.length && (rs === 'ok' || rs === 'sample');
-  $('needs').classList.toggle('needs--clear', clear);
+  $('needs-panel').classList.toggle('needs--clear', clear);
   if (!items.length) {
-    replaceSection('needs',
-      clear ? h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you right now.') : h('p', { class: 'needs-unknown' }, icon('question'), 'No audit items need you, but the review list is incomplete.'),
-      reviewNote,
-      h('p', { class: 'hint' }, `Needs-human items, stale contracts and human-tier PRs waiting for review show up here, oldest first. Above ${cap}, the controller stops admitting new human-tier work.`));
+    replaceSection('needs', clear ? h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you') : reviewNote);
     return;
   }
-  const list = h('ul', { class: 'needs-list' }, items.map((it) => {
-    if (it.kind === 'review') return reviewItem(it);
-    const action = it.issue != null ? link(`${GH}/${REPO}/issues/${it.issue}`, `Open issue #${it.issue} →`)
-      : it.pr != null ? link(`${GH}/${REPO}/pull/${it.pr}`, `Open PR #${it.pr} →`) : null;
-    action?.classList.add('btn', 'btn--small');
-    const why = [];
-    if (it.reason) why.push(h('code', {}, it.reason));
-    if (it.effect) why.push(`effect: ${it.effect}`);
-    if (it.since) why.push(h('span', {}, 'since ', timeEl(it.since)));
-    return h('li', { 'data-row-key': it.key },
-      icon('warn', 'needs-icon'),
-      h('div', { class: 'needs-main' },
-        h('p', { class: 'needs-title' }, h('b', {}, it.kind === 'needs_human' ? 'Needs human' : 'Stale contract'), ' · ', needsSubject(it)),
-        h('p', { class: 'why' }, why.flatMap((x, i) => (i ? [' · ', x] : [x])))),
-      h('div', { class: 'needs-side' },
-        it.since ? h('p', { class: 'age' }, 'waiting ', clockCell(parseTime(it.since))) : null,
-        action));
-  }));
   replaceSection('needs',
     h('div', { class: 'needs-head' },
       h('span', { class: 'big' }, String(items.length)),
-      h('span', { class: 'lbl' }, items.length === 1 ? 'item is waiting for you' : 'items are waiting for you'),
-      h('span', { class: 'cap' }, `review queue cap ${cap}`)),
-    items.length > cap ? h('p', { class: 'problem' }, 'Over the cap: the controller stops admitting new human-tier work until you catch up.') : null,
+      items.length > cap ? tip(h('span', { class: 'needs-cap' }, icon('warn'), 'Over cap'), `More than ${cap} items: the controller stops admitting new human-tier work until you catch up.`) : null),
     reviewNote,
-    list,
-    rs === 'ok' ? h('p', { class: 'hint' }, 'Review items come from the open, non-draft PRs of both repos whose body says "Tier: human" or "Tier: owner", or that carry an owner-review label.') : null);
+    h('ul', { class: 'needs-list' }, items.map((it) => {
+      try {
+        return needsRow(it);
+      } catch (err) {
+        return h('li', { class: 'problem', 'data-row-key': it.key ?? '?' }, `Couldn't show this item: ${err?.message ?? err}`);
+      }
+    })));
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline: lanes of cards; done lanes show the latest few
+
+const DONE_SHOWN = 3;
+const DONE_UI = new Set(['merged', 'deployed']);
+const SIDE_ICONS = { 'needs human': 'person', 'stale contract': 'clock', blocked: 'warn' };
+
+function tagIcon(t) {
+  if (SIDE_ICONS[t.text]) return SIDE_ICONS[t.text];
+  if (t.text.startsWith('repair')) return 'refresh';
+  if (t.text === 'dry-run plan') return 'info';
+  return 'fail';
 }
 
 function laneCard(c) {
-  const n1 = [subjectButton(c.key, c.label)];
-  if (c.issue != null) n1.push(' ', issueLink(c.issue));
-  if (c.kind === 'task') c.prs.forEach((pr) => n1.push(' ', link(`${GH}/${REPO}/pull/${pr}`, `PR #${pr}`)));
-  else if (c.prs[0] != null) {
-    const a = link(`${GH}/${REPO}/pull/${c.prs[0]}`, '↗');
-    a.setAttribute('aria-label', `PR #${c.prs[0]} on GitHub`);
-    n1.push(' ', a);
-  }
-  const n2 = [];
-  if (c.attempt != null) n2.push(h('span', {}, `a${c.attempt}`));
-  if (c.model) n2.push(h('span', {}, c.model));
-  if (c.enteredAt != null) n2.push(h('span', { title: 'time in this stage' }, clockCell(c.enteredAt)));
+  const pr = c.prs.length ? c.prs[c.prs.length - 1] : null;
+  const ref = pr != null ? `#${pr}` : c.issue != null ? `#${c.issue}` : c.label;
+  const href = pr != null ? `${GH}/${REPO}/pull/${pr}` : c.issue != null ? `${GH}/${REPO}/issues/${c.issue}` : null;
+  const lines = [href ? `View ${pr != null ? 'PR' : 'issue'} ${ref} on GitHub` : 'Show the timeline'];
+  lines.push(c.kind === 'task' ? `Task ${c.label}` : c.label);
+  if (c.issue != null && pr != null) lines.push(`Issue #${c.issue}`);
+  if (c.prs.length > 1) lines.push(`PRs ${c.prs.map((n) => `#${n}`).join(', ')}`);
+  const run = [c.workflow, c.attempt != null ? `attempt ${c.attempt}` : null, c.model].filter(Boolean).join(' · ');
+  if (run) lines.push(run);
+  for (const t of c.tags) lines.push(t.title ? `${t.text}: ${t.title}` : t.text);
+  if (c.enteredAt != null) lines.push(`In this stage for ${formatDuration(now() - c.enteredAt)}`);
+  const main = href ? link(href, ref) : h('button', { type: 'button', class: 'linklike', onclick: () => showTimeline(c.key) }, ref);
   return h('div', { class: 'task', 'data-row-key': c.key },
-    h('p', { class: 'n1' }, n1),
-    n2.length ? h('p', { class: 'n2' }, n2) : null,
-    c.tags.length ? h('p', { class: 'tags' }, c.tags.map((t) => h('span', { class: `tag tag--${t.tone}`, title: t.title }, t.text))) : null);
+    tip(main, lines.join('\n')),
+    c.tags.map((t) => h('span', { class: `flag tag--${t.tone}`, role: 'img', 'aria-label': t.text }, icon(tagIcon(t)))),
+    c.enteredAt != null ? h('span', { class: 'age-chip' }, clockCell(c.enteredAt, true)) : null);
 }
 
 function renderPipeline() {
   const pl = pipeline(state.events, { openPrs: openPrSet() });
-  $('pipe-count').textContent = `${pl.total} item${pl.total === 1 ? '' : 's'}`;
   const closedEl = $('pipe-closed');
   closedEl.hidden = !pl.closed.length;
-  closedEl.textContent = `Closed ${pl.closed.length}`;
-  closedEl.title = `Closed without merging: ${pl.closed.map((c) => c.label).join(', ')}`;
-  $('pipe-foot').textContent = `One card per task, or per PR without a task, in the lane of its latest stage; the time shown is how long it has been there. WIP limit ${DEFAULTS.wipLimit} · review queue cap ${DEFAULTS.humanQueueMax}.`;
+  closedEl.replaceChildren(`Closed ${pl.closed.length}`, h('span', { id: 'pipe-closed-tip', class: 'tip-src', hidden: true }, `Closed without merging: ${pl.closed.map((c) => c.label).join(', ')}`));
+  setTip('pipe-info', `One card per task, or per PR without a task, in the lane of its latest stage, with how long it has been there. Icons on a card: needs human, stale contract, failed check, repair, dry-run plan; hover or focus a card for details.\nMerged and Deployed show the latest ${DONE_SHOWN}.\nWIP limit ${DEFAULTS.wipLimit} · review queue cap ${DEFAULTS.humanQueueMax}.`);
   if (!pl.total) {
-    replaceSection('pipeline', empty(state.noLog ? 'No audit log yet, so the pipeline is empty.' : 'No tasks or PRs in the window yet.'));
+    replaceSection('pipeline', empty(state.noLog ? 'No audit log yet' : 'No tasks or PRs yet'));
     return;
   }
-  const lanes = pl.lanes.map((l) => h('div', { class: `lane st-${l.key}`, role: 'group', 'aria-label': `${l.label}: ${l.cards.length}` },
-    h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), l.label, h('span', { class: 'n' }, String(l.cards.length))),
-    l.prStateUnknown ? h('p', { class: 'lane-note', title: "The open-PR list couldn't be read, so these PRs may have been closed." }, icon('question'), 'PR state unknown') : null,
-    l.cards.length ? h('div', { class: 'lane-cards' }, l.cards.map((c) => {
-      try {
-        return laneCard(c);
-      } catch (err) {
-        return h('p', { class: 'problem' }, `Couldn't show this card: ${err?.message ?? err}`);
-      }
-    })) : h('p', { class: 'lane-empty' }, 'none')));
+  const lanes = pl.lanes.map((l) => {
+    const n = l.cards.length;
+    const capped = DONE_UI.has(l.key) && n > DONE_SHOWN;
+    const expanded = capped && state.expandedLanes.has(l.key);
+    const shown = capped && !expanded ? l.cards.slice(0, DONE_SHOWN) : l.cards;
+    const more = capped ? tip(h('button', {
+      type: 'button', class: 'more', 'aria-expanded': String(expanded), 'aria-controls': `lane-${l.key}`,
+      onclick: () => {
+        if (state.expandedLanes.has(l.key)) state.expandedLanes.delete(l.key);
+        else state.expandedLanes.add(l.key);
+        safe('pipeline', renderPipeline); // restores focus to this button
+      },
+    }, expanded ? 'Fewer' : `+${n - DONE_SHOWN}`), expanded ? `Show only the latest ${DONE_SHOWN}` : `Show ${n - DONE_SHOWN} more`) : null;
+    return h('div', { class: `lane st-${l.key}${n ? '' : ' lane--empty'}`, role: 'group', 'aria-label': `${l.label}: ${n}` },
+      h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('span', { class: 'lane-name' }, SHORT_STAGE[l.key] ?? l.label),
+        // Active lanes show every card, so only empty and done lanes need a count.
+        !n || DONE_UI.has(l.key) ? h('span', { class: 'n' }, String(n)) : null),
+      l.prStateUnknown ? tip(h('span', { class: 'lane-note', role: 'img', 'aria-label': 'PR state unknown' }, icon('question')), "PR state unknown: the open-PR list couldn't be read, so these PRs may have been closed.") : null,
+      n ? h('div', { class: 'lane-cards', id: `lane-${l.key}` }, shown.map((c) => {
+        try {
+          return laneCard(c);
+        } catch (err) {
+          return h('p', { class: 'problem' }, `Couldn't show this card: ${err?.message ?? err}`);
+        }
+      }), more) : null);
+  });
   replaceSection('pipeline', h('div', { class: 'lanes-wrap', role: 'region', 'aria-label': 'Pipeline lanes', tabindex: '0', 'data-focus-key': 'table' },
     h('div', { class: 'lanes' }, lanes)));
 }
@@ -791,127 +977,171 @@ function setBar(el) {
 function renderAgents(m) {
   const r = m.running;
   const typical = typicalRunMs(state.events);
-  $('agents-count').textContent = r.available ? `${r.count} of ${r.wipLimit}` : 'status unavailable';
-  const slotCount = Math.max(r.wipLimit, r.available ? r.count : 0);
-  const slots = h('div', { class: 'slots' },
-    h('span', {}, r.available ? `WIP ${r.count}/${r.wipLimit}` : `WIP ?/${r.wipLimit}`),
-    Array.from({ length: slotCount }, (_, i) => h('span', {
-      class: `slot${!r.available ? ' slot--unknown' : i >= r.wipLimit ? ' slot--over' : i < r.count ? ' slot--on' : ''}`,
-      'aria-hidden': 'true',
-    })),
-    r.dryRunPlanned ? h('span', { class: 'muted' }, `· ${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running`) : null);
-
+  const wip = isNum(r.wipLimit) ? r.wipLimit : null;
+  // With no run_finished in the window completion is unknown, so a count of listed
+  // attempts would be a guess: show "—" then. With nothing listed, nothing is running.
+  const count = r.available ? r.count : r.rows.length ? null : 0;
+  setTip('agents-info', [
+    `Dispatched attempts that haven't finished, against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
+    r.available ? null : "Run completion isn't logged yet (no run_finished events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
+    r.dryRunPlanned ? `${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running.` : null,
+  ].filter(Boolean).join('\n'));
+  const slotCount = Math.max(wip ?? 0, count ?? 0);
+  const line = h('div', { class: 'agents-line' },
+    h('span', { class: 'agents-n' }, `${count ?? '—'} of ${wip ?? '—'} agents running`),
+    h('span', { class: 'slots', 'aria-hidden': 'true' }, Array.from({ length: slotCount }, (_, i) => h('span', {
+      class: `slot${count == null ? ' slot--unknown' : wip != null && i >= wip ? ' slot--over' : i < count ? ' slot--on' : ''}`,
+    }))));
   if (!r.rows.length) {
-    replaceSection('agents', h('div', { class: 'agents' }, empty(r.available ? 'No agents running.' : 'No runs yet.')), slots);
+    $('agents').classList.add('panel--compact');
+    replaceSection('agents', line);
     return;
   }
+  $('agents').classList.remove('panel--compact');
   const cards = r.rows.map((a) => {
     const repair = a.workflow === 'repair';
     const bar = typical && a.startedAt != null
-      ? h('div', { class: 'bar', title: 'elapsed vs. twice the typical run' }, h('i', { 'data-bar-since': String(a.startedAt), 'data-bar-span': String(typical * 2) }))
+      ? h('div', { class: 'bar', 'aria-hidden': 'true' }, h('i', { 'data-bar-since': String(a.startedAt), 'data-bar-span': String(typical * 2) }))
       : null;
-    const meta = [a.state, a.model].filter(Boolean).join(' · ');
+    const lines = [
+      [a.task, a.issue != null ? `issue #${a.issue}` : null].filter(Boolean).join(' · ') || 'Attempt',
+      [`${a.workflow}${a.attempt != null ? ` attempt ${a.attempt}` : ''}`, a.state, a.model].filter(Boolean).join(' · '),
+      a.runId != null ? `Run ${a.runId}` : null,
+      a.startedAt != null ? `Started ${new Date(a.startedAt).toISOString().slice(0, 16)}Z` : null,
+      typical ? `Typical run ${formatDuration(typical)}; the bar fills at twice that` : null,
+    ].filter(Boolean).join('\n');
+    const label = a.task ?? (a.issue != null ? `#${a.issue}` : 'attempt');
     return h('div', { class: 'agent', 'data-row-key': a.key },
       r.available
         ? h('span', { class: `spin${repair ? ' spin--repair' : ''}`, role: 'img', 'aria-label': repair ? 'repairing' : 'running' })
         : h('span', { class: 'agent-unknown', role: 'img', 'aria-label': 'status unknown' }, icon('question')),
       h('div', { class: 'agent-main' },
-        h('p', { class: 'n1' }, taskCell(a.task, a.issue), ' ', h('span', { class: `tag${repair ? ' tag--warn' : ''}` }, `${a.workflow}${a.attempt != null ? ` a${a.attempt}` : ''}`)),
-        h('p', { class: 'n2' }, meta, a.runId != null ? [meta ? ' · run ' : 'run ', runLink(a.runId)] : null),
+        h('p', { class: 'n1' }, a.task ? subjectButton(`task:${a.task}`, label, lines) : tip(h('span', {}, label), lines),
+          repair ? h('span', { class: 'flag tag--warn', role: 'img', 'aria-label': `repair${a.attempt != null ? ` attempt ${a.attempt}` : ''}` }, icon('refresh')) : null),
         bar),
-      h('div', { class: 'el' }, clockCell(a.startedAt), typical ? h('small', {}, `typical ${formatDuration(typical)}`) : null));
+      h('div', { class: 'el' }, clockCell(a.startedAt, true)));
   });
-  replaceSection('agents',
-    h('div', { class: 'agents' }, cards),
-    r.available ? null : h('p', { class: 'hint pad' }, "Run completion isn't logged yet (no run_finished events), so these are dispatched attempts that haven't been superseded, merged, escalated or cancelled. Some may already have finished."),
-    slots);
+  replaceSection('agents', line, h('div', { class: 'agents' }, cards));
   for (const el of $('agents').querySelectorAll('[data-bar-since]')) setBar(el);
+}
+
+function shortTimeEl(ts) {
+  const ms = parseTime(ts);
+  if (ms == null) return '—';
+  const iso = new Date(ms).toISOString();
+  return h('time', { datetime: iso }, utcDay(ms) === utcDay(now()) ? iso.slice(11, 16) : iso.slice(5, 10));
+}
+
+const CHECKS_SHOWN = 5;
+
+function checkRow(ev, i) {
+  const key = typeof ev.id === 'string' ? ev.id : `#${i}`;
+  try {
+    const p = ev.payload;
+    const tone = p.conclusion === 'success' ? 'ok' : p.conclusion === 'failure' ? 'fail' : 'other';
+    const prs = Array.isArray(p.prs) ? p.prs.filter(isNum) : [];
+    const wf = String(p.workflow ?? 'check');
+    const at = p.completed_at ?? ev.timestamp;
+    const lines = [
+      isNum(p.run_id) ? `View run ${p.run_id}${isNum(p.run_attempt) && p.run_attempt > 1 ? ` (attempt ${p.run_attempt})` : ''} on GitHub` : null,
+      `${wf}: ${p.conclusion ?? 'unknown'}${typeof p.event === 'string' ? ` on ${p.event}` : ''}`,
+      typeof p.failure_signature === 'string' ? `Failure signature ${p.failure_signature}` : null,
+      typeof p.heldout_seed === 'string' ? `Held-out seed ${p.heldout_seed}` : null,
+      parseTime(at) != null ? `Completed ${new Date(parseTime(at)).toISOString()}` : null,
+    ].filter(Boolean).join('\n');
+    const runHref = isNum(p.run_id) ? `${GH}/${REPO}/actions/runs/${p.run_id}${isNum(p.run_attempt) ? `/attempts/${p.run_attempt}` : ''}` : null;
+    return h('li', { class: `chk chk--${tone}`, 'data-row-key': key },
+      h('span', { class: 'chk-icon', role: 'img', 'aria-label': String(p.conclusion ?? 'unknown') }, icon(tone === 'ok' ? 'ok' : tone === 'fail' ? 'fail' : 'dot')),
+      tip(runHref ? link(runHref, wf) : h('b', {}, wf), lines),
+      h('span', { class: 'chk-on' }, prs.length ? prs.flatMap((n, j) => [j ? ' ' : '', link(`${GH}/${REPO}/pull/${n}`, `#${n}`)])
+        : typeof p.event === 'string' ? h('span', { class: 'muted' }, p.event) : '—'),
+      h('span', { class: 'mono muted' }, shortTimeEl(at)));
+  } catch (err) {
+    return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
+  }
 }
 
 function renderChecks(m) {
   const passed = m.checks.filter((ev) => ev.payload?.conclusion === 'success').length;
-  $('checks-count').textContent = m.checks.length ? `${passed} of ${m.checks.length} passed` : '';
-  const checks = m.checks.slice(0, 8);
-  if (!checks.length) {
-    replaceSection('checks', empty('No check results yet.'));
+  $('checks-count').textContent = m.checks.length ? `${passed}/${m.checks.length}` : '';
+  setTip('checks-info', `Newest check runs first: pass or fail, workflow, PR and time (UTC). ${m.checks.length ? `${passed} of ${m.checks.length} passed in ${DAYS} days. ` : ''}Hover or focus a workflow for its run, held-out seed and failure signature.`);
+  $('checks').classList.toggle('panel--compact', !m.checks.length);
+  if (!m.checks.length) {
+    replaceSection('checks', empty('No checks yet'));
     return;
   }
-  const items = checks.map((ev, i) => {
-    const key = typeof ev.id === 'string' ? ev.id : `#${i}`;
-    try {
-      const p = ev.payload;
-      const tone = p.conclusion === 'success' ? 'ok' : p.conclusion === 'failure' ? 'fail' : 'other';
-      const prs = Array.isArray(p.prs) ? p.prs.filter(isNum) : [];
-      const seed = typeof p.heldout_seed === 'string' ? p.heldout_seed : null;
-      return h('li', { class: `chk chk--${tone}`, 'data-row-key': key },
-        h('span', { class: 'chk-icon' }, icon(tone === 'ok' ? 'ok' : tone === 'fail' ? 'fail' : 'dot')),
-        h('span', { class: 'mono muted' }, timeEl(p.completed_at ?? ev.timestamp)),
-        h('div', { class: 'chk-main' },
-          h('p', {}, h('b', {}, String(p.workflow ?? 'check')),
-            prs.length ? [' on ', prs.flatMap((n, j) => [j ? ', ' : '', link(`${GH}/${REPO}/pull/${n}`, `PR #${n}`)])]
-              : typeof p.event === 'string' ? h('span', { class: 'muted' }, ` on ${p.event}`) : null),
-          typeof p.failure_signature === 'string' ? h('p', { class: 'sig' }, 'signature ', h('code', {}, p.failure_signature)) : null,
-          seed ? h('p', { class: 'seed muted' }, 'held-out seed ', h('code', { title: seed }, seed.length > 10 ? `${seed.slice(0, 8)}…` : seed)) : null),
-        h('span', { class: 'chk-run' }, isNum(p.run_id) ? ['run ', runLink(p.run_id, p.run_attempt)] : null),
-        h('span', { class: 'chk-concl' }, String(p.conclusion ?? 'unknown')));
-    } catch (err) {
-      return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
-    }
-  });
-  replaceSection('checks', h('ul', { class: 'checks' }, items));
+  const more = m.checks.length - CHECKS_SHOWN;
+  const all = more > 0 && state.checksExpanded;
+  const toggle = more > 0 ? tip(h('button', {
+    type: 'button', class: 'more more--row', 'aria-expanded': String(all), 'aria-controls': 'checks-list',
+    onclick: () => {
+      state.checksExpanded = !state.checksExpanded;
+      safe('checks', () => renderChecks(deriveMetrics(state.events, { now: now() }))); // restores focus to this button
+    },
+  }, all ? 'Fewer' : 'View all'), all ? `Show the newest ${CHECKS_SHOWN} only` : `Show all ${m.checks.length} checks in the window`) : null;
+  replaceSection('checks',
+    h('ul', { class: `checks${all ? ' checks--all' : ''}`, id: 'checks-list' }, m.checks.slice(0, all ? m.checks.length : CHECKS_SHOWN).map(checkRow)),
+    toggle);
 }
+
+const SHORT_STAGE = Object.freeze({
+  ready: 'Ready', picked: 'Picked', running: 'Running', 'pr-open': 'PR open', checks: 'Checks', queued: 'Queue', merged: 'Merged', deployed: 'Deployed',
+});
+const INSIGHT_STAGE = Object.freeze({ ...SHORT_STAGE, running: 'Agent running', queued: 'Merge queue', merged: 'Waiting to deploy' });
 
 function stackRow(r, maxMs, isAverage = false) {
   const desc = r.segments.map((sg) => `${STAGE_LABELS[sg.stage]} ${formatDuration(sg.ms)}`).join(', ');
   const stack = withWidth(h('div', { class: 'stack', role: 'img', 'aria-label': `${r.label}: ${desc}; total ${formatDuration(r.totalMs)}` },
-    r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}`, title: `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}` }), (sg.ms / r.totalMs) * 100))),
+    r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}` }), (sg.ms / r.totalMs) * 100))),
   (r.totalMs / maxMs) * 100);
+  const lines = `${isAverage ? `Average per task or PR over ${DAYS} days` : r.label}\n${r.segments.map((sg) => `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}`).join('\n')}\nTotal ${formatDuration(r.totalMs)}`;
   return h('div', { class: `srow${isAverage ? ' srow--avg' : ''}`, 'data-row-key': r.key },
-    h('span', { class: 'srow-label' }, isAverage ? h('b', {}, `Average (${DAYS} days)`) : subjectButton(r.key, r.label)),
+    h('span', { class: 'srow-label' }, isAverage ? tip(h('b', {}, 'Average'), lines) : subjectButton(r.key, r.label.replace(/^PR /, ''), `Show the timeline\n${lines}`)),
     h('div', { class: 'track' }, stack),
-    h('span', { class: 'mono muted num' }, formatDuration(r.totalMs)));
+    h('span', { class: 'mono muted num' }, compactAge(r.totalMs)));
 }
 
 function renderStages(m) {
   const sb = stageBreakdown(m.stageTimes);
+  const shown = sb.rows.slice(-10);
+  setTip('stages-info', `Time from each stage to the next, per task or PR (first arrival at each stage). Bars share one scale; hover or focus a label for the breakdown.${sb.rows.length > shown.length ? `\nShowing the latest ${shown.length} of ${sb.rows.length}.` : ''}`);
+  $('stages').classList.toggle('panel--compact', !sb.rows.length);
   if (!sb.rows.length) {
-    replaceSection('stages', empty('No task or PR has moved through two stages yet.'));
+    replaceSection('stages', empty('No stage data yet'));
     return;
   }
-  const shown = sb.rows.slice(-10);
   const used = STAGES.filter((st) => sb.rows.some((r) => r.segments.some((sg) => sg.stage === st)));
   const ins = sb.insight;
   replaceSection('stages',
     sb.rows.length > 1 ? stackRow(sb.average, sb.maxMs, true) : null,
     shown.map((r) => stackRow(r, sb.maxMs)),
-    sb.rows.length > shown.length ? h('p', { class: 'hint' }, `Showing the latest ${shown.length} of ${sb.rows.length}.`) : null,
-    h('p', { class: 'legend' }, used.map((st) => h('span', {}, h('i', { class: `st-${st}`, 'aria-hidden': 'true' }), STAGE_LABELS[st]))),
-    ins ? h('p', { class: 'insight' }, icon('info'), h('span', {},
-      h('b', {}, ins.label), ` takes the largest share of the time: ${Math.round(ins.pct)}% of ${formatDuration(ins.totalMs)} measured across ${ins.tasks} task${ins.tasks === 1 ? '' : 's'} and PRs.`)) : null);
+    h('p', { class: 'legend' }, used.map((st) => h('span', {}, h('i', { class: `st-${st}`, 'aria-hidden': 'true' }), SHORT_STAGE[st]))),
+    ins ? tip(h('p', { class: 'insight' }, icon('info'), h('span', {}, `${INSIGHT_STAGE[ins.stage]} is ${Math.round(ins.pct)}% of the time`)),
+      `${ins.label} takes the largest share of the time: ${Math.round(ins.pct)}% of ${formatDuration(ins.totalMs)} measured across ${ins.tasks} task${ins.tasks === 1 ? '' : 's'} and PRs.`) : null);
 }
 
 function renderCost(m) {
   const c = costSummary(m.tokensPerTask, DEFAULTS.perTaskAic);
+  $('cost').classList.toggle('panel--compact', !c.rows.length);
   if (!c.rows.length) {
-    replaceSection('cost', empty('No run_finished events yet, so there is no cost data.'));
+    replaceSection('cost', empty('No cost data yet'));
     return;
   }
-  const rows = c.rows.slice(0, 10).map((r) => {
-    const tokens = r.tokens_input + r.tokens_output;
-    return h('div', { class: 'crow', 'data-row-key': r.task },
-      h('span', { class: 'srow-label' }, subjectButton(`task:${r.task}`, r.task)),
-      h('div', { class: 'track' }, withWidth(h('div', { class: `cbar${r.aic > DEFAULTS.perTaskAic ? ' cbar--over' : ''}`, role: 'img', 'aria-label': `${r.task}: ${fmtInt(Math.round(r.aic))} AIC` }), (r.aic / c.maxAic) * 100)),
-      h('span', { class: 'num' }, `${fmtInt(Math.round(r.aic))} AIC`,
-        h('small', { class: 'muted', title: `input ${fmtInt(r.tokens_input)}, output ${fmtInt(r.tokens_output)}, cache ${fmtInt(r.tokens_cache)}` }, ` · ${millions(tokens)} tokens`)));
-  });
+  const rows = c.rows.slice(0, 10).map((r) => h('div', { class: 'crow', 'data-row-key': r.task },
+    h('span', { class: 'srow-label' }, subjectButton(`task:${r.task}`, r.task,
+      `Show the timeline\n${fmtInt(Math.round(r.aic))} AIC over ${r.runs} run${r.runs === 1 ? '' : 's'}\nTokens: input ${fmtInt(r.tokens_input)}, output ${fmtInt(r.tokens_output)}, cache ${fmtInt(r.tokens_cache)} (${millions(r.tokens_input + r.tokens_output)} in + out)`)),
+    h('div', { class: 'track' }, withWidth(h('div', { class: `cbar${r.aic > DEFAULTS.perTaskAic ? ' cbar--over' : ''}`, role: 'img', 'aria-label': `${r.task}: ${fmtInt(Math.round(r.aic))} AIC` }), (r.aic / c.maxAic) * 100)),
+    h('span', { class: 'num' }, fmtInt(Math.round(r.aic)))));
   const total = m.tokensPerTask.total;
   replaceSection('cost',
     rows,
-    h('p', { class: 'hint' }, `Total ${fmtInt(Math.round(total.aic))} AIC over ${total.runs} finished run${total.runs === 1 ? '' : 's'}.`),
-    h('p', { class: `insight${c.overBudget.length ? ' insight--warn' : ''}` }, icon('info'), h('span', {},
-      'Average ', h('b', {}, `${fmtInt(Math.round(c.avgAic))} AIC per task`),
-      `: ${Math.round(c.pct)}% of the ${fmtInt(DEFAULTS.perTaskAic)} AIC per-task budget.`,
-      c.overBudget.length ? ` Over budget: ${c.overBudget.join(', ')}.` : '')));
+    tip(h('p', { class: `insight${c.overBudget.length ? ' insight--warn' : ''}` }, icon(c.overBudget.length ? 'warn' : 'info'),
+      h('span', {}, `Average ${fmtInt(Math.round(c.avgAic))} AIC`),
+      h('span', {}, `${Math.round(c.pct)}% of budget`),
+      c.overBudget.length ? h('span', {}, `${c.overBudget.length} over budget`) : null),
+    [`Average ${fmtInt(Math.round(c.avgAic))} AIC per task: ${Math.round(c.pct)}% of the ${fmtInt(DEFAULTS.perTaskAic)} AIC per-task budget.`,
+      `Total ${fmtInt(Math.round(total.aic))} AIC over ${total.runs} finished run${total.runs === 1 ? '' : 's'}.`,
+      c.overBudget.length ? `Over budget: ${c.overBudget.join(', ')}.` : null].filter(Boolean).join('\n')));
 }
 
 function eventDetail(ev) {
@@ -997,7 +1227,7 @@ function renderEvents() {
   select.value = state.typeFilter;
   select.disabled = !types.length;
 
-  $('events-sum').textContent = records.length ? `· ${records.length} events, newest first` : '';
+  $('events-sum').textContent = records.length ? `· ${records.length} events` : '';
   if (!records.length) {
     replaceSection('events', empty(state.noLog ? 'No audit log yet.' : state.loaded ? 'No events in the window.' : 'Loading…'));
     return;
@@ -1075,8 +1305,9 @@ function applyTheme(theme) {
   if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
   const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
-  $('theme-label').textContent = next === 'dark' ? 'Dark theme' : 'Light theme';
   $('theme').setAttribute('aria-label', `Switch to the ${next} theme`);
+  $('theme').dataset.tip = `Switch to the ${next} theme`;
+  if (tipState.target === $('theme')) showTip($('theme'));
 }
 
 function initTheme() {
@@ -1141,6 +1372,7 @@ function init() {
     tick();
   });
   initTheme();
+  initTips();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.nextCheckAt && Date.now() >= state.nextCheckAt - 1000) tick();
   });

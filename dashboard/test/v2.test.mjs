@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  PIPELINE_LANES, combineNeedsYou, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths, isHumanTierPr,
-  parseJsonl, reviewItems, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha, stageBreakdown, typicalRunMs,
+  HEALTH_LABELS, PIPELINE_LANES, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths,
+  healthSummary, isHumanTierPr, parseJsonl, prRef, reviewItems, shortTitle, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha,
+  stageBreakdown, typicalRunMs,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH } from './make-fixture.mjs';
 
@@ -298,4 +299,67 @@ test('sparkline geometry marks every valid point and never bridges a gap', () =>
   assert.deepEqual(h.segments.map((seg) => seg.map((p) => p.i)), [[0, 1], [5, 6, 7]]);
   assert.deepEqual(sparkSegments([null, null]), { points: [], segments: [] });
   assert.deepEqual(sparkSegments(undefined), { points: [], segments: [] });
+});
+
+// --- glance view (one health chip, compact numbers) ----------------------------------
+
+test('health chip: Healthy only with fresh data, a verified chain and a heartbeat within 70 min', () => {
+  const events = fixture();
+  const lastHb = at('2026-10-16T11:00:03Z');
+  const hbAt = (min) => deriveMetrics(events, { now: lastHb + min * 60000 }).heartbeat;
+  const verified = { status: 'verified', total: 46 };
+  const ok = { loaded: true, chain: verified, heartbeat: hbAt(12), dataAgeMin: 1 };
+  const health = (over) => healthSummary({ ...ok, ...over });
+
+  assert.deepEqual(health({}), { level: 'ok', label: 'Healthy', reasons: [] });
+  assert.equal(health({ dataAgeMin: null }).level, 'ok', 'sample data has no age');
+
+  // Degraded: late heartbeat, unknown heartbeat, stale data, failed refresh, unverified chain.
+  assert.deepEqual(health({ heartbeat: hbAt(75) }), { level: 'warn', label: 'Degraded', reasons: ['Heartbeat late (75 min)'] });
+  assert.equal(health({ heartbeat: null }).level, 'warn');
+  assert.deepEqual(health({ dataAgeMin: 25 }).reasons, ['Data is 25 min old']);
+  assert.equal(health({ dataAgeMin: 10 }).level, 'ok', 'up to 10 min old is fresh');
+  assert.deepEqual(health({ error: 'GitHub API error (HTTP 502).' }).reasons, ['Last refresh failed: GitHub API error (HTTP 502).']);
+  assert.equal(health({ error: 'x', dataAgeMin: 60 }).reasons.length, 1, 'a failed refresh explains the age');
+  assert.equal(health({ chain: { status: 'empty' } }).level, 'warn');
+  assert.equal(health({ chain: null }).level, 'warn');
+
+  // Down: stale or missing heartbeat, broken chain, no log, nothing loaded because of an error.
+  assert.deepEqual(health({ heartbeat: hbAt(3 * 60 + 5) }), { level: 'alert', label: 'Down', reasons: ['Heartbeat stale (3 h)'] });
+  assert.equal(health({ heartbeat: deriveMetrics([], { now: lastHb }).heartbeat }).level, 'alert');
+  assert.equal(health({ chain: { status: 'broken', brokenAt: 7 } }).reasons[0], 'Chain broken at event 7');
+  assert.deepEqual(healthSummary({ loaded: true, noLog: true }), { level: 'alert', label: 'Down', reasons: ['No audit log yet'] });
+  assert.equal(healthSummary({ loaded: false, error: 'offline' }).level, 'alert');
+
+  // The worst condition wins, and reasons list worst first.
+  const both = health({ heartbeat: hbAt(75), chain: { status: 'broken', brokenAt: 3 } });
+  assert.equal(both.level, 'alert');
+  assert.deepEqual(both.reasons, ['Chain broken at event 3', 'Heartbeat late (75 min)']);
+
+  assert.deepEqual(healthSummary({ loaded: false }), { level: 'info', label: 'Checking', reasons: ['Loading the audit log'] });
+  assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Checking']);
+});
+
+test('compact ages are one token; short titles keep at most N words; refs are repo-prefixed off the home repo', () => {
+  assert.equal(compactAge(12000), '12s');
+  assert.equal(compactAge(59999), '59s');
+  assert.equal(compactAge(60000), '1m');
+  assert.equal(compactAge(49 * 60000 + 30000), '49m');
+  assert.equal(compactAge(7 * 3600000 + 9 * 60000), '7h');
+  assert.equal(compactAge(47 * 3600000), '47h');
+  assert.equal(compactAge(50 * 3600000), '2d');
+  for (const v of [null, undefined, -5, NaN]) assert.equal(compactAge(v), '—');
+
+  assert.equal(shortTitle('Dashboard v2: needs-you hero, KPI trends, pipeline'), 'Dashboard v2: needs-you hero, KPI…');
+  assert.equal(shortTitle('Dashboard v2: needs-you hero, KPI trends', 4), 'Dashboard v2: needs-you hero…');
+  assert.equal(shortTitle('  Fix   the  parser  '), 'Fix the parser');
+  assert.equal(shortTitle(''), '');
+  assert.equal(shortTitle(null), '');
+  assert.ok(shortTitle('x'.repeat(80)).length <= 48);
+  assert.ok(shortTitle('x'.repeat(80)).endsWith('…'));
+
+  const home = 'sabbasi3-factory-lab/chrono-node-rs';
+  assert.equal(prRef(home, 22, home), '#22');
+  assert.equal(prRef('sabbasi3-factory-lab/factory', 3, home), 'factory#3');
+  assert.equal(prRef(home, null, home), '—');
 });

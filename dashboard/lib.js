@@ -269,6 +269,75 @@ export function statusSummary({ loaded = false, noLog = false, error = null, fix
 }
 
 // ---------------------------------------------------------------------------
+// Glance view: one health word, compact ages, short titles
+
+export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', info: 'Checking' });
+export const STALE_DATA_MIN = 10; // live data older than this is not fresh
+
+/**
+ * The single health chip, from data freshness, the controller heartbeat and the chain check.
+ * Returns { level, label, reasons } with level "ok" (Healthy), "warn" (Degraded), "alert"
+ * (Down) or "info" (Checking: nothing loaded yet). The worst condition wins:
+ *
+ * - Down: no audit log; nothing loaded because of an error; the chain is broken; the
+ *   heartbeat is missing from the window or stale (over 120 min).
+ * - Degraded: the last refresh failed, so older data is shown; the data is over
+ *   10 min old (`dataAgeMin`); the heartbeat is late (over 70 min) or unknown; the chain
+ *   isn't verified (not loaded or empty).
+ * - Healthy: fresh data, a verified chain and a heartbeat within 70 min.
+ *
+ * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
+ */
+export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null } = {}) {
+  if (!loaded && !error) return { level: 'info', label: HEALTH_LABELS.info, reasons: ['Loading the audit log'] };
+  const found = [];
+  const add = (level, text) => found.push({ level, text });
+  if (noLog) add('alert', 'No audit log yet');
+  if (error) add(loaded ? 'warn' : 'alert', `${loaded ? 'Last refresh failed' : "Couldn't load the audit log"}: ${error}`);
+  if (!error && isNum(dataAgeMin) && dataAgeMin > STALE_DATA_MIN) add('warn', `Data is ${formatAge(dataAgeMin)} old`);
+  if (loaded && !noLog) {
+    if (chain?.status === 'broken') add('alert', `Chain broken at event ${chain.brokenAt}`);
+    else if (chain?.status !== 'verified') add('warn', 'Chain not verified');
+    const level = heartbeat?.level ?? 'unknown';
+    if (level === 'alert') add('alert', `Heartbeat stale (${formatAge(heartbeat.ageMin)})`);
+    else if (level === 'none') add('alert', 'No heartbeat in the window');
+    else if (level === 'warn') add('warn', `Heartbeat late (${formatAge(heartbeat.ageMin)})`);
+    else if (level !== 'ok') add('warn', 'Heartbeat unknown');
+  }
+  const worst = found.reduce((a, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[a] ? f.level : a), 'ok');
+  const reasons = found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]).map((f) => f.text);
+  return { level: worst, label: HEALTH_LABELS[worst], reasons };
+}
+
+/** One-token age: "45s", "12m", "7h", "3d"; "—" when unknown. */
+export function compactAge(ms) {
+  if (!isNum(ms) || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** At most `maxWords` whitespace-separated words (and 48 characters), with "…" when cut. */
+export function shortTitle(text, maxWords = 5, maxChars = 48) {
+  const words = String(text ?? '').trim().split(/\s+/).filter(Boolean);
+  let out = words.slice(0, maxWords).join(' ');
+  let cut = words.length > maxWords;
+  if (out.length > maxChars) {
+    out = out.slice(0, maxChars - 1).trimEnd();
+    cut = true;
+  }
+  return cut ? `${out.replace(/[\s,.;:–-]+$/, '')}…` : out;
+}
+
+/** "#22" for a PR in the home repo, "factory#3" for one elsewhere. */
+export function prRef(repo, number, homeRepo) {
+  if (!isNum(number)) return '—';
+  return repo && repo !== homeRepo ? `${String(repo).split('/').pop()}#${number}` : `#${number}`;
+}
+
+// ---------------------------------------------------------------------------
 // Subjects (tasks and PRs)
 
 export function eventPrs(ev) {
