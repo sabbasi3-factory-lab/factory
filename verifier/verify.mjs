@@ -147,32 +147,35 @@ export function parseAnchorLine(line) {
 }
 
 /**
- * versions: [{ commit, parents: [sha], content: string | null }] for every commit of the anchors
- * branch, oldest first (content null = the file is missing in that commit). The history must be
- * linear, every commit must contain the file, and each commit may only append (at least one
- * byte). Returns { ok, anchors, errors } for the newest version.
+ * versions: an iterable (consumed once, in order) of { commit, parents: [sha], content: string |
+ * null } for every commit of the anchors branch, oldest first (content null = the file is
+ * missing in that commit). The history must be linear, every commit must contain the file, and
+ * each commit may only append (at least one byte). Only the previous and current versions are
+ * held at any time, so memory stays proportional to the newest file, not the whole history.
+ * Returns { ok, anchors, content, errors } for the newest version.
  */
 export function verifyAnchorHistory(versions) {
-  if (versions.length === 0) return { ok: false, anchors: [], errors: ['the anchors branch has no commits'] };
+  const bad = (error) => ({ ok: false, anchors: [], content: null, errors: [error] });
   let prev = null;
-  for (const [i, v] of versions.entries()) {
+  for (const v of versions) {
     const short = v.commit.slice(0, 7);
-    const linear = i === 0 ? v.parents.length === 0 : v.parents.length === 1 && v.parents[0] === prev.commit;
-    if (!linear) return { ok: false, anchors: [], errors: [`anchors commit ${short}: history is not linear`] };
-    if (v.content === null) return { ok: false, anchors: [], errors: [`anchors commit ${short}: ${ANCHORS_PATH} is missing`] };
-    if (prev && !(v.content.startsWith(prev.content) && v.content.length > prev.content.length)) {
-      return { ok: false, anchors: [], errors: [`anchors commit ${short}: anchors were changed or removed, not only appended`] };
+    const linear = prev === null ? v.parents.length === 0 : v.parents.length === 1 && v.parents[0] === prev.commit;
+    if (!linear) return bad(`anchors commit ${short}: history is not linear`);
+    if (v.content === null) return bad(`anchors commit ${short}: ${ANCHORS_PATH} is missing`);
+    if (prev && !(v.content.length > prev.content.length && v.content.startsWith(prev.content))) {
+      return bad(`anchors commit ${short}: anchors were changed or removed, not only appended`);
     }
-    prev = v;
+    prev = { commit: v.commit, content: v.content };
   }
+  if (prev === null) return bad('the anchors branch has no commits');
   const content = prev.content;
-  if (content === '' || !content.endsWith('\n')) return { ok: false, anchors: [], errors: [`${ANCHORS_PATH}: empty or not newline-terminated`] };
+  if (content === '' || !content.endsWith('\n')) return bad(`${ANCHORS_PATH}: empty or not newline-terminated`);
   const anchors = [];
   for (const [i, line] of content.slice(0, -1).split('\n').entries()) {
     try {
       anchors.push(parseAnchorLine(line));
     } catch (err) {
-      return { ok: false, anchors: [], errors: [`anchor #${i + 1}: ${err.message}`] };
+      return bad(`anchor #${i + 1}: ${err.message}`);
     }
   }
   const errors = [];
@@ -180,7 +183,7 @@ export function verifyAnchorHistory(versions) {
     if (anchors[i].at < anchors[i - 1].at) errors.push(`anchor #${i + 1}: earlier than anchor #${i}`);
     if (anchors[i].events < anchors[i - 1].events) errors.push(`anchor #${i + 1}: fewer events (${anchors[i].events}) than anchor #${i} (${anchors[i - 1].events})`);
   }
-  return { ok: errors.length === 0, anchors, errors };
+  return { ok: errors.length === 0, anchors, content, errors };
 }
 
 /** Checks the verified log against every anchor. */
@@ -215,7 +218,7 @@ export function run({ auditFiles, auditHead, anchorVersions, bootstrap, at, runI
     const h = verifyAnchorHistory(anchorVersions);
     errors.push(...h.errors);
     anchors = h.anchors;
-    oldContent = anchorVersions.at(-1)?.content ?? '';
+    oldContent = h.content ?? '';
   }
   const log = verifyLog(auditHead === null ? [] : auditFiles);
   errors.push(...log.errors);
@@ -253,18 +256,21 @@ export function readBlobs(dir, commit) {
   });
 }
 
-/** Every commit of `ref`, oldest first, with the anchors file content at that commit. */
-export function readAnchorVersions(dir, ref) {
+/**
+ * Every commit of `ref`, oldest first, with the anchors file content at that commit. A generator:
+ * each file is read only when the verifier asks for it, so only one or two are held at a time.
+ */
+export function* readAnchorVersions(dir, ref) {
   const lines = git(dir, ['rev-list', '--reverse', '--parents', ref]).toString('utf8').trim().split('\n').filter(Boolean);
-  return lines.map((l) => {
+  for (const l of lines) {
     const [commit, ...parents] = l.split(' ');
     const entries = lsTree(dir, commit);
     const extra = entries.find((e) => e.path !== ANCHORS_PATH);
     if (extra) throw new Error(`anchors commit ${commit.slice(0, 7)}: unexpected file ${extra.path}`);
     const file = entries.find((e) => e.path === ANCHORS_PATH);
     if (file && (file.type !== 'blob' || file.mode !== '100644')) throw new Error(`anchors commit ${commit.slice(0, 7)}: ${ANCHORS_PATH} is not a regular file`);
-    return { commit, parents, content: file ? utf8.decode(git(dir, ['cat-file', 'blob', file.oid])) : null };
-  });
+    yield { commit, parents, content: file ? utf8.decode(git(dir, ['cat-file', 'blob', file.oid])) : null };
+  }
 }
 
 // ---------------------------------------------------------------- CLI

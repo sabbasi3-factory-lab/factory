@@ -254,7 +254,7 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`.
 - **Verifier** (`verifier-fresh`, `verifier-too-old`, `verifier-never-succeeded`,
   `verifier-workflow-missing`, `verifier-unreadable`): the newest successful run of
   `audit-verify.yml` in this repo
-  (`GET /repos/{GITHUB_REPOSITORY}/actions/workflows/audit-verify.yml/runs?status=success&per_page=1`,
+  (`GET /repos/{GITHUB_REPOSITORY}/actions/workflows/audit-verify.yml/runs?branch=main&status=success&per_page=1`,
   needs `actions: read`) must have started at most 26 h ago. Its time is `run_started_at`,
   which is fixed once the run starts and never later than the verification, so it can't make
   a run look newer than it was. A 404, an API error, or no successful run ever alerts.

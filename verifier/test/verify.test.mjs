@@ -129,6 +129,32 @@ describe('anchors', () => {
   });
 });
 
+describe('anchors history at scale (memory stays bounded)', () => {
+  it('consumes versions lazily, one at a time, and holds only the previous one', () => {
+    const ev = chain(['2026-10-16T00:00:00Z']);
+    const line = (k) => anchorFor(ev, 1, new Date(Date.parse('2026-10-16T01:00:00Z') + k * 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z'), k + 1);
+    let content = '';
+    let produced = 0;
+    let maxAhead = 0;
+    let consumed = 0;
+    const N = 3000; // ~4 months of hourly anchors
+    function* gen() {
+      for (let k = 0; k < N; k++) {
+        content += `${line(k)}\n`;
+        produced++;
+        maxAhead = Math.max(maxAhead, produced - consumed);
+        yield { commit: `c${k}`.padEnd(40, '0'), parents: k ? [`c${k - 1}`.padEnd(40, '0')] : [], content };
+        consumed++;
+      }
+    }
+    const h = verifyAnchorHistory(gen());
+    assert.ok(h.ok, h.errors.join());
+    assert.equal(h.anchors.length, N);
+    assert.equal(h.content, content);
+    assert.equal(maxAhead, 1, 'the generator is never read ahead (no array of all versions)');
+  });
+});
+
 // ---------------------------------------------------------------- decision
 
 describe('run', () => {
@@ -218,11 +244,11 @@ describe('git objects', () => {
     const a1 = `${anchorFor(ev, 2, '2026-10-16T00:30:00Z')}\n`;
     repo.commit({ [ANCHORS_PATH]: a1 }, '1');
     repo.commit({ [ANCHORS_PATH]: `${a1}${anchorFor(ev, 4, '2026-10-16T01:30:00Z', 2)}\n` }, '2');
-    const v = readAnchorVersions(repo.dir, 'HEAD');
+    const v = [...readAnchorVersions(repo.dir, 'HEAD')];
     assert.equal(v.length, 2);
-    assert.ok(verifyAnchorHistory(v).ok);
+    assert.ok(verifyAnchorHistory(readAnchorVersions(repo.dir, 'HEAD')).ok);
     repo.commit({ 'notes.txt': 'x' }, '3');
-    assert.throws(() => readAnchorVersions(repo.dir, 'HEAD'), /unexpected file notes.txt/);
+    assert.throws(() => verifyAnchorHistory(readAnchorVersions(repo.dir, 'HEAD')), /unexpected file notes.txt/);
   });
 
   it('CLI: fails closed with ::error:: and writes nothing when a fast-forward commit drops an anchor', () => {

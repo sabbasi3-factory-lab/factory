@@ -1145,6 +1145,9 @@ export function pipeline(events, { openPrs = null } = {}) {
         c.checkHead = head;
         c.checks = new Map();
       }
+      // A cancelled task stays out of the pipeline until real new work reopens it; a late
+      // run_finished or check result after the cancellation doesn't bring it back.
+      if (c.removed && !REOPENS.has(ev.type)) continue;
       c.removed = false;
       if (c.lane !== lane && laneMoveAllowed(ev.type, c.lane, lane)) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
       if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {

@@ -224,9 +224,9 @@ test('review #3: an incomplete heartbeat record, a future one or an impossible d
 
 // --- the independent verifier (audit-verify) ----------------------------------------------
 
-const RUNS = '/actions/workflows/audit-verify.yml/runs?status=success&per_page=1';
+const RUNS = '/actions/workflows/audit-verify.yml/runs?branch=main&status=success&per_page=1';
 const run = (startedMinAgo, over = {}) => ({
-  id: 9001, status: 'completed', conclusion: 'success', run_started_at: minutesAgo(startedMinAgo),
+  id: 9001, head_branch: 'main', status: 'completed', conclusion: 'success', run_started_at: minutesAgo(startedMinAgo),
   updated_at: minutesAgo(startedMinAgo - 2), html_url: 'https://github.com/example/factory/actions/runs/9001', ...over,
 });
 const verifierAt = (min) => decideVerifier({ workflow: 'ok', run: run(min) }, NOW);
@@ -256,7 +256,7 @@ test('verifier never succeeded, 404 and API errors alert (fail closed)', () => {
   assert.deepEqual([err.status, err.alert, err.reason, err.detail], ['unknown', true, 'verifier-unreadable', 'HTTP 502']);
   assert.equal(decideVerifier(undefined, NOW).status, 'unknown');
   // A run that isn't a completed success, has no usable time, or starts in the future is unknown.
-  for (const bad of [{ conclusion: 'failure' }, { status: 'in_progress' }, { run_started_at: null }, { run_started_at: '2026-10-16T11:00:00.000Z' }, { run_started_at: minutesAgo(-5) }, { id: '9001' }]) {
+  for (const bad of [{ head_branch: 'feature' }, { head_branch: undefined }, { conclusion: 'failure' }, { status: 'in_progress' }, { run_started_at: null }, { run_started_at: '2026-10-16T11:00:00.000Z' }, { run_started_at: minutesAgo(-5) }, { id: '9001' }]) {
     const d = decideVerifier({ workflow: 'ok', run: run(30, bad) }, NOW);
     assert.deepEqual([d.status, d.alert], ['unknown', true], JSON.stringify(bad));
   }

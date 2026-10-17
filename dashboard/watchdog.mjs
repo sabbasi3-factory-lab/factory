@@ -111,7 +111,7 @@ export function decideVerifier(verifier, now, maxAgeMin = VERIFIER_MAX_AGE_MIN) 
   const run = verifier.run;
   if (run == null) return { ...base, status: 'missing', alert: true, reason: 'verifier-never-succeeded' };
   const ms = parseUtcSeconds(run?.run_started_at);
-  if (!Number.isSafeInteger(run?.id) || run.id <= 0 || run.status !== 'completed' || run.conclusion !== 'success' || ms == null || ms > now) {
+  if (!Number.isSafeInteger(run?.id) || run.id <= 0 || run.head_branch !== 'main' || run.status !== 'completed' || run.conclusion !== 'success' || ms == null || ms > now) {
     return { ...base, status: 'unknown', alert: true, reason: 'verifier-unreadable', detail: 'unexpected workflow run in the response' };
   }
   const url = typeof run.html_url === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+$/.test(run.html_url) ? run.html_url : null;
@@ -237,11 +237,15 @@ export async function readAudit({ fetch, now, token = null, repo = SOURCE_REPO }
   return { branch: 'ok', headSha: sha, files };
 }
 
-/** Reads the newest successful audit-verify run in `repo` (the factory repo). */
+/**
+ * Reads the newest successful audit-verify run on `main` in `repo` (the factory repo). Runs on
+ * other branches don't count: the verifier job only runs on main, so a dispatch elsewhere
+ * "succeeds" without verifying anything.
+ */
 export async function readVerifier({ fetch, token = null, repo }) {
   let res;
   try {
-    res = await fetch(`${API}/repos/${repo}/actions/workflows/${VERIFIER_WORKFLOW}/runs?status=success&per_page=1`, { headers: apiHeaders(token) });
+    res = await fetch(`${API}/repos/${repo}/actions/workflows/${VERIFIER_WORKFLOW}/runs?branch=main&status=success&per_page=1`, { headers: apiHeaders(token) });
   } catch (err) {
     return { workflow: 'error', detail: `network: ${err?.message ?? err}` };
   }

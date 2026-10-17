@@ -85,6 +85,18 @@ test('pipeline: dry-run decisions never move a card; cancelled removes it', () =
   assert.equal(lanes.find((l) => l.key === 'running').cards.length, 0);
 });
 
+test('pipeline: a delayed completion after cancellation keeps the card out; a reopening event brings it back', () => {
+  const base = [
+    mk('dispatched', '2026-10-16T08:05:00Z', { task: 't/c', issue: 3, attempt: 1 }),
+    mk('cancelled', '2026-10-16T08:10:00Z', { task: 't/c', issue: 3, effect: 'close', reason: 'owner' }),
+    mk('run_finished', '2026-10-16T09:00:00Z', { task: 't/c', issue: 3, attempt: 1, aic: 40 }),
+    mk('run_started', '2026-10-16T09:01:00Z', { task: 't/c', issue: 3, attempt: 1 }),
+  ];
+  assert.equal(pipeline(base).total, 0);
+  const reopened = pipeline([...base, mk('dispatched', '2026-10-16T10:00:00Z', { task: 't/c', issue: 3, attempt: 2 })]);
+  assert.deepEqual(reopened.lanes.find((l) => l.key === 'running').cards.map((c) => [c.label, c.attempt]), [['t/c', 2]]);
+});
+
 test('stage breakdown: stacked segments per task and the stage with the largest share', () => {
   const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
   const sb = stageBreakdown(m.stageTimes);
