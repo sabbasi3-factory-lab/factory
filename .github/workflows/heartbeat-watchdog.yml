@@ -1,0 +1,40 @@
+name: heartbeat-watchdog
+
+# Alerts when the chrono-node-rs controller's hourly heartbeat is more than 2 hours old,
+# missing or unreadable (DESIGN §11): opens one issue labelled `heartbeat-alert`,
+# comments on it while the problem lasts, and closes it when heartbeats resume.
+# The logic, and its tests, are in dashboard/watchdog.mjs.
+#
+# Note: GitHub disables scheduled workflows in public repos after 60 days without
+# repository activity. That applies to this watchdog too, so re-enable it (or push to
+# the repo) if the factory repo goes quiet for that long.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: heartbeat-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Check the controller heartbeat
+        run: node dashboard/watchdog.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

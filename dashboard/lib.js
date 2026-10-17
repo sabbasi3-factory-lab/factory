@@ -213,6 +213,50 @@ export function heartbeatLevel(ageMin, opts = DEFAULTS) {
   return 'ok';
 }
 
+/** Coarse age for an aria-live line: whole hours from 2 h, so it changes at most hourly. */
+export function formatAge(ageMin) {
+  if (ageMin == null || !Number.isFinite(ageMin)) return 'unknown';
+  if (ageMin < 120) return `${Math.floor(ageMin)} min`;
+  if (ageMin < 48 * 60) return `${Math.floor(ageMin / 60)} h`;
+  return `${Math.floor(ageMin / 1440)} d`;
+}
+
+const LEVEL_RANK = { ok: 0, info: 0, warn: 1, alert: 2 };
+
+/**
+ * The header status line: data freshness plus controller liveness, so it never reads as
+ * healthy while the heartbeat is late or missing. Returns { text, level } where level is
+ * "info", "ok", "warn" or "alert". Fails closed: unknown heartbeat state is a warning.
+ */
+export function statusSummary({ loaded = false, noLog = false, error = null, fixture = false, eventCount = 0, headSha = null, days = DEFAULTS.windowDays, heartbeat = null } = {}) {
+  if (!loaded && !error) return { text: 'Loading the audit log…', level: 'info' };
+  if (noLog && !error) {
+    return { text: 'No audit log yet: the audit branch does not exist, so there is no controller heartbeat.', level: 'warn' };
+  }
+
+  let data;
+  let dataLevel = 'ok';
+  const head = typeof headSha === 'string' ? headSha.slice(0, 7) : null;
+  if (error) {
+    data = `Problem: ${error}${loaded ? ' Showing the last data loaded' : ''}`;
+    dataLevel = 'alert';
+  } else if (fixture) data = `Sample data · ${eventCount} events`;
+  else if (!eventCount) data = `Audit branch found${head ? ` (head ${head})` : ''}, but no events in the last ${days} days`;
+  else data = `Data fresh · ${eventCount} events${head ? ` · audit head ${head}` : ''}`;
+  if (!loaded) return { text: data, level: dataLevel };
+
+  let hb;
+  let hbLevel;
+  const level = heartbeat?.level ?? 'unknown';
+  if (level === 'ok') [hb, hbLevel] = ['controller heartbeat ok', 'ok'];
+  else if (level === 'warn') [hb, hbLevel] = [`controller heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min)`, 'warn'];
+  else if (level === 'alert') [hb, hbLevel] = [`controller heartbeat stale (${formatAge(heartbeat.ageMin)})`, 'alert'];
+  else if (level === 'none') [hb, hbLevel] = [`no controller heartbeat in the last ${days} days`, 'alert'];
+  else [hb, hbLevel] = ['controller heartbeat unknown', 'warn'];
+
+  return { text: `${data} · ${hb}`, level: LEVEL_RANK[hbLevel] > LEVEL_RANK[dataLevel] ? hbLevel : dataLevel };
+}
+
 // ---------------------------------------------------------------------------
 // Subjects (tasks and PRs)
 

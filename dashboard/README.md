@@ -15,6 +15,8 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `style.css` | Layout; light and dark themes via `prefers-color-scheme` |
 | `test/lib.test.mjs` | Tests for `lib.js` |
 | `test/make-fixture.mjs` | Generates `test/fixtures/sample.jsonl` with real hashes |
+| `watchdog.mjs` | Heartbeat watchdog run hourly by `.github/workflows/heartbeat-watchdog.yml`: opens a `heartbeat-alert` issue when the heartbeat is over 2 h old, missing or unreadable, and closes it on recovery. Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
+| `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
 
 ## Preview locally
 

@@ -323,7 +323,7 @@ An event is one fact the controller observed, or one decision it made, that chan
 | People | `human_action` (review, approval, label), observed from GitHub with who and when |
 | Factory | `budget_alert`, `budget_pause`, `kill_switch`, `policy_changed`, `drill_result`, `dependency_decision`, `token_expiry_warning`, `chain_verified`/`chain_broken`, `heartbeat` (hourly) |
 
-Polls where nothing changed are **not** recorded; the hourly `heartbeat` proves the controller is alive. A separate workflow (the daily digest) alerts you if there has been no heartbeat for 2 hours. A dead controller can't report itself, and GitHub disables scheduled workflows in public repos after 60 days without repo activity.
+Polls where nothing changed are **not** recorded; the hourly `heartbeat` proves the controller is alive. A separate hourly workflow in the factory repo (`heartbeat-watchdog`) alerts you if there has been no heartbeat for 2 hours: it opens a `heartbeat-alert` issue, and closes it when heartbeats resume. An unreadable log counts as stale. A dead controller can't report itself, and GitHub disables scheduled workflows in public repos after 60 days without repo activity.
 
 **IDs:**
 - `id` is a random UUID v4 from a cryptographic generator (`crypto.randomUUID()`).
@@ -377,15 +377,23 @@ A daily collector copies run summaries into the audit log before Actions artifac
 
 ### Control room (dashboard)
 
-- **Live tiles:** agents running vs. WIP limit, merge queue, merged today, zero-touch rate, AIC today vs. budget, needs-you count, kill-switch state, factory version.
+A static page on the factory repo's GitHub Pages (`dashboard/`). There's no server-side data build step in v1: the browser reads the public audit log directly.
+
+- **Live tiles:** agents running vs. WIP limit, merge queue, merged today, zero-touch rate, AIC today vs. budget, needs-you count, kill-switch state, factory version, heartbeat age, dry-run mode.
 - **Tables and charts:**
   - running now (task, attempt, step, model, elapsed, tokens, AIC)
   - tokens per task and in total
-  - flow (time from issue to live, throughput)
-  - quality (golden pass %, repairs per task, escaped bugs)
+  - time per stage per task, from event times
+  - latest check results, and recent events with their canonical JSON
+  - flow (time from issue to live, throughput) and quality (golden pass %, repairs per task, escaped bugs): later, once the events exist
 - **Where the time goes:** a stacked bar per task, plus a 7-day average, showing queue wait, run setup, agent work, detection, CI, merge queue, deploy and time waiting for you.
 - **A timeline for each task.**
-- **Refresh:** it polls the audit branch every 30–60 s through the GitHub API.
+- **Integrity:** the browser recomputes every event's SHA-256 and checks the hash chain across the loaded window.
+- **Data and refresh:**
+  - It polls the `audit` branch head on api.github.com with an ETag (`If-None-Match`). When the head changes, it fetches the last 7 days of `audit/YYYY/MM/DD.jsonl` from raw.githubusercontent.com, pinned to that commit.
+  - Unauthenticated by default. GitHub allows 60 API requests an hour per IP, and unauthenticated 304s still count, so the page spreads its requests over the rate-limit window: about one check a minute. It shows the requests left.
+  - An optional read-only token raises the limit (30 s polls). It stays in the browser's `localStorage` and is sent only to api.github.com.
+  - The status line reports data freshness and controller liveness together, so it never reads as healthy while the heartbeat is late.
 
 **No OpenTelemetry (decision):** all data stays in GitHub.
 

@@ -2,7 +2,7 @@
 // and renders tiles and tables. All DOM writes use textContent, never innerHTML.
 import {
   DEFAULTS, STAGES, canonicalize, dayPaths, deriveMetrics, formatDuration, parseJsonl,
-  parseTime, subjectLabel, timelineFor, utcDay, verifyChain,
+  parseTime, statusSummary, subjectLabel, timelineFor, utcDay, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -356,7 +356,7 @@ function render({ full = false } = {}) {
   try {
     renderHeader(m);
   } catch (err) {
-    setStatus(`Problem showing the header: ${err?.message ?? err}`);
+    setStatus(`Problem showing the header: ${err?.message ?? err}`, 'alert');
   }
   safe('tiles', withMetrics(renderTiles)); // tiles hold no focusable elements
   if (full || state.renderedVersion !== state.dataVersion) {
@@ -373,9 +373,10 @@ function render({ full = false } = {}) {
   }
 }
 
-function setStatus(text) {
+function setStatus(text, level = 'warn') {
   const el = $('status');
   if (el.textContent !== text) el.textContent = text; // only real changes are announced
+  el.className = `status status--${level}`;
 }
 
 function renderHeader(m) {
@@ -402,12 +403,17 @@ function renderHeader(m) {
   mode.hidden = !FIXTURE;
   mode.textContent = `Fixture mode · sample data · clock pinned at ${new Date(now()).toISOString().slice(0, 16)}Z`;
 
-  if (state.error) setStatus(`Problem: ${state.error}${state.loaded ? ' Showing the last data loaded.' : ''}`);
-  else if (!state.loaded) setStatus('Loading the audit log…');
-  else if (state.noLog) setStatus('No audit log yet: the audit branch does not exist.');
-  else if (FIXTURE) setStatus(`Showing ${state.events.length} sample events from ${FIXTURE_URL}.`);
-  else if (!state.events.length) setStatus(`Audit branch found (head ${state.headSha.slice(0, 7)}), but no events in the last ${DAYS} days.`);
-  else setStatus(`Up to date · ${state.events.length} events · audit head ${state.headSha.slice(0, 7)}.`);
+  const summary = statusSummary({
+    loaded: state.loaded,
+    noLog: state.noLog,
+    error: state.error,
+    fixture: FIXTURE,
+    eventCount: state.events.length,
+    headSha: state.headSha,
+    days: DAYS,
+    heartbeat: m?.heartbeat ?? null,
+  });
+  setStatus(summary.text, summary.level);
 
   const meta = [];
   if (!FIXTURE) {
