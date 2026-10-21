@@ -287,8 +287,9 @@ export async function readVerifier({ fetch, token = null, repo }) {
 
 /**
  * The verdict of the previous completed watchdog run on main (not this one): 'failing' when
- * its marker step ran, 'healthy' when the marker step was skipped, 'unknown' otherwise (no
- * earlier run, an older run without the marker step, or an API error).
+ * its marker step ran, 'healthy' only when the marker step was skipped AND the job succeeded,
+ * 'unknown' otherwise (the job failed or was cancelled, no earlier run, an older run without
+ * the marker step, or an API error). 'unknown' counts as failing.
  */
 export async function readPreviousVerdict({ fetch, token = null, repo, currentRunId = null }) {
   try {
@@ -303,7 +304,10 @@ export async function readPreviousVerdict({ fetch, token = null, repo, currentRu
     const job = ((await jr.json())?.jobs ?? []).find((j) => j?.name === WATCHDOG_JOB);
     const step = (job?.steps ?? []).find((st) => st?.name === MARKER_STEP);
     if (step?.conclusion === 'success') return 'failing';
-    if (step?.conclusion === 'skipped') return 'healthy';
+    // A skipped marker proves "healthy" only if the job itself succeeded: setup, checkout or the
+    // check can fail, the run can be cancelled, or the issue sync can error before the verdict
+    // is written, and the marker is skipped in all of those cases too.
+    if (step?.conclusion === 'skipped' && job?.conclusion === 'success') return 'healthy';
     return 'unknown';
   } catch {
     return 'unknown';

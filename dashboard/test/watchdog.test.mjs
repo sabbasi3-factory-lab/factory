@@ -401,16 +401,22 @@ test('a new alert needs two failing runs in a row; an open alert keeps being upd
 test('readPreviousVerdict: the marker step of the previous completed run on main', async () => {
   const repo = 'example/factory';
   const runsUrl = '/actions/workflows/heartbeat-watchdog.yml/runs?branch=main&status=completed&per_page=5';
-  const jobs = (conclusion) => ({ body: { jobs: [{ name: 'watchdog', steps: [{ name: 'Check the controller heartbeat', conclusion: 'success' }, ...(conclusion ? [{ name: MARKER_STEP, conclusion }] : [])] }] } });
-  const world = (marker, current = null) => fakeFetch([
+  const jobs = (conclusion, jobConclusion = 'success') => ({ body: { jobs: [{ name: 'watchdog', conclusion: jobConclusion, steps: [{ name: 'Check the controller heartbeat', conclusion: jobConclusion === 'success' ? 'success' : 'failure' }, ...(conclusion ? [{ name: MARKER_STEP, conclusion }] : [])] }] } });
+  const world = (marker, jobConclusion = 'success') => fakeFetch([
     [runsUrl, { body: { workflow_runs: [{ id: 77, run_attempt: 1 }, { id: 76, run_attempt: 2 }] } }],
     ['/actions/runs/77/attempts/1/jobs', jobs('success')],
-    ['/actions/runs/76/attempts/2/jobs', jobs(marker)],
+    ['/actions/runs/76/attempts/2/jobs', jobs(marker, jobConclusion)],
   ]);
   assert.equal(await readPreviousVerdict({ fetch: world('skipped'), repo, currentRunId: 77 }), 'healthy', 'skips the current run');
   assert.equal(await readPreviousVerdict({ fetch: world('success'), repo, currentRunId: 77 }), 'failing');
   assert.equal(await readPreviousVerdict({ fetch: world('skipped'), repo }), 'failing', 'without a current id the newest run is the previous one');
   assert.equal(await readPreviousVerdict({ fetch: world(null), repo, currentRunId: 77 }), 'unknown', 'an older run without the marker step');
+  // Review: a skipped marker in a job that failed or was cancelled (setup/checkout failed, the
+  // issue sync threw before the verdict was written) proves nothing: unknown, i.e. failing.
+  for (const jobConclusion of ['failure', 'cancelled', 'timed_out', null]) {
+    assert.equal(await readPreviousVerdict({ fetch: world('skipped', jobConclusion), repo, currentRunId: 77 }), 'unknown', `job ${jobConclusion}`);
+  }
+  assert.equal(await readPreviousVerdict({ fetch: world('success', 'failure'), repo, currentRunId: 77 }), 'failing', 'a marker that ran still means failing');
   assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, { status: 500 }]]), repo }), 'unknown');
   assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, new Error('offline')]]), repo }), 'unknown');
   assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, { body: { workflow_runs: [] } }]]), repo }), 'unknown');
