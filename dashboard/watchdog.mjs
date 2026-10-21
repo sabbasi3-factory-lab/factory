@@ -1,8 +1,11 @@
 // Liveness watchdog: alerts through one GitHub issue when
-//  - the controller's hourly heartbeat is more than 2 hours old, missing, or can't be
-//    read (DESIGN §11), or
+//  - the controller's heartbeat is more than 12 hours old, missing, or can't be read
+//    (DESIGN §11), or
 //  - the factory's audit-verify workflow (independent audit-chain verifier) hasn't
-//    succeeded in 26 hours, has never succeeded, or its runs can't be read.
+//    succeeded in 26 hours, has never succeeded, or its runs can't be read,
+// on TWO consecutive watchdog runs. GitHub runs the "hourly" schedules of a Free-plan org
+// only every ~2–8 h (measured), so the limits are set from that, and one bad run (a slow
+// scheduler, a transient read error) never opens an issue on its own.
 // Runs from .github/workflows/heartbeat-watchdog.yml; the pure parts are unit-tested.
 //
 //   GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/factory node dashboard/watchdog.mjs
@@ -18,9 +21,15 @@ export const SOURCE_REPO = 'sabbasi3-factory-lab/chrono-node-rs';
 export const AUDIT_BRANCH = 'audit';
 export const LABEL = 'heartbeat-alert'; // kept for continuity: the open issue is found by this label
 export const TITLE = 'Factory liveness alert';
-export const MAX_AGE_MIN = DEFAULTS.heartbeatAlertMin; // 120: alert after 2 h
+export const MAX_AGE_MIN = DEFAULTS.heartbeatAlertMin; // 720: alert after 12 h
 export const VERIFIER_WORKFLOW = 'audit-verify.yml'; // in the repo that holds the alert issue
-export const VERIFIER_MAX_AGE_MIN = 26 * 60; // hourly runs; alert after 26 h without a success
+export const VERIFIER_MAX_AGE_MIN = 26 * 60; // alert after 26 h without a success
+export const WATCHDOG_WORKFLOW = 'heartbeat-watchdog.yml';
+export const WATCHDOG_JOB = 'watchdog';
+// Name of the workflow step that runs only when this run's verdict is "failing". The next run
+// reads it from the jobs API: success = the previous run was failing, skipped = it was healthy.
+export const MARKER_STEP = 'Liveness failing (marker for the next run)';
+const RAW_ATTEMPTS = 3;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const API = 'https://api.github.com';
 const RAW = 'https://raw.githubusercontent.com';
@@ -65,7 +74,7 @@ export function decide(audit, now, maxAgeMin = MAX_AGE_MIN) {
   const withLast = { ...base, last, ageMin };
   if (last && ageMin <= maxAgeMin) return { ...withLast, status: 'fresh', alert: false, reason: 'heartbeat-fresh' };
 
-  const unreadable = files.filter((f) => f.status !== 'ok' && f.status !== 'missing').map((f) => f.path);
+  const unreadable = files.filter((f) => f.status !== 'ok' && f.status !== 'missing').map((f) => ({ path: f.path, detail: f.detail ?? null }));
   if (unreadable.length || !files.length) {
     return { ...withLast, status: 'unknown', alert: true, reason: 'audit-file-unreadable', unreadable };
   }
@@ -91,7 +100,7 @@ export function describe(decision, runUrl = null) {
     `- Checked: ${decision.checkedAt}${decision.headSha ? `, audit head \`${decision.headSha.slice(0, 7)}\`` : ''}`,
   ];
   if (decision.detail) lines.push(`- Detail: ${decision.detail}`);
-  if (decision.unreadable?.length) lines.push(`- Unreadable: ${decision.unreadable.map((p) => `\`${p}\``).join(', ')}`);
+  if (decision.unreadable?.length) lines.push(`- Unreadable: ${decision.unreadable.map((u) => (typeof u === 'string' ? `\`${u}\`` : `\`${u.path}\`${u.detail ? ` (${u.detail})` : ''}`)).join(', ')}`);
   if (runUrl) lines.push(`- Watchdog run: ${runUrl}`);
   return lines.join('\n');
 }
@@ -173,19 +182,22 @@ export function describeLiveness(decision, runUrl = null) {
  * decision) and the open issues carrying LABEL. One issue lists every failing check and is
  * closed only when all of them are healthy.
  */
-export function planIssueActions(decision, openIssues, runUrl = null) {
+export function planIssueActions(decision, openIssues, runUrl = null, previous = 'failing') {
   const live = asLiveness(decision);
   const open = (openIssues || []).filter((i) => !i.pull_request).sort((a, b) => a.number - b.number);
   const details = describeLiveness(live, runUrl);
   if (live.alert) {
     const failing = live.failing.map((r) => `\`${r}\``).join(', ');
     if (open.length) return [{ op: 'comment', number: open[0].number, body: `Still alerting: ${failing}.\n\n${details}` }];
+    // A new issue needs two failing runs in a row. Only a previous run that was positively
+    // healthy holds it back; an unknown previous verdict counts as failing (fail closed).
+    if (previous === 'healthy') return [{ op: 'pending', failing: live.failing }];
     const body = [
       `A factory liveness check is failing. The watchdog checks the controller's heartbeat on the \`${AUDIT_BRANCH}\` branch of ${SOURCE_REPO}, and the independent audit verifier (\`${VERIFIER_WORKFLOW}\` in this repo).`,
       '',
       details,
       '',
-      `The controller writes a \`heartbeat\` event every hour (alert after ${MAX_AGE_MIN} min), and \`${VERIFIER_WORKFLOW}\` verifies the audit log every hour (alert after ${VERIFIER_MAX_AGE_MIN / 60} h without a success). This issue is updated by the hourly watchdog and closed automatically only when every check is healthy again.`,
+      `The controller writes a \`heartbeat\` event about every hour, and \`${VERIFIER_WORKFLOW}\` verifies the audit log about every hour, but GitHub runs these schedules only every ~2–8 h on this plan. So the watchdog alerts after ${MAX_AGE_MIN / 60} h without a heartbeat or ${VERIFIER_MAX_AGE_MIN / 60} h without a verification, and only when two watchdog runs in a row agree. This issue is updated by the watchdog and closed automatically when every check is healthy again.`,
     ].join('\n');
     return [{ op: 'create', title: TITLE, body, labels: [LABEL] }];
   }
@@ -199,6 +211,8 @@ export function planIssueActions(decision, openIssues, runUrl = null) {
 // ---------------------------------------------------------------------------
 // GitHub I/O (fetch is injected for tests)
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function apiHeaders(token) {
   const h = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'factory-heartbeat-watchdog' };
   if (token) h.Authorization = `Bearer ${token}`;
@@ -206,7 +220,7 @@ function apiHeaders(token) {
 }
 
 /** Reads the audit branch head and today's and yesterday's day files, pinned to that head. */
-export async function readAudit({ fetch, now, token = null, repo = SOURCE_REPO }) {
+export async function readAudit({ fetch, now, token = null, repo = SOURCE_REPO, retryDelayMs = 2000 }) {
   let res;
   try {
     res = await fetch(`${API}/repos/${repo}/branches/${AUDIT_BRANCH}`, { headers: apiHeaders(token) });
@@ -223,17 +237,27 @@ export async function readAudit({ fetch, now, token = null, repo = SOURCE_REPO }
   }
   if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return { branch: 'error', detail: 'unexpected branch response' };
 
-  const files = await Promise.all(dayPaths(now, 2).map(async (path) => {
-    try {
-      // The token is never sent to raw.githubusercontent.com.
-      const r = await fetch(`${RAW}/${repo}/${sha}/${path}`, { headers: { 'User-Agent': 'factory-heartbeat-watchdog' } });
-      if (r.status === 404) return { path, status: 'missing' };
-      if (!r.ok) return { path, status: 'error', detail: `HTTP ${r.status}` };
-      return { path, status: 'ok', text: await r.text() };
-    } catch (err) {
-      return { path, status: 'error', detail: `network: ${err?.message ?? err}` };
+  // A day file that doesn't exist yet (today's, before the first event) is 'missing', which is
+  // normal: yesterday's file still holds the newest heartbeat. Other failures are retried, so
+  // one transient error doesn't hide the heartbeat; what's still failing is reported with its
+  // reason.
+  const readOne = async (path) => {
+    let last = null;
+    for (let attempt = 1; attempt <= RAW_ATTEMPTS; attempt++) {
+      try {
+        // The token is never sent to raw.githubusercontent.com.
+        const r = await fetch(`${RAW}/${repo}/${sha}/${path}`, { headers: { 'User-Agent': 'factory-heartbeat-watchdog' } });
+        if (r.status === 404) return { path, status: 'missing' };
+        if (r.ok) return { path, status: 'ok', text: await r.text() };
+        last = `HTTP ${r.status}`;
+      } catch (err) {
+        last = `network: ${err?.message ?? err}`;
+      }
+      if (attempt < RAW_ATTEMPTS) await sleep(retryDelayMs * attempt);
     }
-  }));
+    return { path, status: 'error', detail: `${last} after ${RAW_ATTEMPTS} attempts` };
+  };
+  const files = await Promise.all(dayPaths(now, 2).map(readOne));
   return { branch: 'ok', headSha: sha, files };
 }
 
@@ -261,8 +285,37 @@ export async function readVerifier({ fetch, token = null, repo }) {
   return { workflow: 'ok', run: body.workflow_runs[0] ?? null };
 }
 
+/**
+ * The verdict of the previous completed watchdog run on main (not this one): 'failing' when
+ * its marker step ran, 'healthy' only when the marker step was skipped AND the job succeeded,
+ * 'unknown' otherwise (the job failed or was cancelled, no earlier run, an older run without
+ * the marker step, or an API error). 'unknown' counts as failing.
+ */
+export async function readPreviousVerdict({ fetch, token = null, repo, currentRunId = null }) {
+  try {
+    const res = await fetch(`${API}/repos/${repo}/actions/workflows/${WATCHDOG_WORKFLOW}/runs?branch=main&status=completed&per_page=5`, { headers: apiHeaders(token) });
+    if (!res.ok) return 'unknown';
+    const runs = (await res.json())?.workflow_runs;
+    if (!Array.isArray(runs)) return 'unknown';
+    const prev = runs.find((r) => Number.isSafeInteger(r?.id) && String(r.id) !== String(currentRunId ?? ''));
+    if (!prev) return 'unknown';
+    const jr = await fetch(`${API}/repos/${repo}/actions/runs/${prev.id}/attempts/${Number.isSafeInteger(prev.run_attempt) ? prev.run_attempt : 1}/jobs`, { headers: apiHeaders(token) });
+    if (!jr.ok) return 'unknown';
+    const job = ((await jr.json())?.jobs ?? []).find((j) => j?.name === WATCHDOG_JOB);
+    const step = (job?.steps ?? []).find((st) => st?.name === MARKER_STEP);
+    if (step?.conclusion === 'success') return 'failing';
+    // A skipped marker proves "healthy" only if the job itself succeeded: setup, checkout or the
+    // check can fail, the run can be cancelled, or the issue sync can error before the verdict
+    // is written, and the marker is skipped in all of those cases too.
+    if (step?.conclusion === 'skipped' && job?.conclusion === 'success') return 'healthy';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** Applies the plan to the alert issue in `repo` (the factory repo). */
-export async function syncIssue({ fetch, token, repo, decision, runUrl = null, dryRun = false }) {
+export async function syncIssue({ fetch, token, repo, decision, runUrl = null, dryRun = false, previous = 'failing' }) {
   const call = async (method, path, body) => {
     const res = await fetch(`${API}/repos/${repo}${path}`, {
       method,
@@ -273,7 +326,7 @@ export async function syncIssue({ fetch, token, repo, decision, runUrl = null, d
     return res.status === 204 ? null : res.json();
   };
   const open = await call('GET', `/issues?state=open&labels=${encodeURIComponent(LABEL)}&per_page=100`);
-  const actions = planIssueActions(decision, open, runUrl);
+  const actions = planIssueActions(decision, open, runUrl, previous);
   if (dryRun) return actions;
   for (const a of actions) {
     if (a.op === 'create') {
@@ -304,17 +357,20 @@ export async function main(env = process.env, fetchImpl = globalThis.fetch, now 
   const decision = decide(audit, now);
   const verifier = decideVerifier(await readVerifier({ fetch: fetchImpl, token, repo }), now);
   const liveness = combine(decision, verifier);
-  const actions = await syncIssue({ fetch: fetchImpl, token, repo, decision: liveness, runUrl, dryRun });
+  const previous = await readPreviousVerdict({ fetch: fetchImpl, token, repo, currentRunId: env.GITHUB_RUN_ID ?? null });
+  const actions = await syncIssue({ fetch: fetchImpl, token, repo, decision: liveness, runUrl, dryRun, previous });
+  // The workflow's marker step runs only when this run is failing; the next run reads it.
+  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `failing=${liveness.alert ? 'true' : 'false'}\n`);
   const summary = [
     `### Liveness watchdog: ${liveness.status} (heartbeat ${decision.status}, verifier ${verifier.status})`,
     '',
     describeLiveness(liveness, runUrl),
     '',
-    `Issue actions${dryRun ? ' (dry run)' : ''}: ${actions.length ? actions.map((a) => `${a.op}${a.number ? ` #${a.number}` : ''}`).join(', ') : 'none'}`,
+    `Previous watchdog run: ${previous}. Issue actions${dryRun ? ' (dry run)' : ''}: ${actions.length ? actions.map((a) => (a.op === 'pending' ? 'none yet (first failing run; an issue opens if the next run fails too)' : `${a.op}${a.number ? ` #${a.number}` : ''}`)).join(', ') : 'none'}`,
   ].join('\n');
   console.log(summary);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, summary + '\n');
-  return { decision, verifier, liveness, actions };
+  return { decision, verifier, liveness, actions, previous };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

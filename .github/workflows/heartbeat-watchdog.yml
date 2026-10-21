@@ -1,8 +1,11 @@
 name: heartbeat-watchdog
 
-# Alerts when the chrono-node-rs controller's hourly heartbeat is more than 2 hours old,
-# missing or unreadable (DESIGN §11): opens one issue labelled `heartbeat-alert`,
-# comments on it while the problem lasts, and closes it when heartbeats resume.
+# Alerts when the chrono-node-rs controller's heartbeat is more than 12 hours old, missing or
+# unreadable, or the factory's audit-verify hasn't succeeded for 26 hours (DESIGN §11). It opens
+# one issue labelled `heartbeat-alert` only after TWO failing runs in a row (the previous run's
+# verdict is the marker step below, read through the jobs API), comments on it while the
+# problem lasts, and closes it on the first healthy run. Scheduled hourly; GitHub runs it every
+# ~2-5 h on this plan, which is why the limits are 12 h / 26 h (policies/cadence.yaml).
 # The logic, and its tests, are in dashboard/watchdog.mjs.
 #
 # Note: GitHub disables scheduled workflows in public repos after 60 days without
@@ -36,6 +39,14 @@ jobs:
         with:
           node-version: 24
       - name: Check the controller heartbeat
+        id: watch
         run: node dashboard/watchdog.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # Runs only when this run's verdict is "failing". The next run reads this step's
+      # conclusion (success = failing, skipped = healthy) through the jobs API, so an alert
+      # issue opens only after two failing runs in a row. Keep the name in sync with
+      # MARKER_STEP in dashboard/watchdog.mjs.
+      - name: Liveness failing (marker for the next run)
+        if: steps.watch.outputs.failing == 'true'
+        run: echo "liveness failing; an alert opens if the next run fails too"

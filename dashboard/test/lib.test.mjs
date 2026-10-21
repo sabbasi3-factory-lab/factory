@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, heartbeatLevel, isPlanOnly,
-  listSubjects, parseJsonl, stageTimes, statusSummary, subjectLabel, timelineFor, verifyChain,
+  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
+  formatLimit, heartbeatLevel, heartbeatTimes, isPlanOnly, limitsText, listSubjects, observedCadence, parseJsonl, stageTimes, statusSummary,
+  subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
-import { FIXTURE_NOW, FIXTURE_PATH, buildFixtureLines } from './make-fixture.mjs';
+import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, buildFixtureLines, buildQuietFixtureLines } from './make-fixture.mjs';
 
 const nodeSha = (text) => 'sha256:' + createHash('sha256').update(text, 'utf8').digest('hex');
 const at = (iso) => Date.parse(iso);
@@ -241,14 +242,84 @@ test('fixture metrics: tables', () => {
   assert.equal(tl[1].gapMs, 30000);
 });
 
-test('heartbeat age turns amber after 70 min and red after 120 min', () => {
+test('heartbeat age turns amber after 8 h and red after 12 h', () => {
+  assert.deepEqual([DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin], [480, 720]);
   const events = fixtureEvents();
   const last = at('2026-10-16T11:00:03Z');
-  assert.equal(deriveMetrics(events, { now: last + 70 * 60000 }).heartbeat.level, 'ok');
-  assert.equal(deriveMetrics(events, { now: last + 71 * 60000 }).heartbeat.level, 'warn');
-  assert.equal(deriveMetrics(events, { now: last + 121 * 60000 }).heartbeat.level, 'alert');
+  assert.equal(deriveMetrics(events, { now: last + 480 * 60000 }).heartbeat.level, 'ok');
+  assert.equal(deriveMetrics(events, { now: last + 481 * 60000 }).heartbeat.level, 'warn');
+  assert.equal(deriveMetrics(events, { now: last + 720 * 60000 }).heartbeat.level, 'warn');
+  assert.equal(deriveMetrics(events, { now: last + 721 * 60000 }).heartbeat.level, 'alert');
   assert.equal(heartbeatLevel(null), 'none');
-  assert.equal(heartbeatLevel(120), 'warn');
+  assert.equal(heartbeatLevel(0), 'ok');
+  assert.equal(heartbeatLevel(480), 'ok');
+  assert.equal(heartbeatLevel(480.5), 'warn');
+  assert.equal(heartbeatLevel(720), 'warn');
+  assert.equal(heartbeatLevel(720.5), 'alert');
+  // The old hourly-cadence limits no longer flag a normal late scheduled run.
+  assert.equal(heartbeatLevel(121), 'ok');
+  assert.equal(heartbeatLevel(7.6 * 60), 'ok');
+});
+
+test('limits read as people say them', () => {
+  assert.equal(formatLimit(480), '8 h');
+  assert.equal(formatLimit(720), '12 h');
+  assert.equal(formatLimit(1560), '26 h');
+  assert.equal(formatLimit(90), '90 min');
+  assert.equal(formatLimit(10), '10 min');
+  assert.equal(formatLimit(null), '—');
+  assert.equal(limitsText(480, 720), 'amber after 8 h, red after 12 h');
+  assert.equal(limitsText(480, 1560), 'amber after 8 h, red after 26 h');
+});
+
+test('observed cadence: median and longest gap between consecutive times, null below 2 points', () => {
+  const t = (iso) => at(iso);
+  assert.equal(observedCadence([]), null);
+  assert.equal(observedCadence(undefined), null);
+  assert.equal(observedCadence([t('2026-10-17T00:00:00Z')]), null);
+  assert.equal(observedCadence([t('2026-10-17T00:00:00Z'), 'not a time', NaN, null]), null, 'invalid times are ignored');
+  // Unsorted input, ISO strings and epoch ms mixed: gaps 2 h, 3 h, 7.6 h.
+  const c = observedCadence(['2026-10-17T05:00:00Z', t('2026-10-17T00:00:00Z'), '2026-10-17T12:36:00Z', t('2026-10-17T02:00:00Z')]);
+  assert.deepEqual(c, { count: 4, medianH: 3, maxH: 7.6 });
+  // An even number of gaps takes the mean of the middle two.
+  assert.deepEqual(observedCadence([0, 3600000, 3 * 3600000, 6 * 3600000, 10 * 3600000]), { count: 5, medianH: 2.5, maxH: 4 });
+  assert.deepEqual(observedCadence([0, 1800000]), { count: 2, medianH: 0.5, maxH: 0.5 });
+
+  assert.equal(formatHours(2.4), '2.4 h');
+  assert.equal(formatHours(7.6), '7.6 h');
+  assert.equal(formatHours(3), '3.0 h');
+  assert.equal(formatHours(0.75), '45 min');
+  assert.equal(formatHours(null), '—');
+  assert.equal(cadenceText('Heartbeats', { count: 21, medianH: 2.4, maxH: 7.6 }, 7), 'Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)');
+  assert.equal(cadenceText('Verifications', null, 1), 'Verifications: too few to measure (1 day)');
+  assert.equal(CADENCE_NOTE, 'GitHub runs scheduled jobs late on Free plans');
+});
+
+test('cadence inputs: heartbeat times from the events, anchor times within the window', () => {
+  const events = fixtureEvents();
+  assert.deepEqual(heartbeatTimes(events), ['2026-10-15T09:00:07Z', '2026-10-16T09:00:06Z', '2026-10-16T10:00:04Z', '2026-10-16T11:00:03Z'].map(at));
+  assert.deepEqual(heartbeatTimes([{ type: 'heartbeat', timestamp: 17 }, null, { type: 'merged', timestamp: '2026-10-16T10:00:04Z' }]), []);
+  const now = at('2026-10-17T12:00:00Z');
+  const anchors = [{ at: '2026-10-09T12:00:00Z' }, { at: '2026-10-10T12:00:00Z' }, { at: '2026-10-17T11:00:00Z' }, { at: '2026-10-17T13:00:00Z' }, { at: 'bad' }];
+  assert.deepEqual(anchorTimes(anchors, { now, days: 7 }), [at('2026-10-10T12:00:00Z'), at('2026-10-17T11:00:00Z')]);
+});
+
+test('the quiet fixture is current, every hash in it is real, and it is the quiet live state', async () => {
+  const committed = readFileSync(QUIET_FIXTURE_PATH, 'utf8');
+  assert.equal(committed, buildQuietFixtureLines().join('\n') + '\n', 'run: node dashboard/test/make-fixture.mjs');
+  const records = parseJsonl(committed, 'quiet.jsonl');
+  const chain = await verifyChain(records);
+  assert.equal(chain.status, 'verified');
+  const events = records.map((r) => r.event);
+  const m = deriveMetrics(events, { now: at(QUIET_FIXTURE_NOW) });
+  assert.equal(m.needsYou.count, 0);
+  assert.equal(m.killSwitch.enabled, false);
+  assert.equal(m.dryRun, true);
+  assert.equal(m.heartbeat.level, 'ok');
+  assert.equal(m.running.rows.length, 0);
+  assert.equal(events.filter((e) => e.type === 'merged').length, 10);
+  // Heartbeats at the cadence GitHub really delivers: median 2.4 h, worst 7.6 h.
+  assert.equal(cadenceText('Heartbeats', observedCadence(heartbeatTimes(events)), 7), 'Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)');
 });
 
 test('needs-you items close when the task moves again; kill switch and budget levels', () => {
@@ -421,13 +492,15 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   assert.equal(fresh.level, 'ok');
   assert.equal(fresh.text, 'Data fresh · 46 events · audit head abcdef0 · controller heartbeat ok');
 
-  const late = statusSummary({ ...base, heartbeat: hbAt(75) });
+  assert.equal(statusSummary({ ...base, heartbeat: hbAt(480) }).level, 'ok');
+  const late = statusSummary({ ...base, heartbeat: hbAt(481) });
   assert.equal(late.level, 'warn');
-  assert.match(late.text, /^Data fresh .* · controller heartbeat late \(over 70 min\)$/);
+  assert.match(late.text, /^Data fresh .* · controller heartbeat late \(over 8 h\)$/);
 
-  const stale = statusSummary({ ...base, heartbeat: hbAt(3 * 60 + 5) });
+  assert.equal(statusSummary({ ...base, heartbeat: hbAt(720) }).level, 'warn');
+  const stale = statusSummary({ ...base, heartbeat: hbAt(12 * 60 + 5) });
   assert.equal(stale.level, 'alert');
-  assert.match(stale.text, /^Data fresh .* · controller heartbeat stale \(3 h\)$/);
+  assert.match(stale.text, /^Data fresh .* · controller heartbeat stale \(12 h\)$/);
   assert.doesNotMatch(stale.text, /Up to date/);
 
   const none = statusSummary({ ...base, heartbeat: deriveMetrics([], { now: lastHb }).heartbeat });

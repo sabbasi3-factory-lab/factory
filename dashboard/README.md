@@ -14,10 +14,10 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `lib.js` | Pure logic: canonical JSON, SHA-256 checks, chain check, metrics, verifier anchors. Runs in the browser and in Node |
 | `style.css` | Layout; light and dark themes (system setting, or the Theme button, remembered in `localStorage`) |
 | `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs` | Tests for `lib.js` |
-| `test/make-fixture.mjs` | Generates `test/fixtures/sample.jsonl` with real hashes, and `test/fixtures/anchors.jsonl` (verifier anchors over it) |
-| `watchdog.mjs` | Liveness watchdog run hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 2 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
+| `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, the quiet state the live page is usually in) |
+| `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
-| `test/glance.test.mjs` | The 5-second glance test: word budgets, layout, tooltips and keyboard behaviour, measured on the rendered `?fixture=1` page in headless Chrome |
+| `test/glance.test.mjs` | The 5-second glance test: word budgets, layout, tooltips and keyboard behaviour, measured on the rendered `?fixture=1` and `?fixture=quiet` pages in headless Chrome |
 | `test/glance-measure.mjs`, `test/headless.mjs` | The in-page word and layout measurements, and a dependency-free headless-Chrome driver (static server, DevTools protocol over Node's `WebSocket`). Also a CLI that measures the live page |
 
 ## Layout
@@ -36,21 +36,35 @@ From the top, at widths up to 1480 px:
   "✓ Healthy · 2 need you · ⏻ Factory off · ⓘ Dry run". Each part is a chip with
   details in its tooltip: the **health chip** (rule below; it includes the independent
   verifier), the Needs-you count (a link to the panel), the kill switch (on is green, off
-  is a neutral grey: off is the deliberate safe state) and dry-run or live mode. In
-  `?fixture=1` mode there's also a "Sample" chip. Until the first load the health chip
+  is a neutral grey: off is the deliberate safe state) and dry-run or live mode. With
+  sample data (`?fixture=1` or `?fixture=quiet`) there's also a "Sample" chip. Until the first load the health chip
   reads "… Loading" in neutral grey and the tiles show "…": nothing is red before
   something is known to be wrong.
 - **Needs you:** the big count and one line per item, oldest first: icon, `#22` (or
   `factory#3` for the other repo), a title of at most 4 words (full title, reason and
-  waiting time in the tooltip), an age chip, and "View PR" or "View issue". Empty: "✓ Nothing
-  needs you". If the review list can't be read: "⚠ Review list unavailable".
+  waiting time in the tooltip), an age chip, and "View PR" or "View issue". Empty: a green
+  ✓ and a big 0, because the header chip already says "✓ Nothing needs you" (the ✓ is
+  labelled "Nothing needs you" for screen readers). The panel keeps its place and height
+  rather than collapsing, so the page doesn't jump when an item arrives, and the detail
+  panels don't rise into the first screen (collapsing it measured worse for the
+  above-the-fold budget, not better). If the review list can't be read: "⚠ Review list
+  unavailable".
 - **Seven KPI tiles** (last 7 days): label, big number and a per-day trend line. Zero-touch
   rate, checks passed, AIC today, merged today, median time to merge, heartbeat age and
   "Verified" (age of the newest independent-verifier anchor, trend: anchors per day). The
   last two are green, amber or red with a ✓, ⚠ or ✗ icon. The detail line of each tile is
   in its tooltip. A day with nothing to measure leaves a gap in the line rather than a zero.
+  The Heartbeat and Verified tooltips also show the **observed cadence** measured from the
+  loaded data, the limits, and why they're that loose, for example:
+  "Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)" · "Green up to 8 h, amber
+  after 8 h, red after 12 h" · "GitHub runs scheduled jobs late on Free plans" (and
+  "Verifications: median every 2.9 h, longest gap 5.1 h (7 days)" from the anchors' `at`
+  times in the window). It's `observedCadence()` in `lib.js`; with fewer than 2 points the
+  line says "too few to measure". The health chip's tooltip repeats both lines under its rule.
 - **Pipeline:** seven lanes (Ready, Running, PR open, Checks, Queue, Merged, Deployed).
-  Empty lanes shrink to a narrow column with the name and 0. A card shows `#20` (the PR,
+  Empty lanes shrink to a narrow column with just the name (the lane's accessible label
+  still says "Ready: 0"); only Merged and Deployed show a count, because they show only
+  the latest cards. A card shows `#20` (the PR,
   else the issue) and the time in its stage; icons flag needs human, stale contract, a
   failed check, a repair or a dry-run plan, and the tooltip has the task, attempt, model
   and tags. Merged and Deployed show the latest 3 cards and a "+N" button for the rest.
@@ -77,13 +91,22 @@ lanes stack.
 | Chip | When |
 |---|---|
 | … Loading (grey) | Nothing loaded yet and no error |
-| ✓ Healthy | Fresh data, a verified chain, a heartbeat within 70 min and a verifier anchor within 2 h |
-| ⚠ Degraded | The last refresh failed (older data is shown), the data is over 10 min old, the heartbeat is late (over 70 min) or unknown, the chain isn't verified, or the verifier is late (over 2 h) or not set up yet |
-| ✗ Down | No audit log, nothing loaded because of an error, a broken chain, a heartbeat missing from the window or over 120 min old, or a verifier over 26 h old or unknown (unreadable, empty, malformed, out of order or in the future) |
+| ✓ Healthy | Fresh data, a verified chain, a heartbeat within 8 h and a verifier anchor within 8 h |
+| ⚠ Degraded | The last refresh failed (older data is shown), the data is over 10 min old, the heartbeat is late (over 8 h) or unknown, the chain isn't verified, or the verifier is late (over 8 h) or not set up yet |
+| ✗ Down | No audit log, nothing loaded because of an error, a broken chain, a heartbeat missing from the window or over 12 h old, or a verifier over 26 h old or unknown (unreadable, empty, malformed, out of order or in the future) |
 
 The worst condition wins; the tooltip lists each one, plus the verifier's state such as
-"Verified 23m ago · 41 anchors" or "Verifier not set up". The rule is `healthSummary()` in
-`lib.js`. Until the audit-verify workflow's first bootstrap creates the anchors file, the
+"Verified 23m ago · 41 anchors" or "Verifier not set up", then the rule and the observed
+cadence of heartbeats and verifications. The rule is `healthSummary()` in `lib.js`.
+
+**Why the limits are hours, not minutes.** The controller and the verifier are scheduled
+hourly, but GitHub's cron on this Free-plan org runs "every 5 min" and "hourly" schedules
+only every 2 to 8 h. Over 48 h the heartbeat gaps had a median of 2.4 h and a p90 of 4.4 h,
+and later gaps reached 5.2 to 7.6 h. With the earlier limits (amber after 70 min, red after
+120 min, verifier amber after 2 h) the page read "Degraded" most of the time, so the limits
+are now above the worst gap seen: heartbeat amber after 8 h and red after 12 h
+(`DEFAULTS.heartbeatWarnMin`/`heartbeatAlertMin`, which the watchdog also uses), verifier
+amber after 8 h and red after 26 h (`VERIFIER_LIMITS`). Until the audit-verify workflow's first bootstrap creates the anchors file, the
 live page reads "Degraded" (verifier not set up), on purpose.
 
 ## Preview locally
@@ -95,8 +118,13 @@ python3 -m http.server -d dashboard 8000
 - <http://localhost:8000/> reads the live audit log of `sabbasi3-factory-lab/chrono-node-rs`.
   Until the controller creates the `audit` branch, it shows "No audit log yet".
 - <http://localhost:8000/?fixture=1> loads `test/fixtures/sample.jsonl` instead, so you can
-  see a populated dashboard offline. The clock is pinned just after the last sample event.
-  The same URL works on Pages, because the fixture is published with the site.
+  see a populated dashboard offline: a busy factory with two items that need you. The clock
+  is pinned just after the last sample event. The same URL works on Pages, because the
+  fixtures are published with the site.
+- <http://localhost:8000/?fixture=quiet> loads `test/fixtures/quiet.jsonl` and
+  `quiet-anchors.jsonl`: the state the live page is usually in. Nothing needs you, the
+  factory is off, dry run, no agents running, the verifier OK, ten merged PRs, and
+  heartbeats and anchors at the irregular cadence GitHub really delivers.
 
 Other query parameters: `?poll=N` (seconds between checks, 10–3600, default 30) and
 `?days=N` (days of day files to load, 1–31, default 7).
@@ -113,8 +141,8 @@ module and fails.
 `test/glance.test.mjs` needs Chrome or Chromium. It looks at `CHROME_PATH`, then
 `google-chrome`, `google-chrome-stable`, `chromium` and `chromium-browser` on `PATH`, then
 the macOS app. Without one it's skipped locally and fails when `CI` is set. It serves
-`dashboard/` on an ephemeral local port, opens `?fixture=1` at 1440×900 and 390×844 and
-checks these budgets:
+`dashboard/` on an ephemeral local port, opens both `?fixture=1` and `?fixture=quiet` at
+1440×900 and 390×844 and checks these budgets on each:
 
 - at most 80 visible words above the fold at 1440×900;
 - at most 250 visible words in total (closed `<details>`, hidden elements and tooltips
@@ -128,17 +156,26 @@ also checks the two-column layout, that tooltips open on keyboard focus, that "V
 works with Enter and Space, that focus survives a re-render, that no button or link text
 starts with "Open" (links out to GitHub say "View …"), that nothing is red or amber while
 the sample data is held back (the page shows "… Loading"), that "Factory off" is neutral
-grey, and that the console stays clean. On
-failure it prints the offending words and sentences.
+grey, that the quiet page says "Nothing needs you" only once, that the Heartbeat, Verified
+and health tooltips show the observed cadence and the limits without adding visible words,
+and that the console stays clean. On failure it prints the offending words and sentences.
+
+The quiet fixture is there because the busy one hid a real failure: with two items needing
+you, the sample passed the fold budget while the live page, with nothing needing you, had
+82 words above the fold ("Nothing needs you" twice, plus the seventh tile). Against that
+design the quiet fixture measures 81 and fails, as it should.
 
 To measure the live page (four API requests), or save screenshots:
 
 ```sh
-node dashboard/test/glance-measure.mjs              # live data
-node dashboard/test/glance-measure.mjs --fixture    # sample data
+node dashboard/test/glance-measure.mjs                  # live data
+node dashboard/test/glance-measure.mjs --fixture        # sample data (?fixture=1)
+node dashboard/test/glance-measure.mjs --fixture quiet  # quiet sample (?fixture=quiet)
 node dashboard/test/glance-measure.mjs --verbose --shots <dir> --name <prefix>
-``` After changing `make-fixture.mjs`, regenerate the fixture with
-`node dashboard/test/make-fixture.mjs`; a test fails if the committed fixture is out of date.
+```
+
+After changing `make-fixture.mjs`, regenerate the fixtures with
+`node dashboard/test/make-fixture.mjs`; a test fails if any committed fixture is out of date.
 
 ## How it loads data
 
@@ -196,15 +233,15 @@ loaded event may point to a parent before the window ("window start"); an event 
 schema is checked too: exactly the seven fields, version 1, UUID v4, UTC timestamp.
 
 **Independent verifier.** The factory's `audit-verify` workflow fully re-verifies the whole
-log every hour and, on success, appends one canonical-JSON anchor line to
+log on an hourly schedule (which GitHub runs every 2 to 8 h) and, on success, appends one canonical-JSON anchor line to
 `anchors/chrono-node-rs.jsonl` on the `anchors` branch of `sabbasi3-factory-lab/factory`:
 `{"at","audit_head","events","last_sha","run_id","source","v"}`, newest last. The page reads
 that file from `raw.githubusercontent.com` (no API cost) at most every 5 minutes and checks
 every line's exact keys, types and formats, that it is canonical JSON, and that `at` and
 `events` never go down. It doesn't recompute hashes. There's no separate chip: the
 verifier is part of the health chip (see [Health chip](#health-chip)), whose tooltip says,
-for example, "Verified 23m ago · 41 anchors", and of the "Verified" tile: green up to 2 h,
-amber after 2 h, red after 26 h. It's also red ("Verifier unknown", health Down) if the
+for example, "Verified 23m ago · 41 anchors", and of the "Verified" tile: green up to 8 h,
+amber after 8 h, red after 26 h. It's also red ("Verifier unknown", health Down) if the
 file can't be read, is empty, has any malformed or out-of-order line, or its newest anchor
 is in the future. A 404 reads "Verifier not set up" in amber (health Degraded): the branch
 is created by the workflow's first successful run. Until the
@@ -213,7 +250,8 @@ branch exists, the page checks for it with one API call at most every 15 minutes
 fetching the raw file, so the console stays free of 404 errors. The audit log section has a
 muted line with the details: last run, anchor count, and how many events the newest anchor
 covers (more than the page loads, since the page reads only 7 days) with its audit head.
-With `?fixture=1` it reads `test/fixtures/anchors.jsonl`.
+With `?fixture=1` it reads `test/fixtures/anchors.jsonl`, with `?fixture=quiet`
+`test/fixtures/quiet-anchors.jsonl`.
 
 ## How the panels are derived
 
@@ -227,8 +265,8 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`.
 | Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue). An item closes when a later event for the same task, PR or issue shows it moved on: `ready`, `picked`, `dispatched`, `repair_dispatched`, `run_started`, `contract_pinned`, `human_action`, `merged`, `cancelled`, `accepted` or `rejected`. A controller decision logged in dry-run mode is only a plan, so it doesn't close an item; observed facts (`human_action`, `merged`, …) do, even though every v1 payload carries `dry_run: true` |
 | Kill switch | `factory_enabled` from the latest `heartbeat` |
 | Factory version, dry run | `factory_version` and `dry_run` from the latest event's payload |
-| Heartbeat age | Time since the latest `heartbeat`. Green with ✓ up to 70 min, amber with ⚠ after 70 min, red with ✗ after 120 min (the DESIGN alert threshold) or when there's none |
-| Trend lines | Per UTC day over the window: zero-touch rate so far (cumulative), share of `check_result` events with `success`, `run_finished.aic` sum, `merged` count, median PR `opened_at` → `merged_at`, and `heartbeat` count (24 expected) |
+| Heartbeat age | Time since the latest `heartbeat`. Green with ✓ up to 8 h, amber with ⚠ after 8 h, red with ✗ after 12 h (the watchdog's alert limit) or when there's none. The tooltip adds the observed cadence: median and longest gap between the heartbeats in the window |
+| Trend lines | Per UTC day over the window: zero-touch rate so far (cumulative), share of `check_result` events with `success`, `run_finished.aic` sum, `merged` count, median PR `opened_at` → `merged_at`, and `heartbeat` count (24 scheduled; GitHub delivers far fewer) |
 | Owner reviews ("Review and merge") | Open, non-draft PRs in either repo whose body has a `Tier:` line saying `human` or `owner` (markdown bold allowed, case-insensitive), or with an `owner-review`, `human-tier` or `needs-human` label. Listed with the audit items, oldest first, and counted toward the review-queue cap. If the lists can't be read, the panel says the review list is unavailable instead of "Nothing needs you" |
 | Pipeline lane | The latest stage event for the task (or task-less PR): `ready` → Ready; `picked`, `dispatched`, `run_started`, `repair_dispatched`, `run_finished` → Running; `pr_opened`, `dequeued` → PR open; `check_result` → Checks; `queued` → Merge queue; `merged` → Merged; `deployed`, `accepted` → Deployed. `cancelled` removes the card. Dry-run decisions never move a card. A card stays in PR open, Checks or Merge queue only if one of its PRs is open on GitHub now; otherwise it goes to the muted "Closed" count. Without a current open-PR list, those lanes say "PR state unknown". With `?fixture=1`, PRs opened and never merged count as open |
 | Time per stage | First time each stage (ready → picked → running → pr-open → checks → queued → merged → deployed) was reached, per task, or per PR when the PR has no task. Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp. A skipped stage shows "(to …)" |
@@ -246,11 +284,13 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`.
 
 ## Watchdog
 
-`watchdog.mjs` runs hourly and checks two things, failing closed:
+`watchdog.mjs` is scheduled hourly (GitHub runs it every few hours) and checks two things,
+failing closed:
 
 - **Heartbeat** (reason codes `heartbeat-fresh`, `heartbeat-too-old`, `no-heartbeat`,
   `audit-branch-missing`, `audit-branch-unreadable`, `audit-file-unreadable`): the newest
-  valid `heartbeat` event in today's and yesterday's audit files must be at most 2 h old.
+  valid `heartbeat` event in today's and yesterday's audit files must be at most 12 h old
+  (`DEFAULTS.heartbeatAlertMin`, the same limit as the dashboard's red).
 - **Verifier** (`verifier-fresh`, `verifier-too-old`, `verifier-never-succeeded`,
   `verifier-workflow-missing`, `verifier-unreadable`): the newest successful run of
   `audit-verify.yml` in this repo
@@ -260,10 +300,15 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`.
   a run look newer than it was. A 404, an API error, or no successful run ever alerts.
 
 There's one issue, found by its `heartbeat-alert` label (so an open issue with the earlier
-title "Controller heartbeat stale" is reused). It's titled "Factory liveness alert", lists
-every failing reason code with a section per check, gets a comment each hour while any
-check fails, and is closed only when both are healthy. `WATCHDOG_DRY_RUN=1` reads
-everything and prints the plan without writing.
+title "Controller heartbeat stale" is reused). It's titled "Factory liveness alert" and
+lists every failing reason code with a section per check. It's opened only after **two
+consecutive failing watchdog runs**, so one slow scheduler tick or transient read error
+never opens it on its own. The previous run's verdict is read from a marker step in that
+run's `watchdog` job, through the Actions jobs API: the step runs only when a run is
+failing, so "success" means the previous run failed and "skipped" means it was healthy (an
+unknown previous verdict counts as failing). While the issue is open it gets a comment on
+each failing run, and it's closed on the first healthy run, when both checks pass.
+`WATCHDOG_DRY_RUN=1` reads everything and prints the plan without writing.
 
 ## Deploy
 

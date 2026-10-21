@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { canonicalize } from '../lib.js';
 import {
-  LABEL, MAX_AGE_MIN, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, main, newestHeartbeat, planIssueActions,
+  LABEL, MARKER_STEP, MAX_AGE_MIN, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, describe, main, newestHeartbeat, planIssueActions, readPreviousVerdict,
   readAudit, readVerifier, syncIssue,
 } from '../watchdog.mjs';
 
@@ -22,18 +24,20 @@ const audit = (...files) => ({ branch: 'ok', headSha: SHA, files });
 
 // --- age decision ----------------------------------------------------------------
 
-test('fresh up to 2 h, stale after; the newest heartbeat across both days wins', () => {
-  assert.equal(MAX_AGE_MIN, 120);
-  const at = (min) => decide(audit(ok(YESTERDAY, line('heartbeat', minutesAgo(600))), ok(TODAY, line('heartbeat', minutesAgo(min)))), NOW);
+test('fresh up to 12 h, stale after; the newest heartbeat across both days wins', () => {
+  assert.equal(MAX_AGE_MIN, 720);
+  // NOW is 12:00Z, so 12 h ago is still today; the older one is yesterday.
+  const at = (min) => decide(audit(ok(YESTERDAY, line('heartbeat', minutesAgo(900))), ok(TODAY, line('heartbeat', minutesAgo(min)))), NOW);
   assert.equal(at(5).status, 'fresh');
   assert.equal(at(5).alert, false);
-  assert.equal(at(120).status, 'fresh');
-  const stale = at(121);
+  assert.equal(at(456).status, 'fresh', 'a 7.6 h gap (the longest measured) is not an alert');
+  assert.equal(at(720).status, 'fresh');
+  const stale = at(721);
   assert.equal(stale.status, 'stale');
   assert.equal(stale.alert, true);
   assert.equal(stale.reason, 'heartbeat-too-old');
-  assert.equal(Math.round(stale.ageMin), 121);
-  assert.equal(stale.last.timestamp, minutesAgo(121));
+  assert.equal(Math.round(stale.ageMin), 721);
+  assert.equal(stale.last.timestamp, minutesAgo(721));
 
   // Just after midnight UTC, yesterday's file holds the newest heartbeat.
   const early = Date.parse('2026-10-17T00:20:00Z');
@@ -60,8 +64,9 @@ test('fails closed: unreadable data is unknown and alerts; junk never counts as 
   assert.equal(decide({ branch: 'ok', files: [] }, NOW).status, 'unknown');
 
   // Today's file is unreadable and yesterday's heartbeat is old: unknown, not stale-but-known.
-  const fileErr = decide(audit(ok(YESTERDAY, line('heartbeat', minutesAgo(700))), { path: TODAY, status: 'error' }), NOW);
-  assert.deepEqual([fileErr.status, fileErr.alert, fileErr.reason, fileErr.unreadable], ['unknown', true, 'audit-file-unreadable', [TODAY]]);
+  const fileErr = decide(audit(ok(YESTERDAY, line('heartbeat', minutesAgo(800))), { path: TODAY, status: 'error', detail: 'HTTP 502 after 3 attempts' }), NOW);
+  assert.deepEqual([fileErr.status, fileErr.alert, fileErr.reason, fileErr.unreadable], ['unknown', true, 'audit-file-unreadable', [{ path: TODAY, detail: 'HTTP 502 after 3 attempts' }]]);
+  assert.match(describe(fileErr), /Unreadable: `audit\/2026\/10\/16.jsonl` \(HTTP 502 after 3 attempts\)/);
   // ...but a recent heartbeat that was actually read proves liveness.
   assert.equal(decide(audit(ok(YESTERDAY, line('heartbeat', minutesAgo(30))), { path: TODAY, status: 'error' }), NOW).status, 'fresh');
 
@@ -105,11 +110,11 @@ test('readAudit: branch 404 is missing, API errors are errors, files are pinned 
     [`/${SHA}/${TODAY}`, { body: line('heartbeat', minutesAgo(20)) }],
     [`/${SHA}/${YESTERDAY}`, { status: 500 }],
   ], calls);
-  const res = await readAudit({ fetch, now: NOW, token: 'test-token' });
+  const res = await readAudit({ fetch, now: NOW, token: 'test-token', retryDelayMs: 0 });
   assert.equal(res.headSha, SHA);
-  assert.deepEqual(res.files.map((f) => [f.path, f.status]), [[YESTERDAY, 'error'], [TODAY, 'ok']]);
+  assert.deepEqual(res.files.map((f) => [f.path, f.status, f.detail]), [[YESTERDAY, 'error', 'HTTP 500 after 3 attempts'], [TODAY, 'ok', undefined]]);
   const raw = calls.filter((c) => c.url.startsWith('https://raw.githubusercontent.com/'));
-  assert.equal(raw.length, 2);
+  assert.equal(raw.length, 4, 'the failing file is tried 3 times, the good one once');
   for (const c of raw) {
     assert.ok(c.url.includes(`/${SHA}/audit/`));
     assert.equal(c.headers.Authorization, undefined, 'token must not go to raw');
@@ -131,11 +136,11 @@ test('issue plan: open one, comment while it lasts, comment and close on recover
   assert.match(create.body, /audit-branch-missing/);
   assert.match(create.body, /Last heartbeat: none found/);
 
-  const tooOld = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(185)))), NOW);
+  const tooOld = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(725)))), NOW);
   const comment = planIssueActions(tooOld, [{ number: 9 }, { number: 4 }, { number: 2, pull_request: {} }], 'https://example.test/run/1');
   assert.deepEqual(comment.map((a) => [a.op, a.number]), [['comment', 4]]);
-  assert.match(comment[0].body, /Last heartbeat: 2026-10-16T08:55:00Z/);
-  assert.match(comment[0].body, /Age: 3 h \(185 min\)/);
+  assert.match(comment[0].body, /Last heartbeat: 2026-10-15T23:55:00Z/);
+  assert.match(comment[0].body, /Age: 12 h \(725 min\)/);
   assert.match(comment[0].body, /Watchdog run: https:\/\/example\.test\/run\/1/);
 
   assert.deepEqual(planIssueActions(fresh, [{ number: 4 }]).map((a) => [a.op, a.number]), [['comment', 4], ['close', 4]]);
@@ -280,7 +285,7 @@ test('readVerifier: newest successful run with the token; 404 is missing, API er
 
 test('one issue lists every failing check, stays open while either fails, and closes only when both are healthy', async () => {
   const hbFresh = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(3)))), NOW);
-  const hbStale = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(185)))), NOW);
+  const hbStale = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(725)))), NOW);
   const vFresh = verifierAt(30);
   const vStale = verifierAt(1600);
 
@@ -356,4 +361,80 @@ test('main checks the heartbeat and the verifier, in dry-run mode without writin
   assert.deepEqual([never.verifier.reason, never.liveness.alert], ['verifier-never-succeeded', true]);
   const notFound = await main(env, fakeFetch(routes(null)), NOW);
   assert.deepEqual([notFound.verifier.reason, notFound.liveness.alert], ['verifier-workflow-missing', true]);
+});
+
+// --- day rollover and transient errors (factory#8 opened at 2026-10-20T01:56Z) -------------
+
+test('day rollover: today\'s file not written yet is normal; yesterday\'s heartbeat counts', () => {
+  const early = Date.parse('2026-10-20T01:56:00Z');
+  const y = 'audit/2026/10/19.jsonl';
+  const t = 'audit/2026/10/20.jsonl';
+  const d = decide(audit(ok(y, line('heartbeat', '2026-10-19T22:10:00Z')), { path: t, status: 'missing' }), early);
+  assert.deepEqual([d.status, d.alert, d.last.path], ['fresh', false, y]);
+});
+
+test('a transient raw error is retried, so it doesn\'t hide yesterday\'s heartbeat', async () => {
+  const early = Date.parse('2026-10-20T01:56:00Z');
+  let tries = 0;
+  const fetch = fakeFetch([
+    ['/branches/audit', { body: { commit: { sha: SHA } } }],
+    [`/${SHA}/audit/2026/10/19.jsonl`, () => (++tries < 3 ? { status: 503 } : { body: line('heartbeat', '2026-10-19T22:10:00Z') })],
+    [`/${SHA}/audit/2026/10/20.jsonl`, { status: 404 }],
+  ]);
+  const res = await readAudit({ fetch, now: early, retryDelayMs: 0 });
+  assert.equal(tries, 3);
+  assert.equal(decide(res, early).status, 'fresh');
+});
+
+// --- two consecutive failing runs before an alert opens ----------------------------------
+
+test('a new alert needs two failing runs in a row; an open alert keeps being updated', () => {
+  const stale = decide({ branch: 'missing', files: [] }, NOW);
+  assert.deepEqual(planIssueActions(stale, [], null, 'healthy').map((a) => a.op), ['pending'], 'first failing run after a healthy one: no issue yet');
+  assert.deepEqual(planIssueActions(stale, [], null, 'failing').map((a) => a.op), ['create']);
+  assert.deepEqual(planIssueActions(stale, [], null, 'unknown').map((a) => a.op), ['create'], 'an unknown previous verdict counts as failing (fail closed)');
+  assert.deepEqual(planIssueActions(stale, [{ number: 5 }], null, 'healthy').map((a) => [a.op, a.number]), [['comment', 5]]);
+  const fresh = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(3)))), NOW);
+  assert.deepEqual(planIssueActions(fresh, [{ number: 5 }], null, 'failing').map((a) => a.op), ['comment', 'close'], 'closes on the first healthy run');
+});
+
+test('readPreviousVerdict: the marker step of the previous completed run on main', async () => {
+  const repo = 'example/factory';
+  const runsUrl = '/actions/workflows/heartbeat-watchdog.yml/runs?branch=main&status=completed&per_page=5';
+  const jobs = (conclusion, jobConclusion = 'success') => ({ body: { jobs: [{ name: 'watchdog', conclusion: jobConclusion, steps: [{ name: 'Check the controller heartbeat', conclusion: jobConclusion === 'success' ? 'success' : 'failure' }, ...(conclusion ? [{ name: MARKER_STEP, conclusion }] : [])] }] } });
+  const world = (marker, jobConclusion = 'success') => fakeFetch([
+    [runsUrl, { body: { workflow_runs: [{ id: 77, run_attempt: 1 }, { id: 76, run_attempt: 2 }] } }],
+    ['/actions/runs/77/attempts/1/jobs', jobs('success')],
+    ['/actions/runs/76/attempts/2/jobs', jobs(marker, jobConclusion)],
+  ]);
+  assert.equal(await readPreviousVerdict({ fetch: world('skipped'), repo, currentRunId: 77 }), 'healthy', 'skips the current run');
+  assert.equal(await readPreviousVerdict({ fetch: world('success'), repo, currentRunId: 77 }), 'failing');
+  assert.equal(await readPreviousVerdict({ fetch: world('skipped'), repo }), 'failing', 'without a current id the newest run is the previous one');
+  assert.equal(await readPreviousVerdict({ fetch: world(null), repo, currentRunId: 77 }), 'unknown', 'an older run without the marker step');
+  // Review: a skipped marker in a job that failed or was cancelled (setup/checkout failed, the
+  // issue sync threw before the verdict was written) proves nothing: unknown, i.e. failing.
+  for (const jobConclusion of ['failure', 'cancelled', 'timed_out', null]) {
+    assert.equal(await readPreviousVerdict({ fetch: world('skipped', jobConclusion), repo, currentRunId: 77 }), 'unknown', `job ${jobConclusion}`);
+  }
+  assert.equal(await readPreviousVerdict({ fetch: world('success', 'failure'), repo, currentRunId: 77 }), 'failing', 'a marker that ran still means failing');
+  assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, { status: 500 }]]), repo }), 'unknown');
+  assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, new Error('offline')]]), repo }), 'unknown');
+  assert.equal(await readPreviousVerdict({ fetch: fakeFetch([[runsUrl, { body: { workflow_runs: [] } }]]), repo }), 'unknown');
+});
+
+test('the workflow\'s marker step matches MARKER_STEP and runs only when failing', () => {
+  const wf = readFileSync(new URL('../../.github/workflows/heartbeat-watchdog.yml', import.meta.url), 'utf8');
+  assert.ok(wf.includes(`- name: ${MARKER_STEP}\n        if: steps.watch.outputs.failing == 'true'`));
+  assert.match(wf, /id: watch\n\s+run: node dashboard\/watchdog\.mjs/);
+});
+
+test('main writes failing=true|false for the marker step', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wd-'));
+  const out = join(dir, 'out');
+  writeFileSync(out, '');
+  const env = { GITHUB_REPOSITORY: 'example/factory', WATCHDOG_DRY_RUN: '1', GITHUB_OUTPUT: out };
+  const r = await main(env, fakeFetch([['/issues?state=open', { body: [] }]]), NOW);
+  assert.equal(r.liveness.alert, true);
+  assert.equal(readFileSync(out, 'utf8'), 'failing=true\n');
+  rmSync(dir, { recursive: true, force: true });
 });

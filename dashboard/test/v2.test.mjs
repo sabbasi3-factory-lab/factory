@@ -6,7 +6,7 @@ import {
   healthSummary, isHumanTierPr, parseJsonl, prRef, reviewItems, shortTitle, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha,
   stageBreakdown, typicalRunMs,
 } from '../lib.js';
-import { FIXTURE_NOW, FIXTURE_PATH } from './make-fixture.mjs';
+import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, buildQuietAnchorLines } from './make-fixture.mjs';
 
 const at = (iso) => Date.parse(iso);
 const fixture = () => parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
@@ -315,7 +315,7 @@ test('sparkline geometry marks every valid point and never bridges a gap', () =>
 
 // --- glance view (one health chip, compact numbers) ----------------------------------
 
-test('health chip: Healthy only with fresh data, a verified chain and a heartbeat within 70 min', () => {
+test('health chip: Healthy only with fresh data, a verified chain and a heartbeat within 8 h', () => {
   const events = fixture();
   const lastHb = at('2026-10-16T11:00:03Z');
   const hbAt = (min) => deriveMetrics(events, { now: lastHb + min * 60000 }).heartbeat;
@@ -326,8 +326,17 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.deepEqual(health({}), { level: 'ok', label: 'Healthy', reasons: [] });
   assert.equal(health({ dataAgeMin: null }).level, 'ok', 'sample data has no age');
 
+  // The heartbeat limits sit above the cadence GitHub's scheduler delivers: Healthy up to
+  // exactly 8 h, Degraded after it and up to exactly 12 h, Down after that.
+  assert.equal(health({ heartbeat: hbAt(75) }).level, 'ok', 'a 75-minute gap is normal');
+  assert.equal(health({ heartbeat: hbAt(7.6 * 60) }).level, 'ok', 'the longest observed gap is still healthy');
+  assert.equal(health({ heartbeat: hbAt(480) }).level, 'ok');
+  assert.deepEqual(health({ heartbeat: hbAt(481) }), { level: 'warn', label: 'Degraded', reasons: ['Heartbeat late (8 h)'] });
+  assert.deepEqual(health({ heartbeat: hbAt(720) }), { level: 'warn', label: 'Degraded', reasons: ['Heartbeat late (12 h)'] });
+  assert.deepEqual(health({ heartbeat: hbAt(721) }), { level: 'alert', label: 'Down', reasons: ['Heartbeat stale (12 h)'] });
+
   // Degraded: late heartbeat, unknown heartbeat, stale data, failed refresh, unverified chain.
-  assert.deepEqual(health({ heartbeat: hbAt(75) }), { level: 'warn', label: 'Degraded', reasons: ['Heartbeat late (75 min)'] });
+  assert.deepEqual(health({ heartbeat: hbAt(9 * 60) }), { level: 'warn', label: 'Degraded', reasons: ['Heartbeat late (9 h)'] });
   assert.equal(health({ heartbeat: null }).level, 'warn');
   assert.deepEqual(health({ dataAgeMin: 25 }).reasons, ['Data is 25 min old']);
   assert.equal(health({ dataAgeMin: 10 }).level, 'ok', 'up to 10 min old is fresh');
@@ -337,16 +346,16 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.equal(health({ chain: null }).level, 'warn');
 
   // Down: stale or missing heartbeat, broken chain, no log, nothing loaded because of an error.
-  assert.deepEqual(health({ heartbeat: hbAt(3 * 60 + 5) }), { level: 'alert', label: 'Down', reasons: ['Heartbeat stale (3 h)'] });
+  assert.deepEqual(health({ heartbeat: hbAt(13 * 60 + 5) }), { level: 'alert', label: 'Down', reasons: ['Heartbeat stale (13 h)'] });
   assert.equal(health({ heartbeat: deriveMetrics([], { now: lastHb }).heartbeat }).level, 'alert');
   assert.equal(health({ chain: { status: 'broken', brokenAt: 7 } }).reasons[0], 'Chain broken at event 7');
   assert.deepEqual(healthSummary({ loaded: true, noLog: true }), { level: 'alert', label: 'Down', reasons: ['No audit log yet'] });
   assert.equal(healthSummary({ loaded: false, error: 'offline' }).level, 'alert');
 
   // The worst condition wins, and reasons list worst first.
-  const both = health({ heartbeat: hbAt(75), chain: { status: 'broken', brokenAt: 3 } });
+  const both = health({ heartbeat: hbAt(9 * 60), chain: { status: 'broken', brokenAt: 3 } });
   assert.equal(both.level, 'alert');
-  assert.deepEqual(both.reasons, ['Chain broken at event 3', 'Heartbeat late (75 min)']);
+  assert.deepEqual(both.reasons, ['Chain broken at event 3', 'Heartbeat late (9 h)']);
 
   assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading']);
 });
@@ -389,8 +398,11 @@ test('not loaded yet is neutral: the health chip says Loading and the heartbeat 
   assert.deepEqual(heartbeatTile(hb, true), { level: 'alert', value: '—' });
   const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
   assert.deepEqual(heartbeatTile(m.heartbeat, true), { level: 'ok', value: '11m' });
-  const late = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 70 * 60000 }).heartbeat;
-  assert.deepEqual(heartbeatTile(late, true), { level: 'warn', value: '1h' });
+  assert.equal(heartbeatTile(deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 70 * 60000 }).heartbeat, true).level, 'ok');
+  const late = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 8 * 60 * 60000 }).heartbeat;
+  assert.deepEqual(heartbeatTile(late, true), { level: 'warn', value: '8h' });
+  const staleHb = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 12 * 60 * 60000 }).heartbeat;
+  assert.deepEqual(heartbeatTile(staleHb, true), { level: 'alert', value: '12h' });
 });
 
 test('health chip folds in the verifier: stale or unknown is Down, late or not set up is Degraded', () => {
@@ -401,7 +413,10 @@ test('health chip folds in the verifier: stale or unknown is Down, late or not s
   });
   const v = (fetched) => verifierStatus(fetched, NOW);
   const fresh = v({ status: 'ok', text: `${line(30, 40)}\n${line(23)}\n` });
-  const lateV = v({ status: 'ok', text: `${line(150)}\n` });
+  const okAt8h = v({ status: 'ok', text: `${line(480)}\n` });
+  const lateV = v({ status: 'ok', text: `${line(481)}\n` });
+  const lateAt26h = v({ status: 'ok', text: `${line(1560)}\n` });
+  const staleAt26h = v({ status: 'ok', text: `${line(1561)}\n` });
   const staleV = v({ status: 'ok', text: `${line(27 * 60)}\n` });
   const missing = v({ status: 'missing' });
   const unreadable = v({ status: 'error', detail: 'HTTP 500' });
@@ -410,7 +425,7 @@ test('health chip folds in the verifier: stale or unknown is Down, late or not s
   const outOfOrder = v({ status: 'ok', text: `${line(20, 50)}\n${line(10, 40)}\n` });
 
   assert.equal(verifierReason(fresh), 'Verified 23m ago · 2 anchors');
-  assert.equal(verifierReason(lateV), 'Verified 2h ago · 1 anchor');
+  assert.equal(verifierReason(lateV), 'Verified 8h ago · 1 anchor');
   assert.equal(verifierReason(missing), 'Verifier not set up');
   assert.match(verifierReason(unreadable), /^Verifier unknown: couldn't read the anchors file: HTTP 500$/);
   assert.equal(verifierReason(v({ status: 'pending' })), 'Verifier: checking');
@@ -419,7 +434,12 @@ test('health chip folds in the verifier: stale or unknown is Down, late or not s
   const hb = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) }).heartbeat;
   const health = (verifier) => healthSummary({ loaded: true, chain: verifiedChain, heartbeat: hb, dataAgeMin: 1, verifier });
   assert.deepEqual(health(fresh), { level: 'ok', label: 'Healthy', reasons: [] });
-  assert.deepEqual(health(lateV), { level: 'warn', label: 'Degraded', reasons: ['Verified 2h ago · 1 anchor'] });
+  // Healthy up to exactly 8 h, Degraded after it and up to exactly 26 h, Down after that.
+  assert.deepEqual(health(v({ status: 'ok', text: `${line(150)}\n` })), { level: 'ok', label: 'Healthy', reasons: [] }, 'a 2.5 h gap is normal');
+  assert.deepEqual(health(okAt8h), { level: 'ok', label: 'Healthy', reasons: [] });
+  assert.deepEqual(health(lateV), { level: 'warn', label: 'Degraded', reasons: ['Verified 8h ago · 1 anchor'] });
+  assert.deepEqual(health(lateAt26h), { level: 'warn', label: 'Degraded', reasons: ['Verified 26h ago · 1 anchor'] });
+  assert.deepEqual(health(staleAt26h), { level: 'alert', label: 'Down', reasons: ['Verified 26h ago · 1 anchor'] });
   assert.deepEqual(health(missing), { level: 'warn', label: 'Degraded', reasons: ['Verifier not set up'] });
   for (const bad of [staleV, unreadable, malformed, future, outOfOrder]) {
     const r = health(bad);
@@ -432,6 +452,21 @@ test('health chip folds in the verifier: stale or unknown is Down, late or not s
   // Still being checked, or left out: no effect either way.
   assert.equal(health(v({ status: 'pending' })).level, 'ok');
   assert.equal(health(null).level, 'ok');
+});
+
+test('the quiet fixture reads as the quiet live page: Healthy, nothing needs you, factory off, dry run, verified', () => {
+  const NOW = at(QUIET_FIXTURE_NOW);
+  const records = parseJsonl(readFileSync(QUIET_FIXTURE_PATH, 'utf8'), 'quiet.jsonl');
+  const events = records.map((r) => r.event);
+  const m = deriveMetrics(events, { now: NOW });
+  const v = verifierStatus({ status: 'ok', text: buildQuietAnchorLines().join('\n') + '\n' }, NOW);
+  assert.deepEqual([v.level, v.count, verifierReason(v)], ['ok', 16, 'Verified 1h ago · 16 anchors']);
+  assert.deepEqual(healthSummary({ loaded: true, chain: { status: 'verified' }, heartbeat: m.heartbeat, dataAgeMin: null, verifier: v }), { level: 'ok', label: 'Healthy', reasons: [] });
+  assert.deepEqual(heartbeatTile(m.heartbeat, true), { level: 'ok', value: '12m' });
+  assert.deepEqual(combineNeedsYou(m.needsYou.items, [], 'sabbasi3-factory-lab/chrono-node-rs'), []);
+  assert.deepEqual([m.killSwitch.enabled, m.dryRun, m.running.available, m.running.rows.length], [false, true, false, 0]);
+  const pl = pipeline(events, { openPrs: unmergedPrs(events) });
+  assert.deepEqual(pl.lanes.map((l) => l.cards.length), [0, 0, 0, 0, 0, 10, 0]);
 });
 
 test('anchors per day: counts per UTC day over the window, ignoring anchors outside it', () => {

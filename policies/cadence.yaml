@@ -1,11 +1,19 @@
 version: 1
 controller: "every 5 minutes, plus events (issue labelled, CI completed, pull_request dequeued, push to contracts/**)"
-heartbeat: hourly         # proves the controller is alive; no-change polls are not logged
-heartbeat_alert_after_hours: 2   # raised by the daily-digest workflow, not the controller itself
+heartbeat: hourly         # proves the controller is alive; no-change polls are not logged (the controller requires exactly "hourly")
+# GitHub runs scheduled workflows late on this Free-plan org. Measured Oct 17-21: "every 5 min"
+# and "hourly" crons ran every 2-8 h (heartbeat gaps: median 2.4 h, p90 4.4 h, max 7.6 h).
+# Liveness limits are set from that, so a slow scheduler isn't an outage. Loosening them is a
+# human decision (the factory never loosens its own alerts).
+heartbeat_warn_after_hours: 8     # dashboard amber
+heartbeat_alert_after_hours: 12   # dashboard red; heartbeat-watchdog alert (factory repo)
+liveness_alert_consecutive_runs: 2  # the watchdog opens an issue only after 2 failing runs in a row
 outcomes_collector: daily # gh aw outcomes + gh aw logs -> acceptance, zero-touch, cost per merged PR -> audit log + dashboard
 daily_digest: daily       # one-page summary mentioning the owner: merged/failed, needs-you, spend, drills, anomalies
 monitor: nightly          # plain code: random phrases compared with chrono-node
-audit_chain_verifier: hourly  # factory repo, audit-verify: verifies the whole log, then appends one anchor
+audit_chain_verifier: hourly  # factory repo, audit-verify: verifies the whole log, then appends one anchor (GitHub delivers ~every 2-5 h)
+audit_chain_verifier_warn_after_hours: 8    # dashboard amber
+audit_chain_verifier_alert_after_hours: 26  # dashboard red; heartbeat-watchdog alert
 factory_review:
   every_days: 3           # proposes factory changes as draft PRs; the owner approves
   data_window_days: 7     # always a rolling 7-day window

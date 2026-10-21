@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { VERIFIER_LIMITS, canonicalize, parseAnchors, validateAnchor, verifierStatus } from '../lib.js';
-import { ANCHORS_FIXTURE_PATH, FIXTURE_NOW, buildAnchorLines } from './make-fixture.mjs';
+import { ANCHORS_FIXTURE_PATH, FIXTURE_NOW, QUIET_ANCHORS_FIXTURE_PATH, QUIET_FIXTURE_NOW, buildAnchorLines, buildQuietAnchorLines } from './make-fixture.mjs';
 
 const NOW = Date.parse('2026-10-17T06:00:00Z');
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -46,6 +46,13 @@ test('verifier: the committed anchors fixture is current and verified at the fix
   const s = status(committed, Date.parse(FIXTURE_NOW));
   assert.equal(s.level, 'ok');
   assert.equal(s.count, 26);
+});
+
+test('verifier: the committed quiet anchors fixture is current and verified 1 h 35 min before its clock', () => {
+  const committed = readFileSync(QUIET_ANCHORS_FIXTURE_PATH, 'utf8');
+  assert.equal(committed, buildQuietAnchorLines().join('\n') + '\n', 'run: node dashboard/test/make-fixture.mjs');
+  const s = status(committed, Date.parse(QUIET_FIXTURE_NOW));
+  assert.deepEqual([s.level, s.count, s.ageMin], ['ok', 16, 95]);
 });
 
 test('verifier: a malformed line anywhere makes the whole file unknown (alert)', () => {
@@ -122,13 +129,15 @@ test('verifier: a 404 reads as "not set up yet" (warn), not an alert', () => {
   assert.match(s.line, /^Independent verifier: not set up yet/);
 });
 
-test('verifier: ok up to 2 h, warn after, alert after 26 h', () => {
-  assert.deepEqual([VERIFIER_LIMITS.warnMin, VERIFIER_LIMITS.alertMin], [120, 1560]);
+test('verifier: ok up to 8 h, warn after, alert after 26 h', () => {
+  assert.deepEqual([VERIFIER_LIMITS.warnMin, VERIFIER_LIMITS.alertMin], [480, 1560]);
   const at = (min) => status(file(anchor({ at: minutesAgo(min) })));
   assert.equal(at(0).level, 'ok');
-  assert.equal(at(120).level, 'ok');
-  assert.deepEqual([at(121).level, at(121).reason], ['warn', 'verifier-late']);
-  assert.equal(at(121).chip, 'Verified 2 h ago · 1 anchor');
+  assert.equal(at(121).level, 'ok', 'a late scheduled run is normal');
+  assert.equal(at(480).level, 'ok');
+  assert.deepEqual([at(481).level, at(481).reason], ['warn', 'verifier-late']);
+  assert.equal(at(481).chip, 'Verified 8 h ago · 1 anchor');
+  assert.match(at(481).title, /Amber after 8 h, red after 26 h\.$/);
   assert.equal(at(1560).level, 'warn');
   assert.deepEqual([at(1561).level, at(1561).reason], ['alert', 'verifier-stale']);
   assert.equal(at(3000).chip, 'Verified 2 d ago · 1 anchor');

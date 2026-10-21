@@ -59,7 +59,7 @@
             <p class="hint">Never required. Raises the API limit from 60 to 5,000 requests an hour. It stays in this browser's localStorage and is sent only to api.github.com, never to raw.githubusercontent.com. Use a fine-grained token with public read-only access and no other permissions.</p>
             <p class="hint" id="poll-hint"></p>
             <p class="hint" id="meta-settings"></p>
-            <p class="hint">Source: <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a>, audit branch. Add <code>?fixture=1</code> to the address for sample data.</p>
+            <p class="hint">Source: <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a>, audit branch. Add <code>?fixture=1</code> (busy) or <code>?fixture=quiet</code> to the address for sample data.</p>
           </form>
         </details>
       </div>
@@ -169,7 +169,7 @@
   <footer class="foot wrap">
     <svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>
     <span>Read-only · verified in your browser</span>
-    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser, and an independent verifier re-checks the whole log every hour (its anchors file is read from raw.githubusercontent.com). Add ?fixture=1 to the address to see sample data.</span></button>
+    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub: the branch head from api.github.com and the day files from raw.githubusercontent.com, pinned to that commit. Every event's SHA-256 and the parent chain are re-checked in your browser, and an independent verifier re-checks the whole log on an hourly schedule, which GitHub runs every few hours (its anchors file is read from raw.githubusercontent.com). Add ?fixture=1 to the address to see sample data.</span></button>
   </footer>
 
   <div id="tip" class="tip" aria-hidden="true" hidden></div>

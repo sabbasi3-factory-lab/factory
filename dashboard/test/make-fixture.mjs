@@ -1,6 +1,12 @@
-// Builds dashboard/test/fixtures/sample.jsonl: a small, hash-chained audit log
-// with real SHA-256 values, used by the tests and by the ?fixture=1 preview, and
-// dashboard/test/fixtures/anchors.jsonl: hourly independent-verifier anchors over it.
+// Builds the hash-chained sample audit logs (real SHA-256 values) used by the tests and
+// the previews, and the independent-verifier anchors over each:
+//
+// - fixtures/sample.jsonl and fixtures/anchors.jsonl (?fixture=1): a busy factory with
+//   work in every stage, two items that need the owner and hourly anchors.
+// - fixtures/quiet.jsonl and fixtures/quiet-anchors.jsonl (?fixture=quiet): the quiet
+//   state the live page is usually in: nothing needs the owner, factory off, dry run,
+//   no agents running, ten merged PRs, and heartbeats and anchors at the irregular
+//   cadence GitHub's scheduler really delivers (every 2 to 8 h, not hourly).
 //
 //   node dashboard/test/make-fixture.mjs
 //
@@ -12,8 +18,12 @@ import { canonicalize } from '../lib.js';
 
 export const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample.jsonl', import.meta.url));
 export const ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/anchors.jsonl', import.meta.url));
-// The preview pins its clock here, so ages and "today" read as they would live.
+export const QUIET_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet.jsonl', import.meta.url));
+export const QUIET_ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-anchors.jsonl', import.meta.url));
+// The preview pins its clock 12 min after the last event, so ages and "today" read as
+// they would live.
 export const FIXTURE_NOW = '2026-10-16T11:12:00Z';
+export const QUIET_FIXTURE_NOW = '2026-10-17T13:12:00Z';
 
 const FACTORY_VERSION = 'f4c1a9e';
 const OWNER = 'example-owner';
@@ -91,18 +101,18 @@ const STEPS = [
   ['2026-10-16T11:00:03Z', hb('2026-10-16T11', 2027, 3, 13)],
 ];
 
-export function buildFixtureLines() {
+function chainLines(steps, { dryRun = false, seed = '' } = {}) {
   const lines = [];
   let parent = null;
-  STEPS.forEach(([timestamp, { type, ...fields }], i) => {
+  steps.forEach(([timestamp, { type, ...fields }], i) => {
     const sources = Object.keys(fields).sort().map((k) => `${k}=${canonicalize(fields[k])}`).join('&');
     const payload = {
       dedupe_key: 'sha256:' + hex(`${type}|${sources}`, 64),
-      dry_run: false,
+      dry_run: dryRun,
       factory_version: FACTORY_VERSION,
       ...fields,
     };
-    const record = { version: 1, id: uuid(i), type, timestamp, parents: parent ? [parent] : [], payload };
+    const record = { version: 1, id: uuid(`${seed}${i}`), type, timestamp, parents: parent ? [parent] : [], payload };
     const sha = 'sha256:' + createHash('sha256').update(canonicalize(record)).digest('hex');
     lines.push(canonicalize({ ...record, sha }));
     parent = sha;
@@ -110,27 +120,102 @@ export function buildFixtureLines() {
   return lines;
 }
 
-// One anchor an hour at :47, as the audit-verify workflow would append them, each
-// covering the sample events logged by then.
-export function buildAnchorLines() {
-  const events = buildFixtureLines().map((l) => JSON.parse(l));
-  const lines = [];
-  const first = Date.parse('2026-10-15T09:47:12Z');
-  const last = Date.parse('2026-10-16T10:47:12Z');
-  for (let ms = first, i = 0; ms <= last; ms += 3600000, i++) {
-    const at = new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+export function buildFixtureLines() {
+  return chainLines(STEPS);
+}
+
+const isoSeconds = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+// One anchor per time in `times`, as the audit-verify workflow would append them, each
+// covering the events logged by then.
+function anchorLines(eventLines, times, firstRunId) {
+  const events = eventLines.map((l) => JSON.parse(l));
+  return times.map((ms, i) => {
+    const at = isoSeconds(ms);
     const covered = events.filter((e) => e.timestamp <= at);
-    lines.push(canonicalize({
+    return canonicalize({
       at,
       audit_head: covered.length ? hex(`audit-head:${covered.length}`) : null,
       events: covered.length,
       last_sha: covered.length ? covered.at(-1).sha : null,
-      run_id: 5001 + i,
+      run_id: firstRunId + i,
       source: 'sabbasi3-factory-lab/chrono-node-rs',
       v: 1,
-    }));
+    });
+  });
+}
+
+// One anchor an hour at :47.
+export function buildAnchorLines() {
+  const times = [];
+  for (let ms = Date.parse('2026-10-15T09:47:12Z'); ms <= Date.parse('2026-10-16T10:47:12Z'); ms += 3600000) times.push(ms);
+  return anchorLines(buildFixtureLines(), times, 5001);
+}
+
+// --- The quiet fixture -------------------------------------------------------------
+
+// Times walking back from `last` by the given gaps (in hours), oldest first.
+function backFrom(last, gapsH) {
+  const out = [Date.parse(last)];
+  for (const g of gapsH) out.unshift(out[0] - Math.round(g * 3600000));
+  return out;
+}
+
+// Heartbeat gaps as measured live over 48 h on a Free-plan org: median about 2.4 h,
+// with some gaps of 4 to 8 h. The newest heartbeat is the last event.
+const QUIET_HEARTBEAT_GAPS_H = [2.3, 4.4, 2.1, 7.6, 2.4, 1.9, 5.2, 2.6, 2.2, 3.1, 2.4, 1.8, 2.5, 4.1, 2.4, 2.0, 6.3, 2.7, 2.2, 2.4];
+const QUIET_HEARTBEATS = backFrom('2026-10-17T13:00:00Z', QUIET_HEARTBEAT_GAPS_H);
+// Verifier anchors at a similar cadence; the newest is 1 h 35 min before the pinned clock.
+const QUIET_ANCHORS = backFrom('2026-10-17T11:37:00Z', [2.9, 5.1, 2.4, 3.3, 2.9, 2.2, 4.6, 2.9, 3.5, 2.6, 2.9, 1.9, 4.2, 2.9, 3.0]);
+
+// Owner PRs, all merged: [pr, opened, minutes to the CI result (gates a minute later),
+// minutes from the gates result to queued, minutes from queued to merged].
+const QUIET_PRS = [
+  [12, '2026-10-14T16:05:10Z', 3, 0.3, 0.1],
+  [13, '2026-10-14T17:40:22Z', 4, 6, 1],
+  [14, '2026-10-14T19:12:40Z', 9, 45, 5],
+  [15, '2026-10-15T08:31:05Z', 8, 41, 5],
+  [18, '2026-10-15T10:02:47Z', 5, 6, 1],
+  [20, '2026-10-15T13:20:00Z', 12, 350, 9],
+  [22, '2026-10-15T21:44:31Z', 14, 300, 120],
+  [23, '2026-10-16T08:15:03Z', 3, 0.3, 0.2],
+  [24, '2026-10-16T09:02:19Z', 4, 3, 2],
+  [25, '2026-10-16T11:30:44Z', 3, 0.4, 0.2],
+];
+
+function quietSteps() {
+  const steps = [];
+  const add = (ms, payload) => steps.push([isoSeconds(ms), payload]);
+  let runId = 7001;
+  QUIET_HEARTBEATS.forEach((ms, i) => add(ms, {
+    type: 'heartbeat', run_id: 6001 + i, open_pr_count: 0, decision_count: 0, factory_enabled: false,
+    hour: isoSeconds(ms).slice(0, 13), trigger: 'schedule',
+  }));
+  for (const [pr, opened, checkMin, queueMin, mergeMin] of QUIET_PRS) {
+    const t0 = Date.parse(opened);
+    const head = hex(`qh${pr}`);
+    const check = (ms, workflow, event, extra = {}) => add(ms + 20000, {
+      type: 'check_result', workflow, run_id: runId++, run_attempt: 1, event, head_sha: head,
+      ...(event === 'pull_request' ? { prs: [pr] } : {}), conclusion: 'success', completed_at: isoSeconds(ms), ...extra,
+    });
+    add(t0 + 15000, { type: 'pr_opened', pr, head_sha: head, author: OWNER, opened_at: isoSeconds(t0) });
+    check(t0 + checkMin * 60000, 'ci', 'pull_request');
+    check(t0 + (checkMin + 1) * 60000, 'gates', 'pull_request', { heldout_seed: String(BigInt(`0x${hex(`seed${pr}`, 15)}`)) });
+    const queued = t0 + (checkMin + 1 + queueMin) * 60000 + 90000;
+    add(queued + 5000, { type: 'queued', pr, actor: OWNER, at: isoSeconds(queued) });
+    const merged = queued + mergeMin * 60000 + 30000;
+    check(merged - 10000, 'ci', 'merge_group');
+    add(merged + 30000, { type: 'merged', pr, merge_commit_sha: hex(`qm${pr}`), merged_at: isoSeconds(merged) });
   }
-  return lines;
+  return steps.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+export function buildQuietFixtureLines() {
+  return chainLines(quietSteps(), { dryRun: true, seed: 'quiet:' });
+}
+
+export function buildQuietAnchorLines() {
+  return anchorLines(buildQuietFixtureLines(), QUIET_ANCHORS, 8001);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -140,4 +225,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const anchors = buildAnchorLines();
   writeFileSync(ANCHORS_FIXTURE_PATH, anchors.join('\n') + '\n');
   console.log(`wrote ${anchors.length} anchors to dashboard/test/fixtures/anchors.jsonl`);
+  const quiet = buildQuietFixtureLines();
+  writeFileSync(QUIET_FIXTURE_PATH, quiet.join('\n') + '\n');
+  console.log(`wrote ${quiet.length} events to dashboard/test/fixtures/quiet.jsonl`);
+  const quietAnchors = buildQuietAnchorLines();
+  writeFileSync(QUIET_ANCHORS_FIXTURE_PATH, quietAnchors.join('\n') + '\n');
+  console.log(`wrote ${quietAnchors.length} anchors to dashboard/test/fixtures/quiet-anchors.jsonl`);
 }
