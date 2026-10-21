@@ -7,8 +7,12 @@ export const DEFAULTS = Object.freeze({
   wipLimit: 3, // policies/limits.yaml wip.start
   aicBudget: 10000, // policies/budgets.yaml factory_per_day.max_aic
   aicAlertPct: 80,
-  heartbeatWarnMin: 70,
-  heartbeatAlertMin: 120, // DESIGN §11: alert after 2 h without a heartbeat
+  // The controller is scheduled hourly, but GitHub's cron on a Free-plan org runs it only
+  // every 2 to 8 h (measured: median gap 2.4 h, p90 4.4 h, worst 7.6 h), so the limits
+  // sit above the observed worst case: amber after 8 h, alert after 12 h. The watchdog
+  // imports heartbeatAlertMin.
+  heartbeatWarnMin: 480,
+  heartbeatAlertMin: 720,
   windowDays: 7,
   perTaskAic: 1000, // policies/budgets.yaml per_task.max_aic
   humanQueueMax: 5, // policies/limits.yaml human_queue.max_items
@@ -217,6 +221,12 @@ export function formatDuration(ms) {
   return ms < 0 ? `-${out}` : out;
 }
 
+/** A limit in minutes as people say it: "8 h" for whole hours, else "90 min". */
+export function formatLimit(min) {
+  if (!isNum(min)) return '—';
+  return min >= 60 && min % 60 === 0 ? `${min / 60} h` : `${min} min`;
+}
+
 export function heartbeatLevel(ageMin, opts = DEFAULTS) {
   if (ageMin == null) return 'none';
   if (ageMin > opts.heartbeatAlertMin) return 'alert';
@@ -260,7 +270,7 @@ export function statusSummary({ loaded = false, noLog = false, error = null, fix
   let hbLevel;
   const level = heartbeat?.level ?? 'unknown';
   if (level === 'ok') [hb, hbLevel] = ['controller heartbeat ok', 'ok'];
-  else if (level === 'warn') [hb, hbLevel] = [`controller heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min)`, 'warn'];
+  else if (level === 'warn') [hb, hbLevel] = [`controller heartbeat late (over ${formatLimit(DEFAULTS.heartbeatWarnMin)})`, 'warn'];
   else if (level === 'alert') [hb, hbLevel] = [`controller heartbeat stale (${formatAge(heartbeat.ageMin)})`, 'alert'];
   else if (level === 'none') [hb, hbLevel] = [`no controller heartbeat in the last ${days} days`, 'alert'];
   else [hb, hbLevel] = ['controller heartbeat unknown', 'warn'];
@@ -282,14 +292,18 @@ export const STALE_DATA_MIN = 10; // live data older than this is not fresh
  * nothing is known to be wrong). The worst condition wins:
  *
  * - Down: no audit log; nothing loaded because of an error; the chain is broken; the
- *   heartbeat is missing from the window or stale (over 120 min); the verifier is
- *   stale (over 26 h) or unknown (unreadable, empty, malformed, out of order or in the
+ *   heartbeat is missing from the window or stale (over 12 h); the verifier is stale
+ *   (over 26 h) or unknown (unreadable, empty, malformed, out of order or in the
  *   future).
  * - Degraded: the last refresh failed, so older data is shown; the data is over
- *   10 min old (`dataAgeMin`); the heartbeat is late (over 70 min) or unknown; the chain
- *   isn't verified (not loaded or empty); the verifier is late (over 2 h) or not set up.
- * - Healthy: fresh data, a verified chain, a heartbeat within 70 min and, when given, a
- *   verifier anchor within 2 h. A verifier still being checked doesn't count either way.
+ *   10 min old (`dataAgeMin`); the heartbeat is late (over 8 h) or unknown; the chain
+ *   isn't verified (not loaded or empty); the verifier is late (over 8 h) or not set up.
+ * - Healthy: fresh data, a verified chain, a heartbeat within 8 h and, when given, a
+ *   verifier anchor within 8 h. A verifier still being checked doesn't count either way.
+ *
+ * The limits (DEFAULTS.heartbeatWarnMin/AlertMin, VERIFIER_LIMITS) sit above the cadence
+ * GitHub's scheduler really delivers on a Free plan, every 2 to 8 h for hourly jobs, so
+ * a normal late run doesn't read as Degraded.
  *
  * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
  */
@@ -366,7 +380,7 @@ export function prRef(repo, number, homeRepo) {
 export const ANCHOR_FIELDS = ['at', 'audit_head', 'events', 'last_sha', 'run_id', 'source', 'v'];
 export const ANCHOR_SOURCE = 'sabbasi3-factory-lab/chrono-node-rs';
 export const VERIFIER_LIMITS = Object.freeze({
-  warnMin: 120, // a verification runs hourly; amber after 2 h
+  warnMin: 8 * 60, // scheduled hourly, but GitHub runs it every 2 to 8 h: amber after 8 h
   alertMin: 26 * 60, // red after 26 h, the same limit as the watchdog
 });
 
@@ -478,7 +492,7 @@ export function verifierStatus(fetched, now, limits = VERIFIER_LIMITS) {
     count: n, newest, ageMin, level,
     reason: level === 'ok' ? 'verifier-fresh' : level === 'warn' ? 'verifier-late' : 'verifier-stale',
     chip: `Verified ${formatAge(ageMin)} ago · ${plural}`,
-    title: `Last independent verification ${newest.at} (run ${newest.run_id}). Amber after ${limits.warnMin / 60} h, red after ${limits.alertMin / 60} h.`,
+    title: `Last independent verification ${newest.at} (run ${newest.run_id}). Amber after ${formatLimit(limits.warnMin)}, red after ${formatLimit(limits.alertMin)}.`,
     line: `Independent verifier: last run ${formatAge(ageMin)} ago, ${plural}, newest covers ${newest.events.toLocaleString('en-US')} event${newest.events === 1 ? '' : 's'} (${head}).`,
   };
 }
@@ -496,7 +510,7 @@ export function verifierReason(v) {
   return `Verifier unknown: ${v.title ?? v.reason}`;
 }
 
-/** Anchors per UTC day over the window, oldest first: the "Verified" tile's trend (24 expected). */
+/** Anchors per UTC day over the window, oldest first: the "Verified" tile's trend (24 scheduled). */
 export function anchorsPerDay(anchors, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
   const end = Date.parse(utcDay(now) + 'T00:00:00Z');
   const labels = [];
@@ -509,6 +523,60 @@ export function anchorsPerDay(anchors, { now = Date.now(), days = DEFAULTS.windo
     if (i != null) counts[i]++;
   }
   return { days: labels, counts };
+}
+
+// ---------------------------------------------------------------------------
+// Observed cadence: how often scheduled jobs really ran. GitHub's cron runs "hourly"
+// schedules late, often by hours, on Free plans, so tooltips show the measured gaps next
+// to the limits.
+
+export const CADENCE_NOTE = 'GitHub runs scheduled jobs late on Free plans';
+
+/**
+ * The gaps between consecutive times (epoch ms or ISO strings; invalid ones are ignored,
+ * the rest sorted). Returns { count, medianH, maxH } where count is the number of times
+ * and the gaps are in hours, or null with fewer than 2 times.
+ */
+export function observedCadence(timestamps) {
+  const times = (timestamps || [])
+    .map((t) => (typeof t === 'string' ? parseTime(t) : t))
+    .filter(isNum)
+    .sort((a, b) => a - b);
+  if (times.length < 2) return null;
+  const gapsH = times.slice(1).map((t, i) => (t - times[i]) / 3600000);
+  return { count: times.length, medianH: median(gapsH), maxH: Math.max(...gapsH) };
+}
+
+/** Hours to one decimal ("2.4 h"), or whole minutes under an hour ("45 min"). */
+export function formatHours(h) {
+  if (!isNum(h) || h < 0) return '—';
+  return h < 1 ? `${Math.round(h * 60)} min` : `${h.toFixed(1)} h`;
+}
+
+/**
+ * One tooltip line: "Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)", or
+ * "Heartbeats: too few to measure (7 days)" when observedCadence() returned null.
+ */
+export function cadenceText(label, cadence, days = DEFAULTS.windowDays) {
+  const span = `(${days} day${days === 1 ? '' : 's'})`;
+  if (!cadence) return `${label}: too few to measure ${span}`;
+  return `${label}: median every ${formatHours(cadence.medianH)}, longest gap ${formatHours(cadence.maxH)} ${span}`;
+}
+
+/** "amber after 8 h, red after 12 h" */
+export function limitsText(warnMin, alertMin) {
+  return `amber after ${formatLimit(warnMin)}, red after ${formatLimit(alertMin)}`;
+}
+
+/** Times of the heartbeats in the loaded events (epoch ms), oldest first. */
+export function heartbeatTimes(events) {
+  return (events || []).filter((ev) => ev?.type === 'heartbeat').map((ev) => parseTime(ev.timestamp)).filter(isNum);
+}
+
+/** Times of the anchors (epoch ms) within the last `days` days before `now`. */
+export function anchorTimes(anchors, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
+  const from = now - days * 86400000;
+  return (anchors || []).map((a) => parseUtcSeconds(a?.at)).filter((ms) => ms != null && ms >= from && ms <= now);
 }
 
 // ---------------------------------------------------------------------------

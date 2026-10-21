@@ -2,8 +2,9 @@
 // and renders the panels. All DOM writes use textContent or createElement(NS), never
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
-  DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorsPerDay, canonicalize, combineNeedsYou, compactAge, costSummary, dailySeries, dayPaths,
-  deriveMetrics, existingDayPaths, formatAge, formatDuration, healthSummary, parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
+  CADENCE_NOTE, DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorTimes, anchorsPerDay, cadenceText, canonicalize, combineNeedsYou, compactAge, costSummary,
+  dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
+  parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
   VERIFIER_LIMITS, heartbeatTile, sparkSegments, stageBreakdown, statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay,
   verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
@@ -15,7 +16,12 @@ const RAW = 'https://raw.githubusercontent.com';
 const GH = 'https://github.com';
 const TOKEN_KEY = 'factory-dashboard.github-token';
 const THEME_KEY = 'factory-dashboard.theme';
-const FIXTURE_URL = 'test/fixtures/sample.jsonl'; // relative, so it works locally and on Pages
+// Sample data (relative URLs, so they work locally and on Pages): ?fixture=1 is a busy
+// factory, ?fixture=quiet the quiet state the live page is usually in.
+const FIXTURES = Object.freeze({
+  1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl' },
+  quiet: { events: 'test/fixtures/quiet.jsonl', anchors: 'test/fixtures/quiet-anchors.jsonl' },
+});
 const MISSING_BRANCH_POLL_S = 300;
 // Open-PR lists (product repo for PR lanes; both repos for owner reviews). v1 audit events
 // have no "closed" PR event and no human-tier PR events, so these come from GitHub directly.
@@ -34,13 +40,15 @@ const PR_STALE_MS = 20 * 60000; // older than this, PR state counts as unknown
 // checks for it instead, so the page doesn't keep logging 404s for the raw file.
 const ANCHORS_BRANCH = 'anchors';
 const ANCHORS_PATH = 'anchors/chrono-node-rs.jsonl';
-const ANCHORS_FIXTURE_URL = 'test/fixtures/anchors.jsonl';
 const VERIFIER_MIN_MS = 5 * 60000;
 const VERIFIER_PROBE_MS = 15 * 60000;
 const VERIFIER_RETRY_MS = 60000;
 
 const params = new URLSearchParams(location.search);
-const FIXTURE = params.get('fixture') === '1';
+const FIXTURE_PARAM = Object.hasOwn(FIXTURES, params.get('fixture') ?? '') ? params.get('fixture') : null;
+const FIXTURE = FIXTURE_PARAM != null;
+const FIXTURE_URL = FIXTURE ? FIXTURES[FIXTURE_PARAM].events : null;
+const ANCHORS_FIXTURE_URL = FIXTURE ? FIXTURES[FIXTURE_PARAM].anchors : null;
 const POLL_S = clampInt(params.get('poll'), 30, 10, 3600);
 const DAYS = clampInt(params.get('days'), DEFAULTS.windowDays, 1, 31);
 
@@ -710,11 +718,28 @@ function initTips() {
 const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info', loading: 'muted' };
 const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot', loading: null };
 const LEVEL_WORD = { ok: 'ok', warn: 'warning', alert: 'alert', info: 'checking', loading: 'loading' };
-const HEALTH_RULE = 'Healthy: fresh data, verified chain, heartbeat within '
-  + `${DEFAULTS.heartbeatWarnMin} min, verifier anchor within ${VERIFIER_LIMITS.warnMin / 60} h.\nDegraded: last refresh failed, data over ${STALE_DATA_MIN} min old, `
-  + `heartbeat late (over ${DEFAULTS.heartbeatWarnMin} min), chain not verified, verifier late (over ${VERIFIER_LIMITS.warnMin / 60} h) or not set up.\n`
-  + `Down: no audit log, broken chain, heartbeat missing or over ${DEFAULTS.heartbeatAlertMin} min, `
-  + `verifier over ${VERIFIER_LIMITS.alertMin / 60} h or unreadable.`;
+const HB_WARN = formatLimit(DEFAULTS.heartbeatWarnMin);
+const HB_ALERT = formatLimit(DEFAULTS.heartbeatAlertMin);
+const VF_WARN = formatLimit(VERIFIER_LIMITS.warnMin);
+const VF_ALERT = formatLimit(VERIFIER_LIMITS.alertMin);
+const HEALTH_RULE = `Healthy: fresh data, verified chain, heartbeat within ${HB_WARN}, verifier anchor within ${VF_WARN}.\n`
+  + `Degraded: last refresh failed, data over ${STALE_DATA_MIN} min old, heartbeat late (over ${HB_WARN}), chain not verified, verifier late (over ${VF_WARN}) or not set up.\n`
+  + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.`;
+
+/** The anchors in the verifier file, or [] if it isn't loaded or isn't valid. */
+function loadedAnchors() {
+  if (state.verifier.status !== 'ok') return [];
+  const parsed = parseAnchors(state.verifier.text);
+  return parsed.problem ? [] : parsed.anchors;
+}
+
+/** Tooltip lines with the cadence the scheduled jobs really ran at, from the loaded data. */
+function cadenceLines(anchors = loadedAnchors()) {
+  return {
+    heartbeat: cadenceText('Heartbeats', observedCadence(heartbeatTimes(state.events)), DAYS),
+    verifier: cadenceText('Verifications', observedCadence(anchorTimes(anchors, { now: now(), days: DAYS })), DAYS),
+  };
+}
 
 function setStatus(text) {
   const el = $('status');
@@ -748,7 +773,8 @@ function renderHeader(m, needs) {
   setChip('health', {
     tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.level === 'loading' ? `… ${health.label}` : health.label,
     tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine,
-      ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE].join('\n'),
+      ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE,
+      ...(state.loaded ? (({ heartbeat, verifier: v }) => ['', `Observed: ${heartbeat}`, `Observed: ${v}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
   });
   setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
 
@@ -783,7 +809,7 @@ function renderHeader(m, needs) {
     tipText: `${dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect'}${version ? `\nFactory version ${version}` : ''}`,
   });
   const clock = new Date(now()).toISOString().slice(11, 16);
-  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${clock}Z. Remove ?fixture=1 for live data.` });
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${clock}Z. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
 
   const meta = [];
   if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
@@ -838,13 +864,20 @@ function kpi({ title, iconName, value, unit = null, level = null, tipText, spark
 
 function verifiedTile() {
   const v = verifierStatus(state.verifier, now());
-  const parsed = state.verifier.status === 'ok' ? parseAnchors(state.verifier.text) : null;
-  const perDay = anchorsPerDay(parsed && !parsed.problem ? parsed.anchors : [], { now: now(), days: DAYS });
+  const anchors = loadedAnchors();
+  const perDay = anchorsPerDay(anchors, { now: now(), days: DAYS });
   return {
     title: 'Verified', iconName: 'shield', value: v.level === 'info' ? '…' : v.ageMin == null ? '—' : compactAge(v.ageMin * 60000),
     level: v.level === 'info' ? null : v.level,
-    tipText: `${verifierReason(v)}\n${v.line}\nIndependent audit-verify run: green up to ${VERIFIER_LIMITS.warnMin / 60} h, amber after, red after ${VERIFIER_LIMITS.alertMin / 60} h or if the anchors file is unreadable\nTrend counts anchors per day (24 expected)`,
-    spark: { values: perDay.counts, days: perDay.days, label: 'Verifier anchors per day (24 expected)', tone: 'green', fmt: 'n' },
+    tipText: [
+      verifierReason(v),
+      v.line,
+      cadenceLines(anchors).verifier,
+      `Independent audit-verify run: green up to ${VF_WARN}, ${limitsText(VERIFIER_LIMITS.warnMin, VERIFIER_LIMITS.alertMin)} or if the anchors file is unreadable`,
+      CADENCE_NOTE,
+      'Trend counts anchors per day (24 scheduled)',
+    ].join('\n'),
+    spark: { values: perDay.counts, days: perDay.days, label: 'Verifier anchors per day (24 scheduled)', tone: 'green', fmt: 'n' },
   };
 }
 
@@ -885,8 +918,14 @@ function renderKpis(m) {
     },
     {
       title: 'Heartbeat', iconName: 'pulse', value: hbTile.value, level: hbTile.level,
-      tipText: `${hb.ageMin == null ? `No heartbeat in the last ${DAYS} days` : `Last heartbeat ${formatAge(hb.ageMin)} ago${hbIso}`}\nGreen up to ${DEFAULTS.heartbeatWarnMin} min, amber after ${DEFAULTS.heartbeatWarnMin} min, red after ${DEFAULTS.heartbeatAlertMin} min\nTrend counts heartbeats per day (24 expected)`,
-      spark: { values: s.heartbeats, days: s.days, label: 'Heartbeats per day (24 expected)', tone: 'green', fmt: 'n' },
+      tipText: [
+        hb.ageMin == null ? `No heartbeat in the last ${DAYS} days` : `Last heartbeat ${formatAge(hb.ageMin)} ago${hbIso}`,
+        cadenceLines().heartbeat,
+        `Green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}`,
+        CADENCE_NOTE,
+        'Trend counts heartbeats per day (24 scheduled)',
+      ].join('\n'),
+      spark: { values: s.heartbeats, days: s.days, label: 'Heartbeats per day (24 scheduled)', tone: 'green', fmt: 'n' },
     },
   ];
   tiles.push(verifiedTile());
@@ -977,7 +1016,15 @@ function renderNeeds(m, view = needsView(m)) {
   const clear = !items.length && (rs === 'ok' || rs === 'sample');
   $('needs-panel').classList.toggle('needs--clear', clear);
   if (!items.length) {
-    replaceSection('needs', clear ? h('p', { class: 'needs-clear' }, icon('ok'), 'Nothing needs you') : reviewNote);
+    // The header chip already says "Nothing needs you", so the panel shows just the count.
+    // It keeps its place (and its height), so the page doesn't jump when an item arrives,
+    // and so the detail panels below don't rise above the fold.
+    replaceSection('needs', clear
+      ? tip(h('p', { class: 'needs-head needs-head--clear' },
+        h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Nothing needs you' }, icon('ok')),
+        h('span', { class: 'big' }, '0')),
+      'Nothing needs you: no needs-human items, stale contracts or PRs waiting for your review.')
+      : reviewNote);
     return;
   }
   replaceSection('needs',
@@ -1052,8 +1099,9 @@ function renderPipeline() {
     }, expanded ? 'Fewer' : `+${n - DONE_SHOWN}`), expanded ? `Show only the latest ${DONE_SHOWN}` : `Show ${n - DONE_SHOWN} more`) : null;
     return h('div', { class: `lane st-${l.key}${n ? '' : ' lane--empty'}`, role: 'group', 'aria-label': `${l.label}: ${n}` },
       h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('span', { class: 'lane-name' }, SHORT_STAGE[l.key] ?? l.label),
-        // Active lanes show every card, so only empty and done lanes need a count.
-        !n || DONE_UI.has(l.key) ? h('span', { class: 'n' }, String(n)) : null),
+        // Active lanes show every card and an empty lane shows none, so only done lanes
+        // with cards (capped at the latest few) need a count. The group's label has it.
+        n && DONE_UI.has(l.key) ? h('span', { class: 'n' }, String(n)) : null),
       l.prStateUnknown ? tip(h('span', { class: 'lane-note', role: 'img', 'aria-label': 'PR state unknown' }, icon('question')), "PR state unknown: the open-PR list couldn't be read, so these PRs may have been closed.") : null,
       n ? h('div', { class: 'lane-cards', id: `lane-${l.key}` }, shown.map((c) => {
         try {

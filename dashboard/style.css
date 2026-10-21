@@ -262,7 +262,11 @@ h2 {
   background: linear-gradient(180deg, var(--warn-bg), var(--panel) 75%);
 }
 .needs.needs--clear { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: linear-gradient(180deg, var(--ok-bg), var(--panel) 80%); }
-.needs-clear { margin: 0; display: flex; gap: 8px; align-items: center; color: var(--ok); font-weight: 650; font-size: 1.1rem; }
+/* Nothing needs you: the header chip says so, so the panel shows just a green ✓ and 0. */
+.needs-head--clear { margin: 0; width: fit-content; border-radius: 6px; color: var(--ok); }
+.needs-head.needs-head--clear .big { color: var(--ok); }
+.needs-ok { display: inline-flex; }
+.needs-ok svg.i { width: 30px; height: 30px; stroke-width: 2.6; }
 .needs-note { margin: 0; display: flex; gap: 6px; align-items: center; color: var(--muted); font-weight: 600; font-size: 0.9rem; width: fit-content; border-radius: 6px; }
 .needs-note--warn { color: var(--warn); }
 .needs .sec-h h2 { color: var(--fg); }

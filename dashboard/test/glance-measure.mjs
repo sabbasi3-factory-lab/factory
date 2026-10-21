@@ -2,8 +2,9 @@
 // browser (it's serialized with Function#toString, so it must stay self-contained), and
 // is shared by test/glance.test.mjs and by the CLI below, which measures the live page:
 //
-//   node dashboard/test/glance-measure.mjs            # live data
-//   node dashboard/test/glance-measure.mjs --fixture  # sample data
+//   node dashboard/test/glance-measure.mjs                  # live data
+//   node dashboard/test/glance-measure.mjs --fixture        # sample data (?fixture=1)
+//   node dashboard/test/glance-measure.mjs --fixture quiet  # quiet sample (?fixture=quiet)
 //   node dashboard/test/glance-measure.mjs --shots <dir> --name <prefix>
 //
 // The CLI loads the page once (four API requests in live mode) and then measures and,
@@ -223,10 +224,12 @@ async function main(argv) {
     const i = argv.indexOf(name);
     return i >= 0 ? argv[i + 1] : null;
   };
-  const fixture = argv.includes('--fixture');
+  // "--fixture" alone is the sample (?fixture=1); "--fixture quiet" the quiet sample.
+  const fixtureArg = arg('--fixture');
+  const fixture = argv.includes('--fixture') ? (fixtureArg && !fixtureArg.startsWith('--') ? fixtureArg : '1') : null;
   const verbose = argv.includes('--verbose');
   const shots = arg('--shots');
-  const name = arg('--name') ?? (fixture ? 'fixture' : 'live');
+  const name = arg('--name') ?? (fixture === 'quiet' ? 'quiet' : fixture ? 'fixture' : 'live');
   const ready = arg('--ready-expr') ?? READY_EXPR;
   const chrome = findChrome();
   if (!chrome) throw new Error('Chrome not found: set CHROME_PATH');
@@ -236,7 +239,7 @@ async function main(argv) {
     browser = await launchChrome(chrome, { width: 1440, height: 900, timeoutMs: 45000 });
     const { page } = browser;
     await page.setColorScheme('light');
-    await page.navigate(`${server.url}index.html${fixture ? '?fixture=1' : ''}`);
+    await page.navigate(`${server.url}index.html${fixture ? `?fixture=${encodeURIComponent(fixture)}` : ''}`);
     await page.waitFor(ready, { timeoutMs: 45000, what: 'the dashboard to render' });
     await new Promise((r) => setTimeout(r, 800));
     for (const [w, h] of [[1440, 900], [390, 844]]) {
