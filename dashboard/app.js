@@ -903,7 +903,11 @@ function renderKpis(m) {
     {
       title: 'AIC today', iconName: 'coin', value: fmtInt(Math.round(aic.total)),
       level: aic.level === 'ok' ? null : aic.level,
-      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${m.tokensPerTask.total.runs ? '' : '\nNo run_finished events yet'}`,
+      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${
+        aic.source === 'spend_snapshot'
+          ? `\n${fmtInt(Math.round(aic.measured))} measured + ${fmtInt(Math.round(aic.reserved))} reserved for runs in flight${aic.runs == null ? '' : ` (${aic.runs} runs)`}, controller snapshot ${aic.at}`
+          : '\nNo spend snapshot today yet'
+      }`,
       spark: { values: s.aic, days: s.days, label: 'AIC per day', tone: 'purple', fmt: 'int' },
     },
     {

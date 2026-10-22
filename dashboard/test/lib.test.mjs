@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
+  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dailySeries, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
   formatLimit, heartbeatLevel, heartbeatTimes, isPlanOnly, limitsText, listSubjects, observedCadence, parseJsonl, stageTimes, statusSummary,
   subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
@@ -524,4 +524,30 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   assert.equal(formatAge(119.9), '119 min');
   assert.equal(formatAge(180), '3 h');
   assert.equal(formatAge(3 * 1440 + 5), '3 d');
+});
+
+test('AIC today comes from the newest real spend_snapshot (measured + reserved), not only run_finished', () => {
+  const base = { dedupe_key: 'k', factory_version: 'v' };
+  const snap = (timestamp, aic_today, runs, dry_run = false) => ({ type: 'spend_snapshot', timestamp, payload: { ...base, dry_run, day: timestamp.slice(0, 10), aic_today, runs, runs_total: runs.length } });
+  const events = [
+    snap('2026-10-21T22:00:00Z', 31.38, [{ run_id: 1, status: 'measured', aic: 31.38 }]),
+    snap('2026-10-22T18:37:16Z', 2700, [{ run_id: 2, status: 'reserved', aic: 900 }, { run_id: 3, status: 'reserved', aic: 900 }, { run_id: 4, status: 'reserved', aic: 900 }]),
+    snap('2026-10-22T18:42:36Z', 967.24, [{ run_id: 2, status: 'measured', aic: 32.09 }, { run_id: 3, status: 'measured', aic: 35.15 }, { run_id: 4, status: 'reserved', aic: 900 }]),
+    snap('2026-10-22T18:50:00Z', 99999, [], true), // dry-run: ignored
+  ];
+  const m = deriveMetrics(events, { now: at('2026-10-22T19:00:00Z') });
+  assert.equal(m.aicToday.total, 967.24);
+  assert.equal(m.aicToday.source, 'spend_snapshot');
+  assert.equal(Math.round(m.aicToday.measured * 100) / 100, 67.24);
+  assert.equal(m.aicToday.reserved, 900);
+  assert.equal(m.aicToday.runs, 3);
+  assert.equal(m.aicToday.at, '2026-10-22T18:42:36Z');
+  // Days without a snapshot fall back to run_finished; the daily series uses each day's snapshot.
+  assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.total, 0);
+  assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.source, null);
+  const s = dailySeries(events, { now: at('2026-10-22T19:00:00Z'), days: 2 });
+  assert.deepEqual(s.aic, [31.38, 967.24]);
+  // A larger run_finished total today raises it, as in the controller.
+  const more = [...events, { type: 'run_finished', timestamp: '2026-10-22T18:55:00Z', payload: { ...base, dry_run: false, task: 't/a', attempt: 1, aic: 1200 } }];
+  assert.equal(deriveMetrics(more, { now: at('2026-10-22T19:00:00Z') }).aicToday.total, 1200);
 });

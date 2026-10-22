@@ -816,10 +816,14 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const factoryMerged = merged.filter((ev) => isStr(ev.payload?.task) || prTask.has(ev.payload?.pr));
   const untouched = factoryMerged.filter((ev) => !touched.has(ev.payload?.pr));
 
-  let aicTotal = 0;
+  let finishedToday = 0;
   for (const ev of finished) {
-    if (utcDay(parseTime(ev.timestamp)) === today && isNum(ev.payload?.aic)) aicTotal += ev.payload.aic;
+    if (utcDay(parseTime(ev.timestamp)) === today && isNum(ev.payload?.aic)) finishedToday += ev.payload.aic;
   }
+  // The controller's spend_snapshot (measured + reserved for runs in flight) is the source of
+  // truth; run_finished events, where present, can only raise it (as the controller does).
+  const snap = spendSnapshots(events).get(today) ?? null;
+  const aicTotal = snap ? Math.max(snap.total, finishedToday) : finishedToday;
   const aicPct = opts.aicBudget > 0 ? (aicTotal / opts.aicBudget) * 100 : null;
 
   const needsItems = [...needs.values()]
@@ -856,6 +860,11 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
     },
     aicToday: {
       total: aicTotal,
+      source: snap ? 'spend_snapshot' : finished.length ? 'run_finished' : null,
+      measured: snap ? snap.measured : null,
+      reserved: snap ? snap.reserved : null,
+      runs: snap ? snap.runs : null,
+      at: snap ? snap.at : null,
       budget: opts.aicBudget,
       pct: aicPct,
       level: aicPct == null ? 'ok' : aicPct >= 100 ? 'alert' : aicPct >= opts.aicAlertPct ? 'warn' : 'ok',
@@ -1025,6 +1034,31 @@ function median(values) {
  * Per-UTC-day series for the KPI trend lines, oldest day first. Rates are null on days
  * with nothing to measure, so a trend line shows a gap instead of a fake zero.
  */
+/**
+ * The newest real (non-dry-run) `spend_snapshot` per UTC day: the controller's spend for that
+ * day, measured from gh-aw usage artifacts plus reservations for runs still going.
+ */
+export function spendSnapshots(events) {
+  const byDay = new Map();
+  for (const ev of events) {
+    if (ev.type !== 'spend_snapshot') continue;
+    const p = ev.payload || {};
+    const t = parseTime(ev.timestamp);
+    if (p.dry_run !== false || !isStr(p.day) || !isNum(p.aic_today) || t == null || utcDay(t) !== p.day) continue;
+    const prev = byDay.get(p.day);
+    if (prev && prev.t > t) continue;
+    let measured = 0;
+    let reserved = 0;
+    for (const r of Array.isArray(p.runs) ? p.runs : []) {
+      if (!isNum(r?.aic)) continue;
+      if (r.status === 'reserved') reserved += r.aic;
+      else measured += r.aic;
+    }
+    byDay.set(p.day, { t, at: ev.timestamp, total: p.aic_today, measured, reserved, runs: isNum(p.runs_total) ? p.runs_total : null });
+  }
+  return byDay;
+}
+
 export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
   const end = Date.parse(utcDay(now) + 'T00:00:00Z');
   const labels = [];
@@ -1078,6 +1112,12 @@ export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDa
       default:
         break;
     }
+  }
+
+  // A day's spend snapshot is its total (run_finished, where present, can only raise it).
+  for (const [day, snap] of spendSnapshots(events)) {
+    const d = index.get(day);
+    if (d != null) aic[d] = Math.max(aic[d], snap.total);
   }
 
   // Zero-touch is cumulative across the window, so each point is "rate so far".
