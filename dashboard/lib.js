@@ -864,6 +864,7 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
       measured: snap ? snap.measured : null,
       reserved: snap ? snap.reserved : null,
       runs: snap ? snap.runs : null,
+      listed: snap ? snap.listed : null,
       at: snap ? snap.at : null,
       budget: opts.aicBudget,
       pct: aicPct,
@@ -1049,12 +1050,16 @@ export function spendSnapshots(events) {
     if (prev && prev.t > t) continue;
     let measured = 0;
     let reserved = 0;
-    for (const r of Array.isArray(p.runs) ? p.runs : []) {
+    const list = Array.isArray(p.runs) ? p.runs : [];
+    for (const r of list) {
       if (!isNum(r?.aic)) continue;
       if (r.status === 'reserved') reserved += r.aic;
       else measured += r.aic;
     }
-    byDay.set(p.day, { t, at: ev.timestamp, total: p.aic_today, measured, reserved, runs: isNum(p.runs_total) ? p.runs_total : null });
+    const runs = isNum(p.runs_total) ? p.runs_total : null;
+    // The controller lists at most 50 runs; with more, the split covers only part of the total.
+    const complete = runs != null && runs === list.length;
+    byDay.set(p.day, { t, at: ev.timestamp, total: p.aic_today, measured: complete ? measured : null, reserved: complete ? reserved : null, runs, listed: list.length });
   }
   return byDay;
 }

@@ -547,6 +547,10 @@ test('AIC today comes from the newest real spend_snapshot (measured + reserved),
   assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.source, null);
   const s = dailySeries(events, { now: at('2026-10-22T19:00:00Z'), days: 2 });
   assert.deepEqual(s.aic, [31.38, 967.24]);
+  // A truncated run list (the controller lists at most 50): the total stands, the split is unavailable.
+  const many = Array.from({ length: 50 }, (_, i) => ({ run_id: 100 + i, status: 'measured', aic: 30 }));
+  const trunc = deriveMetrics([{ ...snap('2026-10-22T18:59:00Z', 1530, many), payload: { ...snap('2026-10-22T18:59:00Z', 1530, many).payload, runs_total: 51 } }], { now: at('2026-10-22T19:00:00Z') }).aicToday;
+  assert.deepEqual([trunc.total, trunc.measured, trunc.reserved, trunc.runs, trunc.listed], [1530, null, null, 51, 50]);
   // A larger run_finished total today raises it, as in the controller.
   const more = [...events, { type: 'run_finished', timestamp: '2026-10-22T18:55:00Z', payload: { ...base, dry_run: false, task: 't/a', attempt: 1, aic: 1200 } }];
   assert.equal(deriveMetrics(more, { now: at('2026-10-22T19:00:00Z') }).aicToday.total, 1200);
