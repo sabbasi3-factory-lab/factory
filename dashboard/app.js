@@ -903,7 +903,11 @@ function renderKpis(m) {
     {
       title: 'AIC today', iconName: 'coin', value: fmtInt(Math.round(aic.total)),
       level: aic.level === 'ok' ? null : aic.level,
-      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${m.tokensPerTask.total.runs ? '' : '\nNo run_finished events yet'}`,
+      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${
+        aic.source === 'spend_snapshot'
+          ? `\n${aic.measured == null ? `Measured/reserved split unavailable (the snapshot lists ${aic.listed} of ${aic.runs ?? '?'} runs)` : `${fmtInt(Math.round(aic.measured))} measured + ${fmtInt(Math.round(aic.reserved))} reserved for runs in flight (${aic.runs} runs)`}, controller snapshot ${aic.at}`
+          : '\nNo spend snapshot today yet'
+      }`,
       spark: { values: s.aic, days: s.days, label: 'AIC per day', tone: 'purple', fmt: 'int' },
     },
     {
@@ -1127,12 +1131,12 @@ function renderAgents(m) {
   const r = m.running;
   const typical = typicalRunMs(state.events);
   const wip = isNum(r.wipLimit) ? r.wipLimit : null;
-  // With no run_finished in the window completion is unknown, so a count of listed
-  // attempts would be a guess: show "—" then. With nothing listed, nothing is running.
+  // Without run_finished or the controller's task_done in the window, completion is unknown, so a
+  // count of listed attempts would be a guess: show "—" then. With nothing listed, nothing runs.
   const count = r.available ? r.count : r.rows.length ? null : 0;
   setTip('agents-info', [
-    `Dispatched attempts that haven't finished, against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
-    r.available ? null : "Run completion isn't logged yet (no run_finished events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
+    `Dispatched tasks in flight (not yet merged, done, handed to a person or cancelled), against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
+    r.available ? null : "Completion isn't in the log yet (no run_finished or task_done events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
     r.dryRunPlanned ? `${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running.` : null,
   ].filter(Boolean).join('\n'));
   const slotCount = Math.max(wip ?? 0, count ?? 0);

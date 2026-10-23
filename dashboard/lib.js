@@ -702,6 +702,9 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const finished = [];
   let dryRunPlanned = 0;
   let retired = 0;
+  // Live task_done events mean the controller closes the lifecycle of every task it dispatched
+  // (merged → task_done, or a needs_human hand-off), so attempts that are still listed are live.
+  let liveTaskDone = 0;
   const retire = (task, belowAttempt = Infinity) => {
     for (const [key, r] of runs) {
       if (r.task === task && (r.attempt ?? 1) < belowAttempt) {
@@ -773,6 +776,12 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
       case 'cancelled':
         if (!isPlanOnly(ev)) for (const t of tasksOf(subjects)) retire(t);
         break;
+      case 'task_done':
+        if (!isPlanOnly(ev)) {
+          liveTaskDone++;
+          for (const t of tasksOf(subjects)) retire(t);
+        }
+        break;
       case 'human_action':
         if (isNum(p.pr)) touched.add(p.pr);
         break;
@@ -816,19 +825,24 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const factoryMerged = merged.filter((ev) => isStr(ev.payload?.task) || prTask.has(ev.payload?.pr));
   const untouched = factoryMerged.filter((ev) => !touched.has(ev.payload?.pr));
 
-  let aicTotal = 0;
+  let finishedToday = 0;
   for (const ev of finished) {
-    if (utcDay(parseTime(ev.timestamp)) === today && isNum(ev.payload?.aic)) aicTotal += ev.payload.aic;
+    if (utcDay(parseTime(ev.timestamp)) === today && isNum(ev.payload?.aic)) finishedToday += ev.payload.aic;
   }
+  // The controller's spend_snapshot (measured + reserved for runs in flight) is the source of
+  // truth; run_finished events, where present, can only raise it (as the controller does).
+  const snap = spendSnapshots(events).get(today) ?? null;
+  const aicTotal = snap ? Math.max(snap.total, finishedToday) : finishedToday;
   const aicPct = opts.aicBudget > 0 ? (aicTotal / opts.aicBudget) * 100 : null;
 
   const needsItems = [...needs.values()]
     .map(({ subjects: _s, ...rest }) => rest)
     .sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
 
-  // Without any run_finished in the window, completion is unknown: v1 doesn't log it,
-  // so a dispatched attempt may have ended long ago. Report "unavailable", not a count.
-  const runStatusAvailable = finished.length > 0;
+  // Completion is known when runs log run_finished, or when the controller records task_done (it
+  // then retires every dispatched task by merge, task_done or a hand-off). Without either, a
+  // dispatched attempt may have ended long ago: report "unavailable", not a count.
+  const runStatusAvailable = finished.length > 0 || liveTaskDone > 0;
 
   return {
     now,
@@ -856,6 +870,12 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
     },
     aicToday: {
       total: aicTotal,
+      source: snap ? 'spend_snapshot' : finished.length ? 'run_finished' : null,
+      measured: snap ? snap.measured : null,
+      reserved: snap ? snap.reserved : null,
+      runs: snap ? snap.runs : null,
+      listed: snap ? snap.listed : null,
+      at: snap ? snap.at : null,
       budget: opts.aicBudget,
       pct: aicPct,
       level: aicPct == null ? 'ok' : aicPct >= 100 ? 'alert' : aicPct >= opts.aicAlertPct ? 'warn' : 'ok',
@@ -1025,6 +1045,35 @@ function median(values) {
  * Per-UTC-day series for the KPI trend lines, oldest day first. Rates are null on days
  * with nothing to measure, so a trend line shows a gap instead of a fake zero.
  */
+/**
+ * The newest real (non-dry-run) `spend_snapshot` per UTC day: the controller's spend for that
+ * day, measured from gh-aw usage artifacts plus reservations for runs still going.
+ */
+export function spendSnapshots(events) {
+  const byDay = new Map();
+  for (const ev of events) {
+    if (ev.type !== 'spend_snapshot') continue;
+    const p = ev.payload || {};
+    const t = parseTime(ev.timestamp);
+    if (p.dry_run !== false || !isStr(p.day) || !isNum(p.aic_today) || t == null || utcDay(t) !== p.day) continue;
+    const prev = byDay.get(p.day);
+    if (prev && prev.t > t) continue;
+    let measured = 0;
+    let reserved = 0;
+    const list = Array.isArray(p.runs) ? p.runs : [];
+    for (const r of list) {
+      if (!isNum(r?.aic)) continue;
+      if (r.status === 'reserved') reserved += r.aic;
+      else measured += r.aic;
+    }
+    const runs = isNum(p.runs_total) ? p.runs_total : null;
+    // The controller lists at most 50 runs; with more, the split covers only part of the total.
+    const complete = runs != null && runs === list.length;
+    byDay.set(p.day, { t, at: ev.timestamp, total: p.aic_today, measured: complete ? measured : null, reserved: complete ? reserved : null, runs, listed: list.length });
+  }
+  return byDay;
+}
+
 export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
   const end = Date.parse(utcDay(now) + 'T00:00:00Z');
   const labels = [];
@@ -1078,6 +1127,12 @@ export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDa
       default:
         break;
     }
+  }
+
+  // A day's spend snapshot is its total (run_finished, where present, can only raise it).
+  for (const [day, snap] of spendSnapshots(events)) {
+    const d = index.get(day);
+    if (d != null) aic[d] = Math.max(aic[d], snap.total);
   }
 
   // Zero-touch is cumulative across the window, so each point is "rate so far".

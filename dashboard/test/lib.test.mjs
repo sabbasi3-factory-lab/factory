@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
+  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dailySeries, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
   formatLimit, heartbeatLevel, heartbeatTimes, isPlanOnly, limitsText, listSubjects, observedCadence, parseJsonl, stageTimes, statusSummary,
   subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
@@ -448,6 +448,27 @@ test('review #3: without any run_finished, active-run status is unavailable, not
   assert.equal(deriveMetrics(fixtureEvents(), { now: at(FIXTURE_NOW) }).running.available, true);
 });
 
+test('with the controller recording task_done, in-flight dispatches are a real count (live batch: 3 of 3)', () => {
+  const live = [
+    mk('dispatched', '2026-10-22T18:34:13Z', { task: 'en/a', issue: 48, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('merged', '2026-10-22T18:43:46Z', { pr: 57, task: 'en/a' }),
+    mk('task_done', '2026-10-22T18:43:46Z', { task: 'en/a', issue: 48, pr: 57, effect: 'close_task', reason: 'task_merged' }),
+    mk('dispatched', '2026-10-23T05:25:10Z', { task: 'en/b', issue: 35, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('dispatched', '2026-10-23T05:25:10Z', { task: 'en/c', issue: 43, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('dispatched', '2026-10-23T05:25:11Z', { task: 'en/d', issue: 39, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+  ];
+  const m = deriveMetrics(live, { now: at('2026-10-23T05:30:00Z') });
+  assert.equal(m.running.available, true);
+  assert.equal(m.running.count, 3);
+  assert.deepEqual(m.running.rows.map((r) => [r.task, r.issue]).sort(), [['en/b', 35], ['en/c', 43], ['en/d', 39]]);
+  assert.ok(m.running.rows.every((r) => r.startedAt != null));
+  // task_done retires its task even without a merged event in the window; a dry-run task_done doesn't count.
+  const done = deriveMetrics([...live, mk('task_done', '2026-10-23T05:40:00Z', { task: 'en/b', issue: 35, pr: 67, effect: 'close_task', reason: 'task_merged' })], { now: at('2026-10-23T05:45:00Z') });
+  assert.equal(done.running.count, 2);
+  const dryOnly = deriveMetrics([live[3], mk('task_done', '2026-10-23T05:26:00Z', { task: 'en/x', issue: 1, pr: 2, effect: 'close_task', reason: 'task_merged' }, true)], { now: at('2026-10-23T05:30:00Z') });
+  assert.equal(dryOnly.running.available, false);
+});
+
 test('review #4: dry-run dispatch decisions do not resolve needs-you items; observed facts do', () => {
   const dry = true;
   const base = [
@@ -524,4 +545,34 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   assert.equal(formatAge(119.9), '119 min');
   assert.equal(formatAge(180), '3 h');
   assert.equal(formatAge(3 * 1440 + 5), '3 d');
+});
+
+test('AIC today comes from the newest real spend_snapshot (measured + reserved), not only run_finished', () => {
+  const base = { dedupe_key: 'k', factory_version: 'v' };
+  const snap = (timestamp, aic_today, runs, dry_run = false) => ({ type: 'spend_snapshot', timestamp, payload: { ...base, dry_run, day: timestamp.slice(0, 10), aic_today, runs, runs_total: runs.length } });
+  const events = [
+    snap('2026-10-21T22:00:00Z', 31.38, [{ run_id: 1, status: 'measured', aic: 31.38 }]),
+    snap('2026-10-22T18:37:16Z', 2700, [{ run_id: 2, status: 'reserved', aic: 900 }, { run_id: 3, status: 'reserved', aic: 900 }, { run_id: 4, status: 'reserved', aic: 900 }]),
+    snap('2026-10-22T18:42:36Z', 967.24, [{ run_id: 2, status: 'measured', aic: 32.09 }, { run_id: 3, status: 'measured', aic: 35.15 }, { run_id: 4, status: 'reserved', aic: 900 }]),
+    snap('2026-10-22T18:50:00Z', 99999, [], true), // dry-run: ignored
+  ];
+  const m = deriveMetrics(events, { now: at('2026-10-22T19:00:00Z') });
+  assert.equal(m.aicToday.total, 967.24);
+  assert.equal(m.aicToday.source, 'spend_snapshot');
+  assert.equal(Math.round(m.aicToday.measured * 100) / 100, 67.24);
+  assert.equal(m.aicToday.reserved, 900);
+  assert.equal(m.aicToday.runs, 3);
+  assert.equal(m.aicToday.at, '2026-10-22T18:42:36Z');
+  // Days without a snapshot fall back to run_finished; the daily series uses each day's snapshot.
+  assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.total, 0);
+  assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.source, null);
+  const s = dailySeries(events, { now: at('2026-10-22T19:00:00Z'), days: 2 });
+  assert.deepEqual(s.aic, [31.38, 967.24]);
+  // A truncated run list (the controller lists at most 50): the total stands, the split is unavailable.
+  const many = Array.from({ length: 50 }, (_, i) => ({ run_id: 100 + i, status: 'measured', aic: 30 }));
+  const trunc = deriveMetrics([{ ...snap('2026-10-22T18:59:00Z', 1530, many), payload: { ...snap('2026-10-22T18:59:00Z', 1530, many).payload, runs_total: 51 } }], { now: at('2026-10-22T19:00:00Z') }).aicToday;
+  assert.deepEqual([trunc.total, trunc.measured, trunc.reserved, trunc.runs, trunc.listed], [1530, null, null, 51, 50]);
+  // A larger run_finished total today raises it, as in the controller.
+  const more = [...events, { type: 'run_finished', timestamp: '2026-10-22T18:55:00Z', payload: { ...base, dry_run: false, task: 't/a', attempt: 1, aic: 1200 } }];
+  assert.equal(deriveMetrics(more, { now: at('2026-10-22T19:00:00Z') }).aicToday.total, 1200);
 });
