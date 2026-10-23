@@ -257,7 +257,7 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`, with `?fixture=quiet`
 
 | Item | Derivation |
 |---|---|
-| Agents running | `dispatched` and `repair_dispatched` attempts not yet retired, against the WIP limit of 3 (`policies/limits.yaml`). An attempt retires on its `run_finished`, a later attempt for the same task, the task's PR being `merged`, or a `needs_human` or `cancelled` for the task. If the window has no `run_finished` at all (v1 doesn't log it), the count is "—" while attempts are listed (they may have finished), and the cards show a "?" instead of a spinner. Dry-run dispatches are plans, so they're counted separately as "planned, not running" |
+| Agents running | `dispatched` and `repair_dispatched` attempts not yet retired, against the WIP limit of 3 (`policies/limits.yaml`). An attempt retires on its `run_finished`, a later attempt for the same task, the task's PR being `merged`, the controller's `task_done`, or a `needs_human` or `cancelled` for the task. The count is real (with a spinner, elapsed time and task link per agent) once the window has a `run_finished` or a live `task_done`, because the controller then closes the lifecycle of every task it dispatches. Without either, the count is "—" while attempts are listed (they may have finished), and the cards show a "?" instead of a spinner. Dry-run dispatches are plans, so they're counted separately as "planned, not running" |
 | Merge queue | PRs `queued`, minus later `dequeued` or `merged` |
 | Merged today | `merged` events whose `merged_at` is today (UTC) |
 | Zero-touch rate | Merged factory PRs (a `merged` or other event links the PR to a `task`) with no `human_action` on that PR, over the window. "—" until a factory PR merges |
@@ -274,7 +274,7 @@ With `?fixture=1` it reads `test/fixtures/anchors.jsonl`, with `?fixture=quiet`
 **Not derivable from v1 events yet:**
 
 - *Human-tier PRs* and *closed PRs*: v1 events carry neither, so they're read from the open-PR lists (see above) until the audit log records them.
-- *Whether an agent is still running*: v1 has no `run_finished`, so the agents count shows "—" while attempts are listed.
+- *Whether an agent is still running*, in a log with neither `run_finished` nor the controller's `task_done`: the agents count shows "—" while attempts are listed.
 - *Tokens and AIC* while a run is in progress: they arrive only with `run_finished`, so
   agent cards show elapsed time only until then. Cost says "No cost data yet".
 - *Golden pass %, repairs per task, escaped bugs, and flow/throughput charts* from

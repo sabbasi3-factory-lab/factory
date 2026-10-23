@@ -1131,12 +1131,12 @@ function renderAgents(m) {
   const r = m.running;
   const typical = typicalRunMs(state.events);
   const wip = isNum(r.wipLimit) ? r.wipLimit : null;
-  // With no run_finished in the window completion is unknown, so a count of listed
-  // attempts would be a guess: show "—" then. With nothing listed, nothing is running.
+  // Without run_finished or the controller's task_done in the window, completion is unknown, so a
+  // count of listed attempts would be a guess: show "—" then. With nothing listed, nothing runs.
   const count = r.available ? r.count : r.rows.length ? null : 0;
   setTip('agents-info', [
-    `Dispatched attempts that haven't finished, against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
-    r.available ? null : "Run completion isn't logged yet (no run_finished events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
+    `Dispatched tasks in flight (not yet merged, done, handed to a person or cancelled), against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
+    r.available ? null : "Completion isn't in the log yet (no run_finished or task_done events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
     r.dryRunPlanned ? `${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running.` : null,
   ].filter(Boolean).join('\n'));
   const slotCount = Math.max(wip ?? 0, count ?? 0);

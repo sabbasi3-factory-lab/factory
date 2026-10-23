@@ -448,6 +448,27 @@ test('review #3: without any run_finished, active-run status is unavailable, not
   assert.equal(deriveMetrics(fixtureEvents(), { now: at(FIXTURE_NOW) }).running.available, true);
 });
 
+test('with the controller recording task_done, in-flight dispatches are a real count (live batch: 3 of 3)', () => {
+  const live = [
+    mk('dispatched', '2026-10-22T18:34:13Z', { task: 'en/a', issue: 48, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('merged', '2026-10-22T18:43:46Z', { pr: 57, task: 'en/a' }),
+    mk('task_done', '2026-10-22T18:43:46Z', { task: 'en/a', issue: 48, pr: 57, effect: 'close_task', reason: 'task_merged' }),
+    mk('dispatched', '2026-10-23T05:25:10Z', { task: 'en/b', issue: 35, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('dispatched', '2026-10-23T05:25:10Z', { task: 'en/c', issue: 43, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+    mk('dispatched', '2026-10-23T05:25:11Z', { task: 'en/d', issue: 39, attempt: 1, effect: 'dispatch', reason: 'would_dispatch' }),
+  ];
+  const m = deriveMetrics(live, { now: at('2026-10-23T05:30:00Z') });
+  assert.equal(m.running.available, true);
+  assert.equal(m.running.count, 3);
+  assert.deepEqual(m.running.rows.map((r) => [r.task, r.issue]).sort(), [['en/b', 35], ['en/c', 43], ['en/d', 39]]);
+  assert.ok(m.running.rows.every((r) => r.startedAt != null));
+  // task_done retires its task even without a merged event in the window; a dry-run task_done doesn't count.
+  const done = deriveMetrics([...live, mk('task_done', '2026-10-23T05:40:00Z', { task: 'en/b', issue: 35, pr: 67, effect: 'close_task', reason: 'task_merged' })], { now: at('2026-10-23T05:45:00Z') });
+  assert.equal(done.running.count, 2);
+  const dryOnly = deriveMetrics([live[3], mk('task_done', '2026-10-23T05:26:00Z', { task: 'en/x', issue: 1, pr: 2, effect: 'close_task', reason: 'task_merged' }, true)], { now: at('2026-10-23T05:30:00Z') });
+  assert.equal(dryOnly.running.available, false);
+});
+
 test('review #4: dry-run dispatch decisions do not resolve needs-you items; observed facts do', () => {
   const dry = true;
   const base = [

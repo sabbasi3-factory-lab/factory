@@ -702,6 +702,9 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   const finished = [];
   let dryRunPlanned = 0;
   let retired = 0;
+  // Live task_done events mean the controller closes the lifecycle of every task it dispatched
+  // (merged → task_done, or a needs_human hand-off), so attempts that are still listed are live.
+  let liveTaskDone = 0;
   const retire = (task, belowAttempt = Infinity) => {
     for (const [key, r] of runs) {
       if (r.task === task && (r.attempt ?? 1) < belowAttempt) {
@@ -773,6 +776,12 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
       case 'cancelled':
         if (!isPlanOnly(ev)) for (const t of tasksOf(subjects)) retire(t);
         break;
+      case 'task_done':
+        if (!isPlanOnly(ev)) {
+          liveTaskDone++;
+          for (const t of tasksOf(subjects)) retire(t);
+        }
+        break;
       case 'human_action':
         if (isNum(p.pr)) touched.add(p.pr);
         break;
@@ -830,9 +839,10 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
     .map(({ subjects: _s, ...rest }) => rest)
     .sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
 
-  // Without any run_finished in the window, completion is unknown: v1 doesn't log it,
-  // so a dispatched attempt may have ended long ago. Report "unavailable", not a count.
-  const runStatusAvailable = finished.length > 0;
+  // Completion is known when runs log run_finished, or when the controller records task_done (it
+  // then retires every dispatched task by merge, task_done or a hand-off). Without either, a
+  // dispatched attempt may have ended long ago: report "unavailable", not a count.
+  const runStatusAvailable = finished.length > 0 || liveTaskDone > 0;
 
   return {
     now,
