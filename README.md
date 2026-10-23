@@ -15,7 +15,7 @@ An agentic software factory built on [GitHub Agentic Workflows (gh-aw)](https://
 Every PR has a tier:
 - **auto:** routine, low-risk work. Merged automatically when the checks pass.
 - **auto-strict:** shared or core code. Merged automatically only after the reviewer approves and the full regression passes, one at a time, with automatic revert if `main` breaks.
-- **human:** the rules and the referees (tests, contracts, gates, workflows, the controller) and anything not yet promoted. The owner approves.
+- **human:** the rules and the referees (golden tests, the comparison harness, contracts, gates, workflows, the controller) and anything not yet promoted. The owner approves.
 
 In short: the rulebook tells the manager how much to trust each worker's PR, and the risky ones get an inspector. Details are in [DESIGN.md](DESIGN.md).
 
