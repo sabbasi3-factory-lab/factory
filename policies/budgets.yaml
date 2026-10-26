@@ -6,7 +6,25 @@ per_run:                  # gh-aw frontmatter max-ai-credits
   repair: 300
   reviewer_agent: 200
   factory_review: 500
-  threat_detection: 400   # gh-aw default
+  threat_detection: 400   # gh-aw default; pinned in each workflow's safe-outputs.threat-detection
+  # max-ai-credits is NOT a strict hard stop. It's "stop after the response that crosses the cap":
+  # gh-aw's firewall checks the total already recorded before each request
+  # (github/gh-aw-firewall v0.28.57, containers/api-proxy/guards/ai-credits-guard.js L497-516,
+  # `maxExceeded: roundedTotalAiCredits >= config.max`), so the response admitted just under the
+  # cap is billed in full, and requests in flight together can each overshoot. The controller
+  # counts a completed run whose usage is unreadable at
+  #   max-ai-credits + threat_detection + 2 x overshoot_margin   (agent job + detection job)
+  # and reverts to "unknown" (blocks, and raises factory:alert) if a readable run ever shows more
+  # concurrency or a larger single response than assumed here, or can't be checked. Owner-set 2026-10-26.
+  # Where the margin applies (coordinator decision B1, 2026-10-26):
+  #   - the DAILY total (factory_per_day): runs in flight are reserved at cap + detection + 2 x margin,
+  #     and the fallback bound above uses it too: the worst case;
+  #   - the PER-TASK repair gate (per_task.max_aic) does NOT: it counts a repair at its caps
+  #     (repair + threat_detection), an expected-cost guard. With the margin a repair's worst case
+  #     (1500) would exceed per_task.max_aic (1000) and no repair could ever run.
+  overshoot_margin: 400                     # per AI job = max response x max concurrency
+  overshoot_assumed_max_response_aic: 100   # ~10x the largest seen (10.14 AIC, Oct 2026, 68 responses)
+  overshoot_assumed_max_concurrency: 4      # 4x the largest seen (1); nothing in gh-aw caps it
 per_workflow_per_day:     # gh-aw frontmatter max-daily-ai-credits
   implement: 3000
   repair: 1500
