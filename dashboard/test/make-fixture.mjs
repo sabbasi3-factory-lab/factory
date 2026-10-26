@@ -191,6 +191,10 @@ function quietSteps() {
     type: 'heartbeat', run_id: 6001 + i, open_pr_count: 0, decision_count: 0, factory_enabled: false,
     hour: isoSeconds(ms).slice(0, 13), trigger: 'schedule',
   }));
+  // The factory is off, so the controller records one paused state (the dispatch banner).
+  add(QUIET_HEARTBEATS[0] + 1000, {
+    type: 'dispatch_state', state: 'paused', reason: 'kill_switch', ready: 0, in_flight: 0, spend_known: true, unreadable_runs: 0,
+  });
   for (const [pr, opened, checkMin, queueMin, mergeMin] of QUIET_PRS) {
     const t0 = Date.parse(opened);
     const head = hex(`qh${pr}`);

@@ -40,6 +40,12 @@ From the top, at widths up to 1480 px:
   sample data (`?fixture=1` or `?fixture=quiet`) there's also a "Sample" chip. Until the first load the health chip
   reads "… Loading" in neutral grey and the tiles show "…": nothing is red before
   something is known to be wrong.
+- **Dispatch banner:** under the glance line, why the controller isn't dispatching, from
+  its newest `dispatch_state` audit event (recorded only when the state changes), for
+  example "Paused since 17:43Z: spend unknown, 2 unreadable runs" (amber),
+  "Waiting since 17:43Z: 3 ready, held by limits" or "Idle since 17:43Z: nothing ready"
+  (blue). "Since" is the first event of the newest run with the same state and reason. It's
+  hidden while agents are running, or when the window has no `dispatch_state` event.
 - **Needs you:** the big count and one line per item, oldest first: icon, `#22` (or
   `factory#3` for the other repo), a title of at most 4 words (full title, reason and
   waiting time in the tooltip), an age chip, and "View PR" or "View issue". Empty: a green
