@@ -57,3 +57,15 @@ test('dispatch banner: a new state after a change starts a new "since"', () => {
   assert.equal(b.since, '2026-10-20T13:00:00Z');
   assert.equal(b.text, 'Paused since 13:00Z: spend unknown');
 });
+
+test('dispatch banner: the payload "since" wins (carried across daily re-records); dependencies are named', () => {
+  const b = dispatchBanner([ds('2026-10-20T09:00:00Z', { state: 'paused', reason: 'budget_unknown', spend_known: false, since: '2026-10-12T17:43:00Z' })], { now: NOW });
+  assert.equal(b.since, '2026-10-12T17:43:00Z');
+  assert.equal(b.text, 'Paused since 2026-10-12T17:43Z: spend unknown');
+  const bad = dispatchBanner([ds('2026-10-20T09:00:00Z', { state: 'idle', reason: 'none', since: 'not-a-time' })], { now: NOW });
+  assert.equal(bad.since, '2026-10-20T09:00:00Z');
+  const future = dispatchBanner([ds('2026-10-20T09:00:00Z', { state: 'idle', reason: 'none', since: '2026-10-20T10:00:00Z' })], { now: NOW });
+  assert.equal(future.since, '2026-10-20T09:00:00Z', 'a since after its own event is ignored');
+  const d = dispatchBanner([ds('2026-10-20T17:00:00Z', { state: 'waiting', reason: 'deps', ready: 2 })], { now: NOW });
+  assert.equal(d.text, 'Waiting since 17:00Z: 2 ready, dependencies not merged');
+});

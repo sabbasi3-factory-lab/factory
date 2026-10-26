@@ -1478,9 +1478,9 @@ function sinceText(ms, now) {
 
 /**
  * The banner for the controller's last recorded dispatch state, or null when it is running or
- * the window has no dispatch_state event. The controller records the state only when it
- * changes, so "since" is the first of the newest run of events with the same state and reason
- * (a changed unreadable-run count doesn't reset it).
+ * the window has no dispatch_state event. "Since" is the payload's `since` (the controller
+ * carries it across re-records); without one, the first of the newest run of events with the
+ * same state and reason (a changed unreadable-run count doesn't reset it).
  */
 export function dispatchBanner(events, { now = Date.now() } = {}) {
   const states = (events || []).filter((ev) => ev?.type === 'dispatch_state' && parseTime(ev.timestamp) != null && isStr(ev.payload?.state));
@@ -1494,7 +1494,9 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
     if (q.state !== p.state || q.reason !== p.reason) break;
     first = states[i];
   }
-  const sinceMs = parseTime(first.timestamp);
+  // The controller carries `since` across re-records; older events fall back to the walk-back.
+  const since = typeof p.since === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(p.since) && parseTime(p.since) <= parseTime(last.timestamp) ? p.since : first.timestamp;
+  const sinceMs = parseTime(since);
   const n = isNum(p.unreadable_runs) ? p.unreadable_runs : 0;
   const spendUnknown = p.spend_known === false;
   const unreadable = n ? `, ${plural(n, 'unreadable run')}` : '';
@@ -1509,7 +1511,7 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
   } else if (p.state === 'waiting') {
     level = 'info';
     head = 'Waiting';
-    why = `${ready == null ? 'work' : ready} ready, held by limits`;
+    why = `${ready == null ? 'work' : ready} ready, ${p.reason === 'deps' ? 'dependencies not merged' : 'held by limits'}`;
   } else if (p.state === 'idle') {
     level = 'info';
     head = 'Idle';
@@ -1521,9 +1523,9 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
     `The controller's last poll result: ${p.state}${p.reason && p.reason !== 'none' ? ` (${p.reason})` : ''}.`,
     `Ready ${ready ?? '?'}, in flight ${isNum(p.in_flight) ? p.in_flight : '?'}.`,
     spendUnknown ? `Spend unknown${n ? `: ${plural(n, 'run')} of today unreadable` : ''}.` : 'Spend known.',
-    ...(p.state === 'waiting' ? ['Waiting: ready work held by the WIP or area limits.'] : []),
-    `In this state since ${first.timestamp}${first !== last ? `; last change recorded ${last.timestamp}` : ''}. The controller records the state only when it changes.`,
+    ...(p.state === 'waiting' ? [p.reason === 'deps' ? 'Waiting: ready work whose dependencies are not merged yet.' : 'Waiting: ready work held by the WIP, area or human-queue limits.'] : []),
+    `In this state since ${since}; last recorded ${last.timestamp}. The controller records the state when it changes, and daily.`,
     ...(p.dry_run === true ? ['Dry run: the controller logs decisions without acting.'] : []),
   ];
-  return { level, state: p.state, reason: p.reason ?? null, since: first.timestamp, text: `${head} since ${sinceText(sinceMs, now)}: ${why}`, tip: tip.join('\n') };
+  return { level, state: p.state, reason: p.reason ?? null, since, text: `${head} since ${sinceText(sinceMs, now)}: ${why}`, tip: tip.join('\n') };
 }
