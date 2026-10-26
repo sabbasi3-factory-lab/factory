@@ -3,7 +3,7 @@
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
   CADENCE_NOTE, DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorTimes, anchorsPerDay, cadenceText, canonicalize, combineNeedsYou, compactAge, costSummary,
-  dailySeries, dayPaths, deriveMetrics, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
+  dailySeries, dayPaths, deriveMetrics, dispatchBanner, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
   parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
   VERIFIER_LIMITS, heartbeatTile, sparkSegments, stageBreakdown, statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay,
   verifierReason, verifierStatus, verifyChain,
@@ -756,6 +756,16 @@ function setChip(id, { hidden = false, tone = null, iconName = null, text = '', 
   el.setAttribute('aria-describedby', `${id}-tip`);
 }
 
+function renderDispatchBanner() {
+  const el = $('dispatch-banner');
+  const b = state.loaded ? dispatchBanner(state.events, { now: now() }) : null;
+  el.hidden = !b;
+  if (!b) return;
+  el.className = `banner banner--${b.level} has-tip`;
+  el.replaceChildren(icon(b.level === 'warn' ? 'warn' : 'info'), h('span', {}, b.text), h('span', { id: 'dispatch-banner-tip', class: 'tip-src', hidden: true }, b.tip));
+  el.setAttribute('aria-describedby', 'dispatch-banner-tip');
+}
+
 function renderHeader(m, needs) {
   const chain = state.chain;
   const hb = m?.heartbeat ?? null;
@@ -808,6 +818,7 @@ function renderHeader(m, needs) {
     hidden: dryRun == null, tone: dryRun ? 'warn' : 'ok', iconName: dryRun ? 'info' : 'bolt', text: dryRun ? 'Dry run' : 'Live',
     tipText: `${dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect'}${version ? `\nFactory version ${version}` : ''}`,
   });
+  renderDispatchBanner();
   const clock = new Date(now()).toISOString().slice(11, 16);
   setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${clock}Z. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
 
