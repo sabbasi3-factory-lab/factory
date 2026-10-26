@@ -281,7 +281,7 @@ export function statusSummary({ loaded = false, noLog = false, error = null, fix
 // ---------------------------------------------------------------------------
 // Glance view: one health word, compact ages, short titles
 
-export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', loading: 'Loading' });
+export const HEALTH_LABELS = Object.freeze({ ok: 'Healthy', warn: 'Degraded', alert: 'Down', loading: 'Loading', paused: 'Paused' });
 export const STALE_DATA_MIN = 10; // live data older than this is not fresh
 
 /**
@@ -298,6 +298,9 @@ export const STALE_DATA_MIN = 10; // live data older than this is not fresh
  * - Degraded: the last refresh failed, so older data is shown; the data is over
  *   10 min old (`dataAgeMin`); the heartbeat is late (over 8 h) or unknown; the chain
  *   isn't verified (not loaded or empty); the verifier is late (over 8 h) or not set up.
+ * - Paused (amber, the warn level): dispatch is held by a gate (`dispatch`, a
+ *   dispatchBanner() result; not the kill switch, which has its own chip) and nothing
+ *   else is wrong. With other warn conditions it reads Degraded, with the pause listed.
  * - Healthy: fresh data, a verified chain, a heartbeat within 8 h and, when given, a
  *   verifier anchor within 8 h. A verifier still being checked doesn't count either way.
  *
@@ -307,7 +310,7 @@ export const STALE_DATA_MIN = 10; // live data older than this is not fresh
  *
  * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
  */
-export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null, verifier = null } = {}) {
+export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null, verifier = null, dispatch = null } = {}) {
   if (!loaded && !error) return { level: 'loading', label: HEALTH_LABELS.loading, reasons: ['Loading the audit log'] };
   const found = [];
   const add = (level, text) => found.push({ level, text });
@@ -324,9 +327,15 @@ export function healthSummary({ loaded = false, noLog = false, error = null, cha
     else if (level !== 'ok') add('warn', 'Heartbeat unknown');
   }
   if (verifier && (verifier.level === 'warn' || verifier.level === 'alert')) add(verifier.level, verifierReason(verifier));
+  // Dispatch held by a gate (a dispatchBanner() result) is never "Healthy". The kill switch is
+  // the deliberate safe state with its own chip, so it doesn't count.
+  const paused = dispatch?.state === 'paused' && dispatch.reason !== 'kill_switch';
+  if (paused) add('warn', dispatch.text);
   const worst = found.reduce((a, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[a] ? f.level : a), 'ok');
   const reasons = found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]).map((f) => f.text);
-  return { level: worst, label: HEALTH_LABELS[worst], reasons };
+  // Paused and nothing else wrong: say "Paused", not "Degraded".
+  const label = paused && worst === 'warn' && found.length === 1 ? HEALTH_LABELS.paused : HEALTH_LABELS[worst];
+  return { level: worst, label, reasons };
 }
 
 /**
@@ -1527,5 +1536,11 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
     `In this state since ${since}; last recorded ${last.timestamp}. The controller records the state when it changes, and daily.`,
     ...(p.dry_run === true ? ['Dry run: the controller logs decisions without acting.'] : []),
   ];
-  return { level, state: p.state, reason: p.reason ?? null, since, text: `${head} since ${sinceText(sinceMs, now)}: ${why}`, tip: tip.join('\n') };
+  // Only evidence (the cause's own time) or a seen transition says when it began; a first record
+  // only says when the controller first noticed it.
+  const sinceKnown = p.since_source === 'evidence' || p.since_source === 'transition';
+  const when = sinceKnown ? `since ${sinceText(sinceMs, now)}` : `(recorded ${sinceText(sinceMs, now)})`;
+  if (!sinceKnown) tip.push('When it began is unknown: it was already in place when the controller first recorded it.');
+  else if (p.since_source === 'evidence') tip.push('"Since" is from the cause: when the first unreadable run of today ended.');
+  return { level, state: p.state, reason: p.reason ?? null, since, sinceKnown, text: `${head} ${when}: ${why}`, tip: tip.join('\n') };
 }

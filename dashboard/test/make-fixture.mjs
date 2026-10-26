@@ -193,7 +193,7 @@ function quietSteps() {
   }));
   // The factory is off, so the controller records one paused state (the dispatch banner).
   add(QUIET_HEARTBEATS[0] + 1000, {
-    type: 'dispatch_state', state: 'paused', reason: 'kill_switch', ready: 0, in_flight: 0, spend_known: true, unreadable_runs: 0,
+    type: 'dispatch_state', state: 'paused', reason: 'kill_switch', ready: 0, in_flight: 0, spend_known: true, unreadable_runs: 0, since_source: 'transition',
   });
   for (const [pr, opened, checkMin, queueMin, mergeMin] of QUIET_PRS) {
     const t0 = Date.parse(opened);

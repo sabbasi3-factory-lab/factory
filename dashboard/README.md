@@ -46,7 +46,9 @@ From the top, at widths up to 1480 px:
   "Waiting since 17:43Z: 3 ready, held by limits" (or "dependencies not merged") or
   "Idle since 17:43Z: nothing ready" (blue). "Since" is the payload's `since`, which the
   controller carries across re-records (else the first event of the newest run with the
-  same state and reason). It's
+  same state and reason). When the state was already in place at its first record (no
+  evidence of when it began), it reads "Paused (recorded 20:10Z): …" instead. A spend
+  pause is backfilled from when the first unreadable run of the day ended. It's
   hidden while agents are running, or when the window has no `dispatch_state` event.
 - **Needs you:** the big count and one line per item, oldest first: icon, `#22` (or
   `factory#3` for the other repo), a title of at most 4 words (full title, reason and
@@ -100,6 +102,7 @@ lanes stack.
 |---|---|
 | … Loading (grey) | Nothing loaded yet and no error |
 | ✓ Healthy | Fresh data, a verified chain, a heartbeat within 8 h and a verifier anchor within 8 h |
+| ⚠ Paused (amber) | Dispatch is held by a gate (spend unknown, budget, Actions load) and nothing else is wrong. The kill switch doesn't count: "Factory off" has its own chip. With another warning it reads Degraded, with the pause listed |
 | ⚠ Degraded | The last refresh failed (older data is shown), the data is over 10 min old, the heartbeat is late (over 8 h) or unknown, the chain isn't verified, or the verifier is late (over 8 h) or not set up yet |
 | ✗ Down | No audit log, nothing loaded because of an error, a broken chain, a heartbeat missing from the window or over 12 h old, or a verifier over 26 h old or unknown (unreadable, empty, malformed, out of order or in the future) |
 
