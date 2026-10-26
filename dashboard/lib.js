@@ -1533,14 +1533,16 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
     `Ready ${ready ?? '?'}, in flight ${isNum(p.in_flight) ? p.in_flight : '?'}.`,
     spendUnknown ? `Spend unknown${n ? `: ${plural(n, 'run')} of today unreadable` : ''}.` : 'Spend known.',
     ...(p.state === 'waiting' ? [p.reason === 'deps' ? 'Waiting: ready work whose dependencies are not merged yet.' : 'Waiting: ready work held by the WIP, area or human-queue limits.'] : []),
-    `In this state since ${since}; last recorded ${last.timestamp}. The controller records the state when it changes, and daily.`,
+    null, // the start line, filled in below once it's known how `since` is known
+    `Last recorded ${last.timestamp}. The controller records the state when it changes, and daily.`,
     ...(p.dry_run === true ? ['Dry run: the controller logs decisions without acting.'] : []),
   ];
   // Only evidence (the cause's own time) or a seen transition says when it began; a first record
   // only says when the controller first noticed it.
   const sinceKnown = p.since_source === 'evidence' || p.since_source === 'transition';
   const when = sinceKnown ? `since ${sinceText(sinceMs, now)}` : `(recorded ${sinceText(sinceMs, now)})`;
-  if (!sinceKnown) tip.push('When it began is unknown: it was already in place when the controller first recorded it.');
-  else if (p.since_source === 'evidence') tip.push('"Since" is from the cause: when the first unreadable run of today ended.');
+  tip[tip.indexOf(null)] = sinceKnown
+    ? `In this state since ${since}${p.since_source === 'evidence' ? ' (from the cause: when the first unreadable run of today ended)' : ''}.`
+    : `First recorded ${since}; when it began is unknown (it was already in place).`;
   return { level, state: p.state, reason: p.reason ?? null, since, sinceKnown, text: `${head} ${when}: ${why}`, tip: tip.join('\n') };
 }

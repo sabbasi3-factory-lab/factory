@@ -74,6 +74,9 @@ test('dispatch banner: a first record says "recorded", not "since"; evidence or 
   const at = (src) => dispatchBanner([ds('2026-10-20T20:10:00Z', { state: 'paused', reason: 'budget_unknown', spend_known: false, unreadable_runs: 2, since: '2026-10-20T20:10:00Z', since_source: src })], { now: NOW });
   assert.equal(at('first_record').text, 'Paused (recorded 20:10Z): spend unknown, 2 unreadable runs');
   assert.equal(at('first_record').sinceKnown, false);
+  assert.match(at('first_record').tip, /First recorded 2026-10-20T20:10:00Z; when it began is unknown/);
+  assert.doesNotMatch(at('first_record').tip, /since 2026/);
+  assert.match(at('transition').tip, /In this state since 2026-10-20T20:10:00Z\./);
   assert.equal(at(undefined).text, 'Paused (recorded 20:10Z): spend unknown, 2 unreadable runs', 'events from before since_source');
   assert.equal(at('transition').text, 'Paused since 20:10Z: spend unknown, 2 unreadable runs');
   const ev = dispatchBanner([ds('2026-10-20T20:10:00Z', { state: 'paused', reason: 'budget_unknown', spend_known: false, unreadable_runs: 2, since: '2026-10-20T17:43:10Z', since_source: 'evidence' })], { now: NOW });
