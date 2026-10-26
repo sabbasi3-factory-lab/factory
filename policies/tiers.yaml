@@ -24,6 +24,11 @@ tiers:
       - reviewer_agent            # second-opinion model; "object" -> needs-human, never overrides a gate
       - serialize_area: true      # one core PR at a time
       - auto_revert_on_regression: true
+    strict_gates_params:
+      # mutation_score_not_lower compares the change's mutation score with main's on the lines it
+      # replaced. Code that replaces nothing (new files, pure additions) has nothing to compare
+      # with, so it must reach this score instead (caught + timeout) / viable. Owner-set (2026-10-26).
+      mutation_floor_new_files: 0.8
   human:           # owner review
     paths:
       - ".github/**"
