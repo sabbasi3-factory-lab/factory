@@ -23,6 +23,14 @@ trusted_audits:           # crates covered by these cargo-vet audit sets pass th
   - mozilla
   - google
   - bytecode-alliance
+exceptions:               # explicit owner approvals beyond the checks above; the owner approves by merging
+  - crate: criterion
+    version: "0.5"        # 0.5, not 0.8: 0.8 pulls in native C code (alloca via cc)
+    kind: dev             # dev-dependency only (benches/golden_phrases.rs); never in the shipped crate
+    waives: [max_new_transitive]   # 33 new transitive crates (all dev-only), over the limit of 5
+    reason: >-
+      Strict gate perf_regression_max_pct (tiers.yaml) benchmarks the golden phrases with criterion.
+      cargo deny (licences, advisories, bans, sources) passes with it.
 preapproved:              # proposed for Stage 0; edit in review
   runtime: [chrono, regex, fancy-regex, serde, serde_json, once_cell, thiserror]
   wasm: [wasm-bindgen, js-sys]
