@@ -326,6 +326,14 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.deepEqual(health({}), { level: 'ok', label: 'Healthy', reasons: [] });
   assert.equal(health({ dataAgeMin: null }).level, 'ok', 'sample data has no age');
 
+  // Dispatch held by a gate is never Healthy: Paused (amber) alone, Degraded with other warnings.
+  const pausedSpend = { state: 'paused', reason: 'budget_unknown', text: 'Paused since 17:43Z: spend unknown' };
+  assert.deepEqual(health({ dispatch: pausedSpend }), { level: 'warn', label: 'Paused', reasons: ['Paused since 17:43Z: spend unknown'] });
+  assert.equal(health({ dispatch: pausedSpend, dataAgeMin: 60 }).label, 'Degraded');
+  assert.ok(health({ dispatch: pausedSpend, dataAgeMin: 60 }).reasons.includes(pausedSpend.text));
+  assert.equal(health({ dispatch: { state: 'paused', reason: 'kill_switch', text: 'x' } }).label, 'Healthy', 'factory off has its own chip');
+  for (const st of ['waiting', 'idle']) assert.equal(health({ dispatch: { state: st, reason: 'none', text: 'x' } }).label, 'Healthy', st);
+
   // The heartbeat limits sit above the cadence GitHub's scheduler delivers: Healthy up to
   // exactly 8 h, Degraded after it and up to exactly 12 h, Down after that.
   assert.equal(health({ heartbeat: hbAt(75) }).level, 'ok', 'a 75-minute gap is normal');
@@ -357,7 +365,7 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.equal(both.level, 'alert');
   assert.deepEqual(both.reasons, ['Chain broken at event 3', 'Heartbeat late (9 h)']);
 
-  assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading']);
+  assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading', 'Paused']);
 });
 
 test('compact ages are one token; short titles keep at most N words; refs are repo-prefixed off the home repo', () => {

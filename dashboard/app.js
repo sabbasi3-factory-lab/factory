@@ -724,7 +724,8 @@ const VF_WARN = formatLimit(VERIFIER_LIMITS.warnMin);
 const VF_ALERT = formatLimit(VERIFIER_LIMITS.alertMin);
 const HEALTH_RULE = `Healthy: fresh data, verified chain, heartbeat within ${HB_WARN}, verifier anchor within ${VF_WARN}.\n`
   + `Degraded: last refresh failed, data over ${STALE_DATA_MIN} min old, heartbeat late (over ${HB_WARN}), chain not verified, verifier late (over ${VF_WARN}) or not set up.\n`
-  + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.`;
+  + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.\n`
+  + 'Paused: dispatch held by a gate (spend, budget, Actions load), nothing else wrong.';
 
 /** The anchors in the verifier file, or [] if it isn't loaded or isn't valid. */
 function loadedAnchors() {
@@ -771,7 +772,8 @@ function renderHeader(m, needs) {
   const hb = m?.heartbeat ?? null;
   const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
   const verifier = verifierStatus(state.verifier, now());
-  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin, verifier });
+  const dispatch = state.loaded ? dispatchBanner(state.events, { now: now() }) : null;
+  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin, verifier, dispatch });
   const detail = statusSummary({
     loaded: state.loaded, noLog: state.noLog, error: state.error, fixture: FIXTURE,
     eventCount: state.events.length, headSha: state.headSha, days: DAYS, heartbeat: hb,

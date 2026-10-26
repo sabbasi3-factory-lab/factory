@@ -4,7 +4,7 @@ import { dispatchBanner } from '../lib.js';
 
 const NOW = Date.parse('2026-10-20T19:00:00Z');
 let n = 0;
-const ds = (timestamp, payload) => ({ type: 'dispatch_state', timestamp, id: `e${n++}`, payload: { ready: 0, in_flight: 0, spend_known: true, unreadable_runs: 0, dry_run: false, ...payload } });
+const ds = (timestamp, payload) => ({ type: 'dispatch_state', timestamp, id: `e${n++}`, payload: { ready: 0, in_flight: 0, spend_known: true, unreadable_runs: 0, dry_run: false, since_source: 'transition', ...payload } });
 const hb = (timestamp) => ({ type: 'heartbeat', timestamp, payload: {} });
 
 test('dispatch banner: none without a dispatch_state event, or while running', () => {
@@ -68,4 +68,18 @@ test('dispatch banner: the payload "since" wins (carried across daily re-records
   assert.equal(future.since, '2026-10-20T09:00:00Z', 'a since after its own event is ignored');
   const d = dispatchBanner([ds('2026-10-20T17:00:00Z', { state: 'waiting', reason: 'deps', ready: 2 })], { now: NOW });
   assert.equal(d.text, 'Waiting since 17:00Z: 2 ready, dependencies not merged');
+});
+
+test('dispatch banner: a first record says "recorded", not "since"; evidence or a transition says "since"', () => {
+  const at = (src) => dispatchBanner([ds('2026-10-20T20:10:00Z', { state: 'paused', reason: 'budget_unknown', spend_known: false, unreadable_runs: 2, since: '2026-10-20T20:10:00Z', since_source: src })], { now: NOW });
+  assert.equal(at('first_record').text, 'Paused (recorded 20:10Z): spend unknown, 2 unreadable runs');
+  assert.equal(at('first_record').sinceKnown, false);
+  assert.match(at('first_record').tip, /First recorded 2026-10-20T20:10:00Z; when it began is unknown/);
+  assert.doesNotMatch(at('first_record').tip, /since 2026/);
+  assert.match(at('transition').tip, /In this state since 2026-10-20T20:10:00Z\./);
+  assert.equal(at(undefined).text, 'Paused (recorded 20:10Z): spend unknown, 2 unreadable runs', 'events from before since_source');
+  assert.equal(at('transition').text, 'Paused since 20:10Z: spend unknown, 2 unreadable runs');
+  const ev = dispatchBanner([ds('2026-10-20T20:10:00Z', { state: 'paused', reason: 'budget_unknown', spend_known: false, unreadable_runs: 2, since: '2026-10-20T17:43:10Z', since_source: 'evidence' })], { now: NOW });
+  assert.equal(ev.text, 'Paused since 17:43Z: spend unknown, 2 unreadable runs');
+  assert.match(ev.tip, /first unreadable run/);
 });
