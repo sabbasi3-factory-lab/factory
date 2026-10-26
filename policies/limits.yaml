@@ -24,6 +24,6 @@ flaky_tests:
   window_days: 7
 fail_closed: true          # unknown state, missing model or tool -> wait or needs-human; never fall back
 # The controller marks unblocked tasks factory:ready itself (auto tier; auto-strict only after the
-# promotion; never human), within the WIP, area-lock and core limits above. Off until the owner
-# flips it; the kill switch (FACTORY_ENABLED) still governs everything.
-auto_ready: false
+# promotion; never human), within the WIP, area-lock and core limits above. Turned on by the owner
+# (2026-10-26); the kill switch (FACTORY_ENABLED) still governs everything.
+auto_ready: true
