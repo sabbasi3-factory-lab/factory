@@ -24,7 +24,6 @@ tiers:
       - "drill/*"
     promote_tasks_paths:
       - "src/locales/en/parsers/factory_drill_*.rs"
-      - "drills/**"
     strict_gates:
       - full_regression           # golden + held-out comparison across every ported language
       - semver_checks             # no public API break
