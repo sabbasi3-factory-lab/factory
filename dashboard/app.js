@@ -3,7 +3,7 @@
 // innerHTML, and widths go through the CSSOM, so the strict CSP holds.
 import {
   CADENCE_NOTE, DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorTimes, anchorsPerDay, cadenceText, canonicalize, combineNeedsYou, compactAge, costSummary,
-  dailySeries, dayPaths, deriveMetrics, dispatchBanner, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
+  dailySeries, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
   parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
   VERIFIER_LIMITS, heartbeatTile, sparkSegments, stageBreakdown, statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay,
   verifierReason, verifierStatus, verifyChain,
@@ -386,6 +386,26 @@ async function fetchOpenPrs(repo) {
   return { etag: res.headers.get('etag'), prs: body.map(summarizePr).filter((p) => p.number != null) };
 }
 
+// Open issues and PRs of the source repo (the issues list includes PRs), to drop closed ones from
+// Needs you and Running. A full page may be truncated, so it counts as unknown (no filtering).
+async function fetchOpenNumbers() {
+  const cached = state.prs.open;
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (cached?.etag) headers['If-None-Match'] = cached.etag;
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/repos/${REPO}/issues?state=open&per_page=100`, {
+    headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+  });
+  readRate(res);
+  if (res.status === 304 && cached) return cached;
+  if (!res.ok) throw new Error(`open issues: HTTP ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body)) throw new Error('open issues: unexpected response');
+  const numbers = body.length >= 100 ? null : new Set(body.map((i) => i.number).filter(isNum));
+  return { etag: res.headers.get('etag'), numbers };
+}
+
 async function maybeRefreshPrs(headChanged) {
   const p = state.prs;
   if (headChanged) p.headDirty = true;
@@ -394,15 +414,20 @@ async function maybeRefreshPrs(headChanged) {
   if (!due) return;
   if (!p.lastOk && p.attemptedAt && Date.now() - p.attemptedAt < PR_RETRY_MS) return;
   p.attemptedAt = Date.now();
-  if (state.rate && state.rate.remaining < PR_REPOS.length + 1) {
+  if (state.rate && state.rate.remaining < PR_REPOS.length + 2) {
     p.lastOk = false;
     p.error = 'GitHub API rate limit is too low to read the PR lists';
     state.dataVersion++;
     return;
   }
   try {
-    const lists = await Promise.all(PR_REPOS.map(fetchOpenPrs));
+    // The open-issues read is optional: if it fails, only closed-item filtering is off.
+    const [open, ...lists] = await Promise.all([
+      fetchOpenNumbers().catch(() => ({ etag: null, numbers: null })),
+      ...PR_REPOS.map(fetchOpenPrs),
+    ]);
     PR_REPOS.forEach((repo, i) => p.lists.set(repo, lists[i]));
+    p.open = { ...open, at: Date.now() };
     p.fetchedAt = Date.now();
     p.lastOk = true;
     p.error = null;
@@ -417,6 +442,18 @@ async function maybeRefreshPrs(headChanged) {
 /** True only if the latest PR-list read succeeded and is recent; never guess from stale data. */
 function prsKnown() {
   return state.prs.lastOk && state.prs.fetchedAt != null && Date.now() - state.prs.fetchedAt <= PR_STALE_MS;
+}
+
+/** Open issue and PR numbers of the source repo now, or null when not known (no filtering). */
+function openNumbers() {
+  if (FIXTURE) return null;
+  return prsKnown() ? state.prs.open?.numbers ?? null : null;
+}
+
+/** When the open numbers were read, on the page's clock (events are compared with it). */
+function openNumbersAt() {
+  const at = state.prs.open?.at;
+  return isNum(at) ? at + state.clockOffset : null;
 }
 
 function openPrSet() {
@@ -572,7 +609,7 @@ function render({ full = false } = {}) {
   let m = null;
   let metricsError = null;
   try {
-    m = deriveMetrics(state.events, { now: now() });
+    m = dropClosed(deriveMetrics(state.events, { now: now() }), openNumbers(), openNumbersAt());
   } catch (err) {
     metricsError = err;
   }

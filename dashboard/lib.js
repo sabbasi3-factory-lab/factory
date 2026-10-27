@@ -750,6 +750,7 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
           key,
           task: isStr(p.task) ? p.task : null,
           issue: isNum(p.issue) ? p.issue : null,
+          pr: isNum(p.pr) ? p.pr : null,
           attempt: isNum(p.attempt) ? p.attempt : null,
           workflow: isStr(p.workflow) ? p.workflow : ev.type === 'repair_dispatched' ? 'repair' : 'implement',
           model: isStr(p.model) ? p.model : null,
@@ -894,6 +895,35 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
     stageTimes: stageTimes(events, prTask),
     checks: checks.slice().reverse(),
     subjects: listSubjects(events, prTask),
+  };
+}
+
+/**
+ * The audit log only says what happened; an issue or PR closed by hand (or long ago) never gets
+ * an event that clears it. Given the numbers of the source repo's issues and PRs that are open now,
+ * drop Needs-you items and running rows that reference a closed one. `open` null = current state
+ * unknown: change nothing (never hide on a guess). `asOf` (ms) is when `open` was read: an item or
+ * run that started after it may reference an issue or PR the snapshot can't know, so it stays.
+ * Returns a new metrics object.
+ */
+export function dropClosed(m, open, asOf = null) {
+  if (!m || !(open instanceof Set) || !isNum(asOf)) return m;
+  const newer = (x) => {
+    const t = x.since != null ? parseTime(x.since) : x.startedAt;
+    return !isNum(t) || t > asOf;
+  };
+  const closed = (x) => !newer(x) && ((isNum(x.issue) && !open.has(x.issue)) || (isNum(x.pr) && !open.has(x.pr)));
+  const items = m.needsYou.items.filter((i) => !closed(i));
+  const rows = m.running.rows.filter((r) => !closed(r));
+  return {
+    ...m,
+    needsYou: { ...m.needsYou, count: items.length, items, closedDropped: m.needsYou.items.length - items.length },
+    running: {
+      ...m.running,
+      rows,
+      count: m.running.count == null ? null : rows.length,
+      closedDropped: m.running.rows.length - rows.length,
+    },
   };
 }
 
