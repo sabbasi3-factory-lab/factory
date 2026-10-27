@@ -15,6 +15,15 @@ tiers:
       - "Cargo.lock"
       - "vendor/**"
     start_as: human  # Stage 1. Moves to auto-strict by a reviewed PR once the core fire drills pass.
+    # Drill-only promotion (approved 2026-10-27 for drills D4-D8; removed with the drills). A task
+    # whose id matches promote_tasks is treated as promoted (auto-ready, full regression, reviewer
+    # agent, auto-merge, auto-revert) while start_as: human still holds for every other task. Only
+    # if every path in its contract scope matches promote_tasks_paths: drill files no product
+    # configuration reaches. The scope check refuses such a contract touching anything else.
+    promote_tasks:
+      - "drill/*"
+    promote_tasks_paths:
+      - "src/locales/en/parsers/factory_drill_*.rs"
     strict_gates:
       - full_regression           # golden + held-out comparison across every ported language
       - semver_checks             # no public API break
