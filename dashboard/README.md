@@ -206,7 +206,10 @@ After changing `make-fixture.mjs`, regenerate the fixtures with
    which PRs are still open and which owner reviews are waiting. PR bodies are only
    matched for a tier line and never shown or kept. If a list can't be read, or the last
    good read is over 20 minutes old, the page says the PR state is unknown instead of
-   guessing.
+   guessing. With them, one more call (`GET /issues?state=open`, which lists open issues
+   and PRs) drops Needs-you items and Running rows whose issue or PR is closed now: the
+   audit log has no event for an issue or PR closed by hand. When that list is unknown
+   (or a full page of 100, so possibly cut short), nothing is dropped.
 5. It reads the independent verifier's anchors file from `raw.githubusercontent.com` at
    most every 5 minutes; until the `anchors` branch exists, one API call at most every 15
    minutes checks for it instead (see [Integrity](#integrity)).
