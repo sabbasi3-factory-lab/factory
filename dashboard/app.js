@@ -421,9 +421,13 @@ async function maybeRefreshPrs(headChanged) {
     return;
   }
   try {
-    const [open, ...lists] = await Promise.all([fetchOpenNumbers(), ...PR_REPOS.map(fetchOpenPrs)]);
+    // The open-issues read is optional: if it fails, only closed-item filtering is off.
+    const [open, ...lists] = await Promise.all([
+      fetchOpenNumbers().catch(() => ({ etag: null, numbers: null })),
+      ...PR_REPOS.map(fetchOpenPrs),
+    ]);
     PR_REPOS.forEach((repo, i) => p.lists.set(repo, lists[i]));
-    p.open = open;
+    p.open = { ...open, at: Date.now() };
     p.fetchedAt = Date.now();
     p.lastOk = true;
     p.error = null;
@@ -444,6 +448,12 @@ function prsKnown() {
 function openNumbers() {
   if (FIXTURE) return null;
   return prsKnown() ? state.prs.open?.numbers ?? null : null;
+}
+
+/** When the open numbers were read, on the page's clock (events are compared with it). */
+function openNumbersAt() {
+  const at = state.prs.open?.at;
+  return isNum(at) ? at + state.clockOffset : null;
 }
 
 function openPrSet() {
@@ -599,7 +609,7 @@ function render({ full = false } = {}) {
   let m = null;
   let metricsError = null;
   try {
-    m = dropClosed(deriveMetrics(state.events, { now: now() }), openNumbers());
+    m = dropClosed(deriveMetrics(state.events, { now: now() }), openNumbers(), openNumbersAt());
   } catch (err) {
     metricsError = err;
   }
