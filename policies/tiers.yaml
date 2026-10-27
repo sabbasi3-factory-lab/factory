@@ -14,7 +14,6 @@ tiers:
       - "Cargo.toml"     # only through the dependency steward's PRs
       - "Cargo.lock"
       - "vendor/**"
-    start_as: human  # Stage 1. Moves to auto-strict by a reviewed PR once the core fire drills pass.
     strict_gates:
       - full_regression           # golden + held-out comparison across every ported language
       - semver_checks             # no public API break
