@@ -1,12 +1,14 @@
-// Control-room UI (v2). Fetches the audit branch from GitHub, verifies it with lib.js
-// and renders the panels. All DOM writes use textContent or createElement(NS), never
-// innerHTML, and widths go through the CSSOM, so the strict CSP holds.
+// Control-room UI: one screen at 1440x900. Fetches the audit branch from GitHub, verifies it
+// with lib.js and renders the status line, the key numbers, the task board, the small panels
+// and the folded details. All DOM writes use textContent or createElement(NS), never innerHTML,
+// and widths go through the CSSOM, so the strict CSP holds. Every request is a GET.
 import {
-  CADENCE_NOTE, DEFAULTS, STAGES, STAGE_LABELS, STALE_DATA_MIN, anchorTimes, anchorsPerDay, cadenceText, canonicalize, combineNeedsYou, compactAge, costSummary,
-  dailySeries, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths, formatAge, formatDuration, formatLimit, healthSummary, heartbeatTimes, limitsText, observedCadence,
-  parseAnchors, parseJsonl, parseTime, pipeline, prRef, shortTitle,
-  VERIFIER_LIMITS, heartbeatTile, sparkSegments, stageBreakdown, statusSummary, subjectLabel, reviewItems, summarizePr, timelineFor, typicalRunMs, unmergedPrs, utcDay,
-  verifierReason, verifierStatus, verifyChain,
+  AGENT_WORKFLOWS, CADENCE_NOTE, DEFAULTS, FOLLOW_UP_MIN, HUMAN_DAYS, MEDIAN_DAYS, STAGES, STAGE_LABELS, STALE_DATA_MIN, TASK_STATES, TASK_STATE_LABELS,
+  anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths,
+  fallbackCatalog, formatAge, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
+  liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, prRef, qualityStats, recentActivity,
+  relativeTime, reviewItems, shortDuration, shortTaskName, shortTitle, snapshotRunIds, stageSummary, stageTimes, stateLine, statusSummary,
+  subjectLabel, summarizePr, taskBoard, taskCatalog, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -17,14 +19,15 @@ const GH = 'https://github.com';
 const TOKEN_KEY = 'factory-dashboard.github-token';
 const THEME_KEY = 'factory-dashboard.theme';
 // Sample data (relative URLs, so they work locally and on Pages): ?fixture=1 is a busy
-// factory, ?fixture=quiet the quiet state the live page is usually in.
+// factory, ?fixture=quiet the quiet state the live page is usually in. The meta file stands in
+// for the task map, the contracts and the Actions run lists, so sample mode makes no GitHub call.
 const FIXTURES = Object.freeze({
-  1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl' },
-  quiet: { events: 'test/fixtures/quiet.jsonl', anchors: 'test/fixtures/quiet-anchors.jsonl' },
+  1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl', meta: 'test/fixtures/sample-meta.json' },
+  quiet: { events: 'test/fixtures/quiet.jsonl', anchors: 'test/fixtures/quiet-anchors.jsonl', meta: 'test/fixtures/quiet-meta.json' },
 });
 const MISSING_BRANCH_POLL_S = 300;
-// Open-PR lists (product repo for PR lanes; both repos for owner reviews). v1 audit events
-// have no "closed" PR event and no human-tier PR events, so these come from GitHub directly.
+// Open-PR lists (both repos, for owner reviews) and the source repo's open issues and PRs (to
+// drop closed items): v1 audit events have no "closed" event, so these come from GitHub.
 const FACTORY_REPO = 'sabbasi3-factory-lab/factory';
 const PR_REPOS = [REPO, FACTORY_REPO];
 // Two list calls per refresh: after an audit head change but at most every ~5 min, and at
@@ -43,14 +46,25 @@ const ANCHORS_PATH = 'anchors/chrono-node-rs.jsonl';
 const VERIFIER_MIN_MS = 5 * 60000;
 const VERIFIER_PROBE_MS = 15 * 60000;
 const VERIFIER_RETRY_MS = 60000;
+// The task map and the contracts it generates, from raw.githubusercontent.com (no API cost):
+// read on load, then hourly; a failed read is retried after 5 min.
+const TASKMAP_PATH = 'scripts/seed-backlog/taskmap.yaml';
+const META_MAX_AGE_MS = 60 * 60000;
+const META_RETRY_MS = 5 * 60000;
+// The agent workflow run lists (3 API calls, with ETags), read only when a spend snapshot names
+// a run that isn't in them yet, at most every 10 min, and only with enough API budget left.
+const RUNS_MIN_MS = 10 * 60000;
+const RUNS_RESERVE = 5;
 
 const params = new URLSearchParams(location.search);
 const FIXTURE_PARAM = Object.hasOwn(FIXTURES, params.get('fixture') ?? '') ? params.get('fixture') : null;
 const FIXTURE = FIXTURE_PARAM != null;
 const FIXTURE_URL = FIXTURE ? FIXTURES[FIXTURE_PARAM].events : null;
 const ANCHORS_FIXTURE_URL = FIXTURE ? FIXTURES[FIXTURE_PARAM].anchors : null;
+const META_FIXTURE_URL = FIXTURE ? FIXTURES[FIXTURE_PARAM].meta : null;
 const POLL_S = clampInt(params.get('poll'), 30, 10, 3600);
-const DAYS = clampInt(params.get('days'), DEFAULTS.windowDays, 1, 31);
+// The 14-day medians need 14 days of day files.
+const DAYS = clampInt(params.get('days'), MEDIAN_DAYS, 1, 31);
 
 const state = {
   records: [],
@@ -68,9 +82,8 @@ const state = {
   nextCheckAt: null,
   clockOffset: 0,
   expanded: new Set(),
-  expandedLanes: new Set(), // done lanes showing every card
   checksExpanded: false,
-  kpiSig: null,
+  sigs: new Map(), // section id -> signature of what it shows, so unchanged sections aren't rebuilt
   subject: '',
   typeFilter: '',
   timer: null,
@@ -81,10 +94,16 @@ const state = {
   prsKnownRendered: null,
   // status: 'pending' | 'ok' | 'missing' | 'error'; branchSeen skips the API probe once the branch exists.
   verifier: { status: 'pending', text: null, detail: null, attemptedAt: null, branchSeen: false },
+  // The task catalog: status 'pending' | 'ok' | 'error'; catalog stays from the last good read.
+  meta: { status: 'pending', catalog: null, missing: [], error: null, fetchedAt: null, attemptedAt: null },
+  // Agent workflow runs: status 'idle' (not needed yet) | 'ok' | 'error'; lists: workflow -> { etag, runs }.
+  runs: { status: 'idle', lists: new Map(), error: null, fetchedAt: null, attemptedAt: null, tried: new Set(), waitingForRate: false },
+  fixtureMeta: null,
 };
 
 const $ = (id) => document.getElementById(id);
 const now = () => Date.now() + state.clockOffset;
+const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
 function clampInt(value, dflt, min, max) {
   const n = Number.parseInt(value ?? '', 10);
@@ -115,20 +134,16 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const isSha = (v) => typeof v === 'string' && /^[0-9a-f]{7,64}$/.test(v);
 const fmtInt = (n) => (isNum(n) ? n.toLocaleString('en-US') : '—');
 
-function prLink(n) {
-  return isNum(n) ? link(`${GH}/${REPO}/pull/${n}`, `#${n}`) : '—';
-}
-function commitLink(sha) {
-  return isSha(sha) ? link(`${GH}/${REPO}/commit/${sha}`, h('code', {}, sha.slice(0, 7))) : '—';
+// A relative time ("23m ago", or just "23m" when `bare`) that moves with the clock; the exact UTC
+// time is in its title.
+function timeEl(ts, { bare = false } = {}) {
+  const ms = typeof ts === 'number' ? ts : parseTime(ts);
+  if (ms == null) return '—';
+  return h('time', { datetime: iso(ms), title: iso(ms), 'data-at': String(ms), 'data-bare': bare ? '1' : null }, relText(ms, bare));
 }
 
-function timeEl(ts) {
-  const ms = parseTime(ts);
-  if (ms == null) return '—';
-  const iso = new Date(ms).toISOString();
-  const sameDay = utcDay(ms) === utcDay(now());
-  const text = sameDay ? iso.slice(11, 19) : `${iso.slice(5, 10)} ${iso.slice(11, 16)}`;
-  return h('time', { datetime: iso, title: iso }, text);
+function relText(ms, bare) {
+  return bare ? compactAge(now() - ms) : relativeTime(ms, now());
 }
 
 function showTimeline(key) {
@@ -164,20 +179,11 @@ function row(key, ...cells) {
   return h('tr', { 'data-row-key': key }, cells.map((c) => h('td', {}, c ?? '—')));
 }
 
-// A duration that grows with the clock; clock-only refreshes update just its text.
-// Compact cells show one token ("7h"); the exact duration is in the item's tooltip.
-function clockCell(sinceMs, compact = false) {
-  if (sinceMs == null) return '—';
-  return h('span', { 'data-since': String(sinceMs), 'data-compact': compact ? '1' : null }, (compact ? compactAge : formatDuration)(now() - sinceMs));
-}
-
 function updateClockCells() {
-  for (const el of document.querySelectorAll('[data-since]')) {
-    const fmt = el.hasAttribute('data-compact') ? compactAge : formatDuration;
-    const text = fmt(now() - Number(el.getAttribute('data-since')));
+  for (const el of document.querySelectorAll('[data-at]')) {
+    const text = relText(Number(el.getAttribute('data-at')), el.hasAttribute('data-bare'));
     if (el.textContent !== text) el.textContent = text;
   }
-  for (const el of document.querySelectorAll('[data-bar-since]')) setBar(el);
 }
 
 const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]';
@@ -456,11 +462,6 @@ function openNumbersAt() {
   return isNum(at) ? at + state.clockOffset : null;
 }
 
-function openPrSet() {
-  if (FIXTURE) return unmergedPrs(state.events); // sample data: opened and never merged
-  return prsKnown() ? new Set((state.prs.lists.get(REPO)?.prs ?? []).map((p) => p.number)) : null;
-}
-
 // True if the anchors branch exists; one API call (matching-refs answers 200 with [] when
 // it doesn't, so nothing is logged as an error).
 async function anchorsBranchExists() {
@@ -514,6 +515,123 @@ async function maybeRefreshVerifier() {
   }
 }
 
+// The sample's stand-in for the task map, contracts and Actions run lists (read once).
+function loadFixtureMeta() {
+  state.fixtureMeta ??= fetch(META_FIXTURE_URL, { cache: 'no-store' }).then((res) => {
+    if (!res.ok) throw new Error(`sample meta: HTTP ${res.status}`);
+    return res.json();
+  });
+  return state.fixtureMeta;
+}
+
+async function fetchRawText(path) {
+  const res = await fetch(`${RAW}/${REPO}/main/${path}`, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  return res.text();
+}
+
+const contractPath = (id) => `contracts/${id.split('/').map(encodeURIComponent).join('/')}.yaml`;
+
+// The task catalog: the task map, then every task's contract (tier, area, dependencies), all from
+// raw.githubusercontent.com. Never throws: without the task map, the board falls back to the tasks
+// seen in the events; a missing contract only leaves that task's tier unknown.
+async function maybeRefreshMeta() {
+  const mm = state.meta;
+  const age = mm.fetchedAt == null ? Infinity : Date.now() - mm.fetchedAt;
+  if (mm.status === 'ok' && age < META_MAX_AGE_MS) return;
+  if (mm.status !== 'ok' && mm.attemptedAt != null && Date.now() - mm.attemptedAt < META_RETRY_MS) return;
+  mm.attemptedAt = Date.now();
+  try {
+    let taskmap;
+    let read;
+    if (FIXTURE) {
+      const meta = await loadFixtureMeta();
+      taskmap = meta.taskmap;
+      read = async (id) => meta.contracts?.[id] ?? null;
+    } else {
+      taskmap = await fetchRawText(TASKMAP_PATH);
+      read = (id) => fetchRawText(contractPath(id)).catch(() => null);
+    }
+    const entries = parseTaskmap(taskmap);
+    if (!entries.length) throw new Error('the task map lists no tasks');
+    const texts = await Promise.all(entries.map((e) => read(e.id)));
+    const contracts = new Map();
+    entries.forEach((e, i) => {
+      if (typeof texts[i] === 'string') contracts.set(e.id, parseContract(texts[i]));
+    });
+    Object.assign(mm, { status: 'ok', catalog: taskCatalog(entries, contracts), missing: entries.filter((e) => !contracts.has(e.id)).map((e) => e.id), error: null, fetchedAt: Date.now() });
+  } catch (err) {
+    mm.status = mm.catalog ? 'ok' : 'error';
+    mm.error = err instanceof Error ? err.message : String(err);
+  }
+  state.dataVersion++;
+}
+
+async function fetchRunList(workflow) {
+  const cached = state.runs.lists.get(workflow);
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (cached?.etag) headers['If-None-Match'] = cached.etag;
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/repos/${REPO}/actions/workflows/${workflow}.lock.yml/runs?per_page=100`, {
+    headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+  });
+  readRate(res);
+  if (res.status === 304 && cached) return cached;
+  if (!res.ok) throw new Error(`${workflow} runs: HTTP ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body?.workflow_runs)) throw new Error(`${workflow} runs: unexpected response`);
+  const runs = body.workflow_runs.filter((r) => isNum(r?.id)).map((r) => ({
+    id: r.id, created_at: typeof r.created_at === 'string' ? r.created_at : null, display_title: typeof r.display_title === 'string' ? r.display_title : '', workflow,
+  }));
+  return { etag: res.headers.get('etag'), runs };
+}
+
+// The run lists are read only when a spend snapshot names a run they don't list yet (each run id
+// is looked for once), at most every 10 min, and only with API requests to spare. Never throws.
+async function maybeRefreshRuns() {
+  const r = state.runs;
+  if (FIXTURE) {
+    if (r.status === 'ok') return;
+    try {
+      const meta = await loadFixtureMeta();
+      for (const wf of AGENT_WORKFLOWS) r.lists.set(wf, { etag: null, runs: (meta.runs?.[wf] ?? []).map((x) => ({ ...x, workflow: wf })) });
+      Object.assign(r, { status: 'ok', error: null, fetchedAt: Date.now() });
+    } catch (err) {
+      Object.assign(r, { status: 'error', error: err instanceof Error ? err.message : String(err) });
+    }
+    state.dataVersion++;
+    return;
+  }
+  const listed = new Set((agentRuns() ?? []).map((x) => x.id));
+  const missing = [...snapshotRunIds(state.events)].filter((id) => !listed.has(id) && !r.tried.has(id));
+  r.waitingForRate = false;
+  if (!missing.length) return;
+  if (r.attemptedAt != null && Date.now() - r.attemptedAt < RUNS_MIN_MS) return;
+  if (state.rate && state.rate.remaining < AGENT_WORKFLOWS.length + RUNS_RESERVE) {
+    r.waitingForRate = true;
+    return;
+  }
+  r.attemptedAt = Date.now();
+  try {
+    const lists = await Promise.all(AGENT_WORKFLOWS.map(fetchRunList));
+    AGENT_WORKFLOWS.forEach((wf, i) => r.lists.set(wf, lists[i]));
+    Object.assign(r, { status: 'ok', error: null, fetchedAt: Date.now() });
+    for (const id of missing) r.tried.add(id);
+  } catch (err) {
+    r.status = r.lists.size === AGENT_WORKFLOWS.length ? 'ok' : 'error';
+    r.error = err instanceof Error ? err.message : String(err);
+  }
+  state.dataVersion++;
+}
+
+/** Every listed agent run, or null when the lists haven't been read. */
+function agentRuns() {
+  const r = state.runs;
+  if (r.lists.size < AGENT_WORKFLOWS.length) return null;
+  return [...r.lists.values()].flatMap((l) => l.runs);
+}
+
 async function tick() {
   clearTimeout(state.timer);
   if (state.busy) return;
@@ -523,6 +641,8 @@ async function tick() {
     if (FIXTURE) {
       if (!state.loaded) await loadFixture();
       await maybeRefreshVerifier();
+      await maybeRefreshMeta();
+      await maybeRefreshRuns();
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
@@ -532,6 +652,8 @@ async function tick() {
       } finally {
         await maybeRefreshPrs(state.headSha !== headBefore);
         await maybeRefreshVerifier();
+        await maybeRefreshMeta();
+        await maybeRefreshRuns();
       }
     }
     state.error = null;
@@ -570,52 +692,56 @@ function withWidth(el, pct) {
   return el;
 }
 
-const pctText = (v) => (v == null ? '—' : `${Math.round(v)}%`);
-const millions = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
-/** A 7-day trend line. Null values leave a gap rather than a fake zero. */
-function sparkline(values, days, { label, tone = 'blue', format = (v) => String(v) } = {}) {
-  const w = 200;
-  const ht = 96;
-  const pad = 4;
-  const nums = values.filter(isNum);
-  const described = days.map((d, i) => `${d.slice(5)} ${values[i] == null ? 'none' : format(values[i])}`).join(', ');
-  const el = svg('svg', {
-    class: `spark spark--${tone}`, viewBox: `0 0 ${w} ${ht}`, preserveAspectRatio: 'none', role: 'img',
-    'aria-label': `${label}, oldest to newest: ${described}`,
-  });
-  el.append(svg('path', { class: 'spark-base', d: `M0 ${ht - pad} L${w} ${ht - pad}` }));
-  if (!nums.length) return el;
-  const max = Math.max(...nums);
-  const min = Math.min(0, ...nums);
-  const x = (i) => (values.length === 1 ? w / 2 : (i * w) / (values.length - 1));
-  const y = (v) => ht - pad - ((v - min) / (max - min || 1)) * (ht - 2 * pad);
-  const { points, segments } = sparkSegments(values);
-  for (const seg of segments) {
-    const d = seg.map(({ i, v }, k) => `${k ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
-    el.append(svg('path', { class: 'spark-area', d: `${d} L${x(seg.at(-1).i).toFixed(1)} ${ht - pad} L${x(seg[0].i).toFixed(1)} ${ht - pad} Z` }));
-    el.append(svg('path', { class: 'spark-line', d }));
-  }
-  // A marker for every valid point, so isolated days between gaps stay visible.
-  points.forEach(({ i, v }, k) => el.append(svg('circle', {
-    class: k === points.length - 1 ? 'spark-dot spark-dot--last' : 'spark-dot', cx: x(i).toFixed(1), cy: y(v).toFixed(1), r: k === points.length - 1 ? 3 : 2,
-  })));
-  return el;
+/** Everything the page shows that's derived from the events plus the side reads, in one place. */
+function buildView(m) {
+  const t = now();
+  const catalog = state.meta.catalog ?? (state.meta.status === 'error' ? fallbackCatalog(state.events) : []);
+  const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items });
+  const dispatch = latestDispatchState(state.events);
+  const cost = costJoin(state.events, agentRuns(), { now: t, days: MEDIAN_DAYS });
+  const doneIds = board.tasks.filter((x) => x.state === 'done').map((x) => x.id);
+  return {
+    board,
+    dispatch,
+    banner: dispatchBanner(state.events, { now: t }),
+    state: stateLine({ loaded: state.loaded, board, dispatch }),
+    cost,
+    taskCost: medianTaskCost(cost, doneIds),
+    toMerged: issueToMerged(state.events, { now: t, days: MEDIAN_DAYS }),
+    quality: qualityStats(state.events),
+    human: humanTouch(state.events, { now: t, days: HUMAN_DAYS }),
+    live: liveness(state.events, { now: t, inFlight: board.counts.running > 0, dispatch }),
+    recent: recentActivity(state.events, { limit: 5 }),
+  };
 }
 
-// Clock-dependent parts re-render on every tick; the rest only when data or a selection changes,
-// so open selects, expanded rows and text selections aren't disturbed.
+// Rebuilds a section only when what it shows changed or new data arrived, so focus, open tooltips
+// and text selections survive the 15-second clock refresh (a rebuild puts focus back, see
+// replaceSection).
+function renderIf(id, sigOf, build, full) {
+  safe(id, () => {
+    const sig = JSON.stringify([state.dataVersion, sigOf]);
+    if (!full && state.sigs.get(id) === sig && $(id).childNodes.length) return;
+    state.sigs.set(id, sig);
+    build();
+  });
+}
+
 function render({ full = false } = {}) {
   let m = null;
+  let v = null;
   let metricsError = null;
   try {
     m = dropClosed(deriveMetrics(state.events, { now: now() }), openNumbers(), openNumbersAt());
+    v = buildView(m);
   } catch (err) {
     metricsError = err;
+    console.error('dashboard: deriving the view failed', err);
   }
   const withMetrics = (fn) => () => {
-    if (!m) throw metricsError;
-    fn(m);
+    if (!m || !v) throw metricsError;
+    fn(m, v);
   };
   let needs = null;
   try {
@@ -624,30 +750,35 @@ function render({ full = false } = {}) {
     console.error('dashboard: deriving Needs you failed', err);
   }
   try {
-    renderHeader(m, needs);
+    renderHeader(m, v);
   } catch (err) {
     setStatus(`Problem showing the header: ${err?.message ?? err}`);
   }
-  safe('kpis', withMetrics(renderKpis)); // rebuilt only when a shown value changes
+  const loaded = state.loaded;
   const known = FIXTURE || prsKnown();
+  renderIf('numbers', [loaded, v && numbersSig(v)], withMetrics((mm, vv) => renderNumbers(vv)), full);
+  renderIf('needs', [loaded, state.error, known, needs?.rs, needs?.items.map((i) => [i.key, i.since, i.title, i.reason])], withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))), full);
+  renderIf('board', [loaded, state.meta.status, state.meta.error, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
+  renderIf('cost', [loaded, v && costSig(m, v)], withMetrics((mm, vv) => renderCost(mm, vv)), full);
+  renderIf('quality', [loaded, v?.quality], withMetrics((mm, vv) => renderQuality(vv)), full);
+  renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
+  renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
+  renderIf('recent', [loaded, v?.recent.map((r) => [r.text, r.at])], withMetrics((mm, vv) => renderRecent(vv)), full);
   if (full || state.renderedVersion !== state.dataVersion || state.prsKnownRendered !== known) {
     state.renderedVersion = state.dataVersion;
     state.prsKnownRendered = known;
-    safe('needs', withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))));
-    safe('pipeline', renderPipeline);
-    safe('agents', withMetrics(renderAgents));
     safe('checks', withMetrics(renderChecks));
     safe('stages', withMetrics(renderStages));
-    safe('cost', withMetrics(renderCost));
     safe('timeline', withMetrics(renderTimeline));
     safe('events', renderEvents);
   }
   updateClockCells();
   refreshTip();
-  // Readiness marker for tests and tools: data (or its error) is shown, and in live mode
-  // the open-PR lists have been read or have failed.
+  // Readiness marker for tests and tools: data (or its error) is shown, and in live mode the
+  // open-PR lists, the task catalog and (when needed) the run lists have been read or have failed.
   const settled = state.loaded || state.error || state.noLog;
-  if (settled && (FIXTURE || state.prs.fetchedAt != null || state.prs.error)) document.documentElement.dataset.ready = '1';
+  const sidesRead = FIXTURE || state.prs.fetchedAt != null || state.prs.error;
+  if (settled && sidesRead && state.meta.status !== 'pending') document.documentElement.dataset.ready = '1';
 }
 
 // ---------------------------------------------------------------------------
@@ -673,10 +804,6 @@ function tip(el, text) {
 function setTip(id, text) {
   const src = $(`${id}-tip`);
   if (src && src.textContent !== text) src.textContent = text;
-}
-
-function infoButton(label, text) {
-  return tip(h('button', { type: 'button', class: 'info', 'aria-label': label }, icon('info')), text);
 }
 
 function tipTextOf(el) {
@@ -749,12 +876,11 @@ function initTips() {
 }
 
 // ---------------------------------------------------------------------------
-// Header: one glance line (health, needs you, kill switch, dry run)
+// Header: the status line (health, kill switch, plain-English state, dry run)
 
 // "loading" is neutral on purpose: before the first load nothing is known to be wrong.
 const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info', loading: 'muted' };
 const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot', loading: null };
-const LEVEL_WORD = { ok: 'ok', warn: 'warning', alert: 'alert', info: 'checking', loading: 'loading' };
 const HB_WARN = formatLimit(DEFAULTS.heartbeatWarnMin);
 const HB_ALERT = formatLimit(DEFAULTS.heartbeatAlertMin);
 const VF_WARN = formatLimit(VERIFIER_LIMITS.warnMin);
@@ -763,6 +889,7 @@ const HEALTH_RULE = `Healthy: fresh data, verified chain, heartbeat within ${HB_
   + `Degraded: last refresh failed, data over ${STALE_DATA_MIN} min old, heartbeat late (over ${HB_WARN}), chain not verified, verifier late (over ${VF_WARN}) or not set up.\n`
   + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.\n`
   + 'Paused: dispatch held by a gate (spend, budget, Actions load), nothing else wrong.';
+const STATE_ICON_NAME = { ok: 'ok', warn: 'warn', info: 'play', loading: null };
 
 /** The anchors in the verifier file, or [] if it isn't loaded or isn't valid. */
 function loadedAnchors() {
@@ -794,23 +921,23 @@ function setChip(id, { hidden = false, tone = null, iconName = null, text = '', 
   el.setAttribute('aria-describedby', `${id}-tip`);
 }
 
-function renderDispatchBanner() {
-  const el = $('dispatch-banner');
-  const b = state.loaded ? dispatchBanner(state.events, { now: now() }) : null;
-  el.hidden = !b;
-  if (!b) return;
-  el.className = `banner banner--${b.level} has-tip`;
-  el.replaceChildren(icon(b.level === 'warn' ? 'warn' : 'info'), h('span', {}, b.text), h('span', { id: 'dispatch-banner-tip', class: 'tip-src', hidden: true }, b.tip));
-  el.setAttribute('aria-describedby', 'dispatch-banner-tip');
+function stateTip(v) {
+  const c = v.board.counts;
+  const lines = [
+    v.board.total ? `Tasks: ${c.done} done, ${c.running} running, ${c.needs} need you, ${c.waiting} waiting (of ${v.board.total}).` : 'No tasks in the catalog yet.',
+  ];
+  if (v.banner) lines.push('', v.banner.text.replace(/ (since|\(recorded) [^:]*:/, ':'), v.banner.tip);
+  else if (v.dispatch?.state === 'running') lines.push('', 'The controller is dispatching work.');
+  lines.push('', 'Running: work started on a task and not merged yet. Paused: dispatch held by a gate. Waiting: tasks ready for a free slot, or blocked by dependencies. Idle: nothing to do.');
+  return lines.join('\n');
 }
 
-function renderHeader(m, needs) {
+function renderHeader(m, v) {
   const chain = state.chain;
   const hb = m?.heartbeat ?? null;
   const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
   const verifier = verifierStatus(state.verifier, now());
-  const dispatch = state.loaded ? dispatchBanner(state.events, { now: now() }) : null;
-  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin, verifier, dispatch });
+  const health = healthSummary({ loaded: state.loaded, noLog: state.noLog, error: state.error, chain, heartbeat: hb, dataAgeMin, verifier, dispatch: v?.banner ?? null });
   const detail = statusSummary({
     loaded: state.loaded, noLog: state.noLog, error: state.error, fixture: FIXTURE,
     eventCount: state.events.length, headSha: state.headSha, days: DAYS, heartbeat: hb,
@@ -823,51 +950,37 @@ function renderHeader(m, needs) {
     tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.level === 'loading' ? `… ${health.label}` : health.label,
     tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine,
       ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE,
-      ...(state.loaded ? (({ heartbeat, verifier: v }) => ['', `Observed: ${heartbeat}`, `Observed: ${v}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
+      ...(state.loaded ? (({ heartbeat, verifier: vf }) => ['', `Observed: ${heartbeat}`, `Observed: ${vf}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
   });
-  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
-
-  if (needs && (state.loaded || state.error)) {
-    const n = needs.items.length;
-    const reviews = needs.items.filter((it) => it.kind === 'review').length;
-    const unknown = needs.rs === 'unavailable';
-    const lines = [`${n - reviews} audit item${n - reviews === 1 ? '' : 's'}, ${reviews} PR review${reviews === 1 ? '' : 's'}`];
-    if (unknown) lines.push(`Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}`);
-    if (n > DEFAULTS.humanQueueMax) lines.push(`Over the review queue cap of ${DEFAULTS.humanQueueMax}`);
-    setChip('needs-link', n
-      ? { tone: 'warn', iconName: unknown ? 'warn' : 'person', text: `${n} need${n === 1 ? 's' : ''} you`, tipText: lines.join('\n') }
-      : unknown ? { tone: 'warn', iconName: 'question', text: 'Reviews unknown', tipText: lines.join('\n') }
-        : needs.rs === 'pending' ? { tone: 'info', iconName: 'dot', text: 'Checking reviews', tipText: 'Reading the open-PR lists' }
-          : { tone: 'ok', iconName: 'ok', text: 'Nothing needs you', tipText: lines.join('\n') });
-  } else {
-    setChip('needs-link', { hidden: true });
-  }
-
+  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}${v && state.loaded ? `. ${v.state.text}` : ''}`);
   renderVerifierLine(verifier);
 
   const enabled = m?.killSwitch?.enabled ?? null;
   setChip('kill-chip', {
     // Off is the deliberate, safe state: neutral grey, not red (red means Down).
     hidden: enabled == null, tone: enabled ? 'ok' : 'muted', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
-    tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${m.killSwitch.at})` : ''}; off means no new dispatches`,
+    tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${relativeTime(parseTime(m.killSwitch.at), now())}, ${m.killSwitch.at})` : ''}; off means no new dispatches`,
   });
+  const st = v?.state ?? null;
+  setChip('state-chip', st && state.loaded
+    ? { tone: TONE[st.level] ?? 'info', iconName: STATE_ICON_NAME[st.level] ?? 'dot', text: st.text, tipText: stateTip(v) }
+    : { hidden: true });
   const dryRun = m?.dryRun ?? null;
   const version = m?.factoryVersion ?? null;
+  // Live is the normal state, so only a dry run gets a chip (the version is in the "updated" tooltip).
   setChip('dry-badge', {
-    hidden: dryRun == null, tone: dryRun ? 'warn' : 'ok', iconName: dryRun ? 'info' : 'bolt', text: dryRun ? 'Dry run' : 'Live',
-    tipText: `${dryRun ? 'Decisions are logged, not acted on' : 'Decisions take effect'}${version ? `\nFactory version ${version}` : ''}`,
+    hidden: dryRun !== true, tone: 'warn', iconName: 'info', text: 'Dry run',
+    tipText: `Decisions are logged, not acted on${version ? `\nFactory version ${version}` : ''}`,
   });
-  renderDispatchBanner();
-  const clock = new Date(now()).toISOString().slice(11, 16);
-  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${clock}Z. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${iso(now())}. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
 
   const meta = [];
   if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
   else {
-    if (state.lastCheck) meta.push(`checked ${new Date(state.lastCheck).toISOString().slice(11, 19)}Z`);
-    if (state.nextCheckAt) meta.push(`next in ${Math.max(0, Math.round((state.nextCheckAt - Date.now()) / 1000))} s`);
+    if (state.lastCheck) meta.push(`checked ${relativeTime(state.lastCheck, Date.now())}`);
+    if (state.nextCheckAt) meta.push(`next ${relativeTime(state.nextCheckAt, Date.now())}`);
     const r = state.rate;
-    if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${new Date(r.reset).toISOString().slice(11, 16)}Z` : ''));
+    if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${relativeTime(r.reset, Date.now())}` : ''));
     meta.push(getToken() ? 'your token' : 'no token');
   }
   const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
@@ -880,119 +993,93 @@ function renderHeader(m, needs) {
   ].filter(Boolean).join('\n'));
   $('meta-settings').textContent = meta.length ? `Now: ${meta.join(' · ')}.` : '';
   $('poll-hint').textContent = `Checks every ${POLL_S} s at most (?poll=N), spread out to stay within the rate limit: about once a minute without a token. Window: ${DAYS} days (?days=N).`;
-  $('kpi-days').textContent = String(DAYS);
 }
 
-// The independent verifier has no chip of its own: it's part of the health chip (and
-// its tooltip) and the "Verified" tile. The audit-log section keeps a muted detail line.
+// The independent verifier has no chip of its own: it's part of the health chip (and its
+// tooltip). The audit-log section keeps a muted detail line.
 function renderVerifierLine(v) {
   const line = $('verifier-line');
   if (line.textContent !== v.line) line.textContent = v.line;
 }
 
 // ---------------------------------------------------------------------------
-// KPI tiles: label, big number, trend line; everything else is in the tile's tooltip
+// Key numbers: number + short label; the definition and detail are in each tooltip
 
-const FORMATS = {
-  pct: pctText,
-  int: (v) => fmtInt(Math.round(v)),
-  dur: (v) => formatDuration(v * 60000),
-  n: (v) => String(v),
-};
+const STATE_ICON = { done: 'ok', running: 'play', needs: 'warn', waiting: 'wait' };
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-function kpi({ title, iconName, value, unit = null, level = null, tipText, spark }) {
-  if (level === 'loading') level = null; // neutral "…" until the first load
-  const el = h('article', { class: `panel kpi${level ? ` kpi--${level}` : ''}` },
-    h('h3', { class: 'kpi-t' }, icon(iconName), title),
-    h('p', { class: 'kpi-v' },
-      level ? h('span', { class: 'kpi-state', role: 'img', 'aria-label': LEVEL_WORD[level] }, icon(LEVEL_ICON[level])) : null,
-      h('span', {}, value),
-      unit ? h('small', {}, unit) : null),
-    sparkline(spark.values, spark.days, { label: spark.label, tone: spark.tone, format: FORMATS[spark.fmt] }));
+function numTile({ key, label, iconName, value, sub = null, tipText, level = null }) {
+  const el = h('article', { class: `panel ntile${level ? ` ntile--${level}` : ''}`, 'data-row-key': key },
+    h('h3', { class: 'num-l' }, icon(iconName), label),
+    h('p', { class: 'num-v' }, value),
+    sub ? h('p', { class: 'num-s' }, sub) : null);
   return tip(el, tipText);
 }
 
-function verifiedTile() {
-  const v = verifierStatus(state.verifier, now());
-  const anchors = loadedAnchors();
-  const perDay = anchorsPerDay(anchors, { now: now(), days: DAYS });
-  return {
-    title: 'Verified', iconName: 'shield', value: v.level === 'info' ? '…' : v.ageMin == null ? '—' : compactAge(v.ageMin * 60000),
-    level: v.level === 'info' ? null : v.level,
-    tipText: [
-      verifierReason(v),
-      v.line,
-      cadenceLines(anchors).verifier,
-      `Independent audit-verify run: green up to ${VF_WARN}, ${limitsText(VERIFIER_LIMITS.warnMin, VERIFIER_LIMITS.alertMin)} or if the anchors file is unreadable`,
-      CADENCE_NOTE,
-      'Trend counts anchors per day (24 scheduled)',
-    ].join('\n'),
-    spark: { values: perDay.counts, days: perDay.days, label: 'Verifier anchors per day (24 scheduled)', tone: 'green', fmt: 'n' },
-  };
+function numbersSig(v) {
+  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.taskCost, v.cost.known, state.runs.status, state.runs.error, state.meta.status];
 }
 
-function renderKpis(m) {
-  const s = dailySeries(state.events, { now: now(), days: DAYS });
-  const zt = m.zeroTouch;
-  const hb = m.heartbeat;
-  const aic = m.aicToday;
-  const mergedWeek = s.merged.reduce((a, b) => a + b, 0);
-  const hbTile = heartbeatTile(hb, state.loaded);
-  const hbIso = hb.at ? ` (${hb.at})` : '';
-  const tiles = [
-    {
-      title: 'Zero-touch', iconName: 'ok', value: zt.rate == null ? '—' : pctText(zt.rate * 100),
-      tipText: zt.merged ? `${zt.untouched} of ${zt.merged} merged factory PRs had no human action` : 'No merged factory PRs yet',
-      spark: { values: s.zeroTouchPct, days: s.days, label: 'Zero-touch rate so far', tone: 'green', fmt: 'pct' },
-    },
-    {
-      title: 'Checks', iconName: 'shield', value: pctText(s.checks.pct),
-      tipText: s.checks.total ? `${s.checks.passed} of ${s.checks.total} check runs passed in ${DAYS} days` : 'No check results yet',
-      spark: { values: s.checksPassPct, days: s.days, label: 'Share of check runs that passed, by day', tone: 'green', fmt: 'pct' },
-    },
-    {
-      title: 'AIC today', iconName: 'coin', value: fmtInt(Math.round(aic.total)),
-      level: aic.level === 'ok' ? null : aic.level,
-      tipText: `${fmtInt(Math.round(aic.total))} of ${fmtInt(aic.budget)} AIC today (UTC): ${(aic.pct ?? 0).toFixed(1)}% of the daily budget; amber at ${DEFAULTS.aicAlertPct}%, red at 100%${
-        aic.source === 'spend_snapshot'
-          ? `\n${aic.measured == null ? `Measured/reserved split unavailable (the snapshot lists ${aic.listed} of ${aic.runs ?? '?'} runs)` : `${fmtInt(Math.round(aic.measured))} measured + ${fmtInt(Math.round(aic.reserved))} reserved for runs in flight (${aic.runs} runs)`}, controller snapshot ${aic.at}`
-          : '\nNo spend snapshot today yet'
-      }`,
-      spark: { values: s.aic, days: s.days, label: 'AIC per day', tone: 'purple', fmt: 'int' },
-    },
-    {
-      title: 'Merged today', iconName: 'branch', value: String(m.mergedToday.count),
-      tipText: `${m.mergedToday.count ? `Today (UTC): PR ${m.mergedToday.prs.slice(0, 8).map((n) => `#${n}`).join(', ')}${m.mergedToday.prs.length > 8 ? ` +${m.mergedToday.prs.length - 8} more` : ''}\n` : ''}${mergedWeek} merged in ${DAYS} days`,
-      spark: { values: s.merged, days: s.days, label: 'PRs merged per day', tone: 'blue', fmt: 'n' },
-    },
-    {
-      title: 'Merge time', iconName: 'clock', value: s.mergeMedianAllMin == null ? '—' : compactAge(s.mergeMedianAllMin * 60000),
-      tipText: s.mergeMedianAllMin == null ? 'No merged PRs with an opened time yet' : `Median from PR opened to merged over ${DAYS} days: ${formatDuration(s.mergeMedianAllMin * 60000)}`,
-      spark: { values: s.mergeMedianMin, days: s.days, label: 'Median time to merge, by day', tone: 'blue', fmt: 'dur' },
-    },
-    {
-      title: 'Heartbeat', iconName: 'pulse', value: hbTile.value, level: hbTile.level,
+function tierSplit(byTier) {
+  const order = ['auto', 'auto-strict', ...Object.keys(byTier).filter((k) => k !== 'auto' && k !== 'auto-strict')];
+  return order.filter((k) => byTier[k]).map((k) => `${k} ${byTier[k].done}`);
+}
+
+/** Why a cost needing the run lists is "—", or null when it's known. */
+function runsProblem(v) {
+  if (v.cost.known) return null;
+  const r = state.runs;
+  if (!v.cost.measuredRuns) return 'No measured agent runs in the spend snapshots yet.';
+  if (r.waitingForRate) return 'Waiting for API requests to spare (the GitHub rate limit) before reading the agent run lists.';
+  if (r.error) return `Couldn't read the agent run lists (implement, repair, review): ${r.error}.`;
+  return 'Reading the agent run lists…';
+}
+
+function renderNumbers(v) {
+  if (!state.loaded) {
+    replaceSection('numbers', ['Tasks done', 'Issue → merged', 'Cost per task'].map((label, i) => numTile({ key: `n${i}`, label, iconName: ['grid', 'clock', 'coin'][i], value: '…', tipText: 'Loading the audit log' })));
+    return;
+  }
+  const b = v.board;
+  const c = b.counts;
+  const tiers = Object.entries(b.byTier).map(([k, x]) => `${k}: ${x.done} of ${x.total} done`);
+  const itm = v.toMerged;
+  const sorted = itm.items.slice().sort((a, x) => a.ms - x.ms);
+  const why = runsProblem(v);
+  const tc = v.taskCost;
+  replaceSection('numbers',
+    numTile({
+      key: 'done', label: 'Tasks done', iconName: 'grid', value: b.total ? `${c.done}/${b.total}` : '—',
+      sub: b.total ? tierSplit(b.byTier).join(' · ') : null,
+      level: b.total && c.done === b.total ? 'ok' : null,
       tipText: [
-        hb.ageMin == null ? `No heartbeat in the last ${DAYS} days` : `Last heartbeat ${formatAge(hb.ageMin)} ago${hbIso}`,
-        cadenceLines().heartbeat,
-        `Green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}`,
-        CADENCE_NOTE,
-        'Trend counts heartbeats per day (24 scheduled)',
+        b.total ? `${c.done} of ${b.total} tasks done (merged).` : 'No tasks in the catalog yet.',
+        ...tiers,
+        `Also: ${c.running} running, ${c.needs} need you, ${c.waiting} waiting.`,
+        'Tasks are the task map\'s entries; drill/* tasks were fire drills and are not counted.',
       ].join('\n'),
-      spark: { values: s.heartbeats, days: s.days, label: 'Heartbeats per day (24 scheduled)', tone: 'green', fmt: 'n' },
-    },
-  ];
-  tiles.push(verifiedTile());
-  for (const t of tiles) t.tipText += `\nTrend: last ${DAYS} UTC days`;
-  // Rebuild only when something shown changed, so focus and an open tooltip stay put.
-  const sig = JSON.stringify(tiles);
-  if (sig === state.kpiSig && $('kpis').children.length) return;
-  state.kpiSig = sig;
-  replaceSection('kpis', tiles.map(kpi));
+    }),
+    numTile({
+      key: 'merge', label: 'Issue → merged', iconName: 'clock', value: shortDuration(itm.medianMs), sub: `median, ${MEDIAN_DAYS} days`,
+      tipText: [
+        itm.count ? `Median ${shortDuration(itm.medianMs)} over ${plural(itm.count, 'task')} merged in the last ${MEDIAN_DAYS} days.` : `No task merged in the last ${MEDIAN_DAYS} days.`,
+        itm.count ? `Fastest ${shortDuration(sorted[0].ms)}, slowest ${shortDuration(sorted.at(-1).ms)}.` : null,
+        'From the task\'s first auto_ready (else its first dispatch) to its merge. Drills and plain PRs are left out.',
+        DAYS < MEDIAN_DAYS ? `Only ${DAYS} days are loaded (?days=${DAYS}).` : null,
+      ].filter(Boolean).join('\n'),
+    }),
+    numTile({
+      key: 'cost', label: 'Cost per task', iconName: 'coin', value: why || tc.medianAic == null ? '—' : formatUsd(tc.medianAic), sub: 'median',
+      tipText: [
+        why ?? (tc.count ? `Median ${formatUsd(tc.medianAic)} (${Math.round(tc.medianAic).toLocaleString('en-US')} AIC) over ${plural(tc.count, 'done task')} with attributed cost.` : 'No done task with attributed cost yet.'),
+        'A task\'s cost: the latest measured AIC of each implement, repair and review run attributed to it (1 AIC = $0.01).',
+        'Runs come from the controller\'s spend snapshots, joined with the Actions run lists by title or dispatch time.',
+      ].join('\n'),
+    }));
 }
 
 // ---------------------------------------------------------------------------
-// Needs you: one line per item
+// Needs you: the count, then one line per item
 
 function reviewState() {
   if (FIXTURE) return 'sample';
@@ -1012,228 +1099,255 @@ function viewLink(href, text) {
   return a;
 }
 
-// Titles stay at 4 words so a few items fit the fold budget; the full title is in the tooltip.
-const NEEDS_TITLE_WORDS = 4;
+// At most 3 lines, each a ref, a 2-word title and a "View" button; the rest is in the tooltip.
+const NEEDS_SHOWN = 3;
+const NEEDS_TITLE_WORDS = 2;
+
+function needsLines(it) {
+  const since = it.since ? parseTime(it.since) : null;
+  const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${iso(since)}`;
+  if (it.kind === 'review') {
+    return { iconName: 'person', kind: 'Review and merge', ref: prRef(it.repo, it.number, REPO), title: it.title || '(no title)', since,
+      lines: [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, it.title || '(no title)', waited], action: viewLink(it.url, 'View PR') };
+  }
+  const kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
+  const title = it.task ? shortTaskName(it.task) : it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`;
+  return {
+    iconName: it.kind === 'needs_human' ? 'warn' : 'clock', kind, ref: it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—', title, since,
+    lines: [`${kind}: ${it.task ?? title}`, it.reason ? `Reason: ${it.reason}` : null, it.effect ? `Effect: ${it.effect}` : null, waited],
+    action: it.issue != null ? viewLink(`${GH}/${REPO}/issues/${it.issue}`, 'View issue') : it.pr != null ? viewLink(`${GH}/${REPO}/pull/${it.pr}`, 'View PR') : null,
+  };
+}
 
 function needsRow(it) {
-  const since = it.since ? parseTime(it.since) : null;
-  const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${new Date(since).toISOString().slice(0, 16)}Z`;
-  let iconName;
-  let kind;
-  let ref;
-  let title;
-  let lines;
-  let action = null;
-  if (it.kind === 'review') {
-    iconName = 'person';
-    kind = 'Review and merge';
-    ref = prRef(it.repo, it.number, REPO);
-    title = it.title || '(no title)';
-    lines = [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, title];
-    action = viewLink(it.url, 'View PR');
-  } else {
-    iconName = it.kind === 'needs_human' ? 'warn' : 'clock';
-    kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
-    ref = it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—';
-    // The icon (and its tooltip) says which kind; the line shows just the task.
-    title = it.task ?? (it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`);
-    lines = [`${kind}: ${title}`, it.reason ? `Reason: ${it.reason}` : null, it.effect ? `Effect: ${it.effect}` : null];
-    if (it.issue != null) action = viewLink(`${GH}/${REPO}/issues/${it.issue}`, 'View issue');
-    else if (it.pr != null) action = viewLink(`${GH}/${REPO}/pull/${it.pr}`, 'View PR');
-  }
+  const x = needsLines(it);
   return h('li', { 'data-row-key': it.key },
-    h('span', { class: `needs-icon${it.kind === 'needs_human' ? ' needs-icon--alert' : ''}`, role: 'img', 'aria-label': kind }, icon(iconName)),
-    h('span', { class: 'needs-ref mono' }, ref),
-    tip(h('span', { class: 'needs-t' }, shortTitle(title, NEEDS_TITLE_WORDS)), [...lines, waited].filter(Boolean).join('\n')),
-    since != null ? h('span', { class: 'age-chip' }, clockCell(since, true)) : h('span'),
-    action ?? h('span'));
+    h('span', { class: `needs-icon${it.kind === 'needs_human' ? ' needs-icon--alert' : ''}`, role: 'img', 'aria-label': x.kind }, icon(x.iconName)),
+    h('span', { class: 'needs-ref mono' }, x.ref),
+    tip(h('span', { class: 'needs-t' }, shortTitle(x.title, NEEDS_TITLE_WORDS)), x.lines.filter(Boolean).join('\n')),
+    x.action ?? h('span'));
 }
 
 function renderNeeds(m, view = needsView(m)) {
   const cap = DEFAULTS.humanQueueMax;
   const { rs, items } = view;
+  const panel = $('needs-panel');
   if (!state.loaded && !state.error) {
-    $('needs-panel').classList.remove('needs--clear');
-    replaceSection('needs', h('p', { class: 'needs-note' }, '… Loading'));
+    panel.classList.remove('needs--clear', 'needs--some');
+    replaceSection('needs', h('p', { class: 'num-v' }, '…'));
     return;
   }
-  setTip('needs-info', [
+  const about = [
     'Needs-human items, stale contracts and human-tier PRs waiting for your review, oldest first.',
-    'Review items: open, non-draft PRs in either repo whose body says "Tier: human" or "Tier: owner", or with an owner-review, human-tier or needs-human label.',
+    'Items whose issue or PR is closed now are left out.',
     `Above ${cap}, the controller stops admitting new human-tier work.`,
     rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
-  ].filter(Boolean).join('\n'));
-  const reviewNote = rs === 'unavailable'
-    ? tip(h('p', { class: 'needs-note needs-note--warn' }, icon('warn'), 'Review list unavailable'),
-      `${state.prs.error ?? 'The PR lists are out of date'}, so PRs waiting for your review aren't shown.`)
-    : rs === 'pending' ? h('p', { class: 'needs-note' }, icon('dot'), 'Checking reviews…') : null;
+    rs === 'unavailable' ? `Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}, so PRs waiting for your review aren't counted.` : null,
+    rs === 'pending' ? 'Still reading the open-PR lists for reviews.' : null,
+  ].filter(Boolean).join('\n');
   const clear = !items.length && (rs === 'ok' || rs === 'sample');
-  $('needs-panel').classList.toggle('needs--clear', clear);
+  panel.classList.toggle('needs--clear', clear);
+  panel.classList.toggle('needs--some', items.length > 0);
+  const head = tip(h('p', { class: 'num-v needs-n' },
+    clear ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Nothing needs you' }, icon('ok'))
+      : rs === 'unavailable' ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Review list unavailable' }, icon('question')) : null,
+    h('span', {}, String(items.length)),
+    items.length > cap ? h('span', { class: 'needs-cap', role: 'img', 'aria-label': `Over the cap of ${cap}` }, icon('warn')) : null),
+  `${items.length ? `${plural(items.length, 'item')} waiting for you.` : 'Nothing needs you.'}\n${about}`);
   if (!items.length) {
-    // The header chip already says "Nothing needs you", so the panel shows just the count.
-    // It keeps its place (and its height), so the page doesn't jump when an item arrives,
-    // and so the detail panels below don't rise above the fold.
-    replaceSection('needs', clear
-      ? tip(h('p', { class: 'needs-head needs-head--clear' },
-        h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Nothing needs you' }, icon('ok')),
-        h('span', { class: 'big' }, '0')),
-      'Nothing needs you: no needs-human items, stale contracts or PRs waiting for your review.')
-      : reviewNote);
+    replaceSection('needs', head);
     return;
   }
-  replaceSection('needs',
-    h('div', { class: 'needs-head' },
-      h('span', { class: 'big' }, String(items.length)),
-      items.length > cap ? tip(h('span', { class: 'needs-cap' }, icon('warn'), 'Over cap'), `More than ${cap} items: the controller stops admitting new human-tier work until you catch up.`) : null),
-    reviewNote,
-    h('ul', { class: 'needs-list' }, items.map((it) => {
+  const shown = items.slice(0, NEEDS_SHOWN);
+  replaceSection('needs', head,
+    h('ul', { class: 'needs-list' }, shown.map((it) => {
       try {
         return needsRow(it);
       } catch (err) {
         return h('li', { class: 'problem', 'data-row-key': it.key ?? '?' }, `Couldn't show this item: ${err?.message ?? err}`);
       }
-    })));
+    })),
+    items.length > NEEDS_SHOWN ? tip(h('p', { class: 'needs-more' }, `+${items.length - NEEDS_SHOWN}`),
+      items.slice(NEEDS_SHOWN).map((it) => { const x = needsLines(it); return `${x.ref} ${x.title}`; }).join('\n')) : null);
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline: lanes of cards; done lanes show the latest few
+// Task board: one tile per task, grouped by contract area, coloured by state with an icon
 
-const DONE_SHOWN = 3;
-const DONE_UI = new Set(['merged', 'deployed']);
-const SIDE_ICONS = { 'needs human': 'person', 'stale contract': 'clock', blocked: 'warn' };
-
-function tagIcon(t) {
-  if (SIDE_ICONS[t.text]) return SIDE_ICONS[t.text];
-  if (t.text.startsWith('repair')) return 'refresh';
-  if (t.text === 'dry-run plan') return 'info';
-  return 'fail';
+function boardTile(t) {
+  const href = t.issue != null ? `${GH}/${REPO}/issues/${t.issue}` : `${GH}/${REPO}/blob/main/${contractPath(t.id)}`;
+  const word = TASK_STATE_LABELS[t.state];
+  const lines = [
+    `${t.id}${t.title ? ` · ${t.title}` : ''}`,
+    `Tier: ${t.tier ?? 'unknown'}`,
+    `State: ${word}${t.reason && t.reason !== 'merged' ? ` (${t.reason})` : ''}`,
+    t.since != null ? `Since ${relativeTime(t.since, now())} (${iso(t.since)})` : null,
+    [t.issue != null ? `Issue #${t.issue}` : null, t.prs.length ? `PR ${t.prs.map((n) => `#${n}`).join(', ')}` : null].filter(Boolean).join(' · ') || null,
+    t.issue != null ? `View issue #${t.issue} on GitHub` : 'View its contract on GitHub (no issue in the loaded events)',
+  ];
+  const a = h('a', { class: `tile tile--${t.state}`, href, rel: 'noopener noreferrer', 'aria-label': `${t.short}: ${word}` },
+    h('span', { class: 'tile-i' }, icon(STATE_ICON[t.state])),
+    h('span', { class: 'tile-n' }, t.short));
+  return h('li', { 'data-row-key': t.id }, tip(a, lines.filter(Boolean).join('\n')));
 }
 
-function laneCard(c) {
-  const pr = c.prs.length ? c.prs[c.prs.length - 1] : null;
-  const ref = pr != null ? `#${pr}` : c.issue != null ? `#${c.issue}` : c.label;
-  const href = pr != null ? `${GH}/${REPO}/pull/${pr}` : c.issue != null ? `${GH}/${REPO}/issues/${c.issue}` : null;
-  const lines = [href ? `View ${pr != null ? 'PR' : 'issue'} ${ref} on GitHub` : 'Show the timeline'];
-  lines.push(c.kind === 'task' ? `Task ${c.label}` : c.label);
-  if (c.issue != null && pr != null) lines.push(`Issue #${c.issue}`);
-  if (c.prs.length > 1) lines.push(`PRs ${c.prs.map((n) => `#${n}`).join(', ')}`);
-  const run = [c.workflow, c.attempt != null ? `attempt ${c.attempt}` : null, c.model].filter(Boolean).join(' · ');
-  if (run) lines.push(run);
-  for (const t of c.tags) lines.push(t.title ? `${t.text}: ${t.title}` : t.text);
-  if (c.enteredAt != null) lines.push(`In this stage for ${formatDuration(now() - c.enteredAt)}`);
-  const main = href ? link(href, ref) : h('button', { type: 'button', class: 'linklike', onclick: () => showTimeline(c.key) }, ref);
-  return h('div', { class: 'task', 'data-row-key': c.key },
-    tip(main, lines.join('\n')),
-    c.tags.map((t) => h('span', { class: `flag tag--${t.tone}`, role: 'img', 'aria-label': t.text }, icon(tagIcon(t)))),
-    c.enteredAt != null ? h('span', { class: 'age-chip' }, clockCell(c.enteredAt, true)) : null);
-}
-
-function renderPipeline() {
-  const pl = pipeline(state.events, { openPrs: openPrSet() });
-  const closedEl = $('pipe-closed');
-  closedEl.hidden = !pl.closed.length;
-  closedEl.replaceChildren(`Closed ${pl.closed.length}`, h('span', { id: 'pipe-closed-tip', class: 'tip-src', hidden: true }, `Closed without merging: ${pl.closed.map((c) => c.label).join(', ')}`));
-  setTip('pipe-info', `One card per task, or per PR without a task, in the lane of its latest stage, with how long it has been there. Icons on a card: needs human, stale contract, failed check, repair, dry-run plan; hover or focus a card for details.\nMerged and Deployed show the latest ${DONE_SHOWN}.\nWIP limit ${DEFAULTS.wipLimit} · review queue cap ${DEFAULTS.humanQueueMax}.`);
-  if (!pl.total) {
-    replaceSection('pipeline', empty(state.noLog ? 'No audit log yet' : 'No tasks or PRs yet'));
-    return;
-  }
-  const lanes = pl.lanes.map((l) => {
-    const n = l.cards.length;
-    const capped = DONE_UI.has(l.key) && n > DONE_SHOWN;
-    const expanded = capped && state.expandedLanes.has(l.key);
-    const shown = capped && !expanded ? l.cards.slice(0, DONE_SHOWN) : l.cards;
-    const more = capped ? tip(h('button', {
-      type: 'button', class: 'more', 'aria-expanded': String(expanded), 'aria-controls': `lane-${l.key}`,
-      onclick: () => {
-        if (state.expandedLanes.has(l.key)) state.expandedLanes.delete(l.key);
-        else state.expandedLanes.add(l.key);
-        safe('pipeline', renderPipeline); // restores focus to this button
-      },
-    }, expanded ? 'Fewer' : `+${n - DONE_SHOWN}`), expanded ? `Show only the latest ${DONE_SHOWN}` : `Show ${n - DONE_SHOWN} more`) : null;
-    return h('div', { class: `lane st-${l.key}${n ? '' : ' lane--empty'}`, role: 'group', 'aria-label': `${l.label}: ${n}` },
-      h('h3', { class: 'lane-h' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('span', { class: 'lane-name' }, SHORT_STAGE[l.key] ?? l.label),
-        // Active lanes show every card and an empty lane shows none, so only done lanes
-        // with cards (capped at the latest few) need a count. The group's label has it.
-        n && DONE_UI.has(l.key) ? h('span', { class: 'n' }, String(n)) : null),
-      l.prStateUnknown ? tip(h('span', { class: 'lane-note', role: 'img', 'aria-label': 'PR state unknown' }, icon('question')), "PR state unknown: the open-PR list couldn't be read, so these PRs may have been closed.") : null,
-      n ? h('div', { class: 'lane-cards', id: `lane-${l.key}` }, shown.map((c) => {
-        try {
-          return laneCard(c);
-        } catch (err) {
-          return h('p', { class: 'problem' }, `Couldn't show this card: ${err?.message ?? err}`);
-        }
-      }), more) : null);
-  });
-  replaceSection('pipeline', h('div', { class: 'lanes-wrap', role: 'region', 'aria-label': 'Pipeline lanes', tabindex: '0', 'data-focus-key': 'table' },
-    h('div', { class: 'lanes' }, lanes)));
-}
-
-function setBar(el) {
-  const since = Number(el.getAttribute('data-bar-since'));
-  const span = Number(el.getAttribute('data-bar-span'));
-  const elapsed = now() - since;
-  withWidth(el, (elapsed / span) * 100);
-  el.classList.toggle('late', elapsed > span / 2);
-}
-
-function renderAgents(m) {
-  const r = m.running;
-  const typical = typicalRunMs(state.events);
-  const wip = isNum(r.wipLimit) ? r.wipLimit : null;
-  // Without run_finished or the controller's task_done in the window, completion is unknown, so a
-  // count of listed attempts would be a guess: show "—" then. With nothing listed, nothing runs.
-  const count = r.available ? r.count : r.rows.length ? null : 0;
-  setTip('agents-info', [
-    `Dispatched tasks in flight (not yet merged, done, handed to a person or cancelled), against the WIP limit${wip == null ? '' : ` of ${wip}`}.`,
-    r.available ? null : "Completion isn't in the log yet (no run_finished or task_done events), so listed attempts are the ones not superseded, merged, escalated or cancelled; some may already have finished.",
-    r.dryRunPlanned ? `${r.dryRunPlanned} dry-run dispatch${r.dryRunPlanned === 1 ? '' : 'es'} planned, not running.` : null,
+function renderBoard(v) {
+  const b = v.board;
+  const mm = state.meta;
+  const legend = $('board-legend');
+  // With every task in one state the "Tasks done" number already says it; the tiles' icons and
+  // labels carry the state either way.
+  const present = TASK_STATES.filter((st) => b.counts[st]);
+  legend.replaceChildren(...(state.loaded && present.length > 1 ? present.map((st) => h('span', { class: `lg lg--${st}` }, icon(STATE_ICON[st]), `${b.counts[st]} ${TASK_STATE_LABELS[st]}`)) : []));
+  setTip('board-info', [
+    'One tile per task of the task map, grouped by its contract area. Select a tile to view its issue on GitHub.',
+    'Done: merged. Running: work started (implement, repair or review agent, checks, merge queue) and not merged, issue open. Needs you: an open needs-human item. Waiting: a dependency not done, or ready for a free slot.',
+    'Drill tasks (drill/*) were fire drills of the factory and are not shown.',
+    mm.status === 'error' ? `Task map unavailable (${mm.error}): showing the tasks seen in the audit log.` : null,
+    mm.missing.length ? `Contracts not read: ${mm.missing.join(', ')}.` : null,
   ].filter(Boolean).join('\n'));
-  const slotCount = Math.max(wip ?? 0, count ?? 0);
-  const line = h('div', { class: 'agents-line' },
-    h('span', { class: 'agents-n' }, `${count ?? '—'} of ${wip ?? '—'} agents running`),
-    h('span', { class: 'slots', 'aria-hidden': 'true' }, Array.from({ length: slotCount }, (_, i) => h('span', {
-      class: `slot${count == null ? ' slot--unknown' : wip != null && i >= wip ? ' slot--over' : i < count ? ' slot--on' : ''}`,
-    }))));
-  if (!r.rows.length) {
-    $('agents').classList.add('panel--compact');
-    replaceSection('agents', line);
+  if (!state.loaded) {
+    replaceSection('board', empty('… Loading'));
     return;
   }
-  $('agents').classList.remove('panel--compact');
-  const cards = r.rows.map((a) => {
-    const repair = a.workflow === 'repair';
-    const bar = typical && a.startedAt != null
-      ? h('div', { class: 'bar', 'aria-hidden': 'true' }, h('i', { 'data-bar-since': String(a.startedAt), 'data-bar-span': String(typical * 2) }))
-      : null;
-    const lines = [
-      [a.task, a.issue != null ? `issue #${a.issue}` : null].filter(Boolean).join(' · ') || 'Attempt',
-      [`${a.workflow}${a.attempt != null ? ` attempt ${a.attempt}` : ''}`, a.state, a.model].filter(Boolean).join(' · '),
-      a.runId != null ? `Run ${a.runId}` : null,
-      a.startedAt != null ? `Started ${new Date(a.startedAt).toISOString().slice(0, 16)}Z` : null,
-      typical ? `Typical run ${formatDuration(typical)}; the bar fills at twice that` : null,
-    ].filter(Boolean).join('\n');
-    const label = a.task ?? (a.issue != null ? `#${a.issue}` : 'attempt');
-    return h('div', { class: 'agent', 'data-row-key': a.key },
-      r.available
-        ? h('span', { class: `spin${repair ? ' spin--repair' : ''}`, role: 'img', 'aria-label': repair ? 'repairing' : 'running' })
-        : h('span', { class: 'agent-unknown', role: 'img', 'aria-label': 'status unknown' }, icon('question')),
-      h('div', { class: 'agent-main' },
-        h('p', { class: 'n1' }, a.task ? subjectButton(`task:${a.task}`, label, lines) : tip(h('span', {}, label), lines),
-          repair ? h('span', { class: 'flag tag--warn', role: 'img', 'aria-label': `repair${a.attempt != null ? ` attempt ${a.attempt}` : ''}` }, icon('refresh')) : null),
-        bar),
-      h('div', { class: 'el' }, clockCell(a.startedAt, true)));
-  });
-  replaceSection('agents', line, h('div', { class: 'agents' }, cards));
-  for (const el of $('agents').querySelectorAll('[data-bar-since]')) setBar(el);
+  if (!b.total) {
+    replaceSection('board', empty(mm.status === 'pending' ? '… Reading the task map' : 'No tasks yet'));
+    return;
+  }
+  replaceSection('board',
+    mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${mm.error}. Showing the tasks seen in the audit log.`) : null,
+    b.groups.map((g, i) => h('div', { class: 'group', role: 'group', 'aria-labelledby': `group-${i}` },
+      h('h3', { class: 'group-h', id: `group-${i}` }, g.label),
+      h('ul', { class: 'tiles' }, g.tasks.map(boardTile)))));
 }
 
-function shortTimeEl(ts) {
-  const ms = parseTime(ts);
-  if (ms == null) return '—';
-  const iso = new Date(ms).toISOString();
-  return h('time', { datetime: iso }, utcDay(ms) === utcDay(now()) ? iso.slice(11, 16) : iso.slice(5, 10));
+// ---------------------------------------------------------------------------
+// Small panels: number + label rows, the detail in each row's tooltip
+
+function stat({ value, label, tipText, level = null, labelFirst = false, key }) {
+  const v = h('b', { class: `stat-v${level ? ` stat-v--${level}` : ''}` }, value);
+  const l = h('span', { class: 'stat-l' }, label);
+  return tip(h('p', { class: 'stat', 'data-row-key': key }, ...(labelFirst ? [l, ' ', v] : [v, ' ', l])), tipText);
 }
+
+const aic = (n) => `${Math.round(n).toLocaleString('en-US')} AIC`;
+
+function costSig(m, v) {
+  return [m.aicToday, v.cost.total, v.cost.perDay, v.taskCost, v.cost.known, v.cost.unattributed, state.chain?.windowStart, state.runs.error, state.runs.waitingForRate];
+}
+
+function renderCost(m, v) {
+  if (!state.loaded) {
+    replaceSection('cost', empty('…'));
+    return;
+  }
+  const a = m.aicToday;
+  const c = v.cost;
+  const why = runsProblem(v);
+  const toDate = state.chain?.windowStart === 'genesis';
+  const wf = AGENT_WORKFLOWS.map((w) => `${w}: ${c.byWorkflow[w].measured} runs, ${aic(c.byWorkflow[w].aic)}`);
+  const days = c.perDay;
+  const spendDays = days.aic.filter((x) => x > 0).length;
+  replaceSection('cost',
+    stat({
+      key: 'today', value: formatUsd(a.total), label: `today, cap ${formatUsd(a.budget)}`, level: a.level === 'ok' ? null : a.level,
+      tipText: [
+        `Today (UTC): ${aic(a.total)} of the ${aic(a.budget)} daily cap (${(a.pct ?? 0).toFixed(1)}%). Amber at ${DEFAULTS.aicAlertPct}%, red at 100%.`,
+        'The cap is policies/budgets.yaml factory_per_day.max_aic, enforced by the controller across all workflows.',
+        a.source === 'spend_snapshot'
+          ? (a.measured == null ? `Measured/reserved split unavailable (the snapshot lists ${a.listed} of ${a.runs ?? '?'} runs).` : `${aic(a.measured)} measured + ${aic(a.reserved)} reserved for runs in flight (${a.runs} runs); snapshot ${relativeTime(parseTime(a.at), now())}.`)
+          : 'No spend snapshot today yet.',
+      ].join('\n'),
+    }),
+    stat({
+      key: 'total', value: c.measuredRuns ? formatUsd(c.total) : '—', label: toDate ? 'to date' : `in ${DAYS} days`,
+      tipText: [
+        c.measuredRuns ? `Total ${toDate ? 'to date' : `in the last ${DAYS} days`}: ${aic(c.total)} over ${plural(c.measuredRuns, 'measured run')} (the latest value per run in the spend snapshots).` : 'No measured runs in the spend snapshots yet.',
+        toDate ? 'The loaded window reaches the start of the audit log.' : `Over the loaded window (the last ${DAYS} days).`,
+        ...(c.known ? [...wf, `Drill tasks: ${aic(c.drillAic)}. Not attributed to a task: ${aic(c.unattributed)} (${plural(c.unattributedRuns, 'run')}).`] : [why]),
+        'The median per task is the "Cost per task" number at the top.',
+        spendDays ? `AIC per UTC day, last ${days.days.length} days: ${days.days.map((d, i) => (days.aic[i] ? `${d.slice(5)} ${Math.round(days.aic[i]).toLocaleString('en-US')}` : null)).filter(Boolean).join(', ')}.` : null,
+      ].filter(Boolean).join('\n'),
+    }),
+  );
+}
+
+function renderQuality(v) {
+  if (!state.loaded) {
+    replaceSection('quality', empty('…'));
+    return;
+  }
+  const q = v.quality;
+  const r = q.repairs;
+  const window = `In the loaded window (last ${DAYS} days); drills (drill/*) left out.`;
+  replaceSection('quality',
+    stat({ key: 'reverts', value: String(q.reverts), label: q.reverts === 1 ? 'revert' : 'reverts', level: q.reverts ? 'warn' : null,
+      tipText: `Merges the factory reverted automatically after main regressed (auto_revert).\n${window}` }),
+    stat({ key: 'escaped', value: String(q.escaped.count), label: q.escaped.count === 1 ? 'escaped defect' : 'escaped defects', level: q.escaped.count ? 'warn' : null,
+      tipText: `Escaped defect: a merge whose post-merge ci on main failed (check_result: push, ci, failure), counted once per commit.${q.escaped.shas.length ? `\nCommits: ${q.escaped.shas.map((s) => s.slice(0, 7)).join(', ')}` : ''}\n${window}` }),
+    stat({ key: 'objections', value: String(q.objections), label: q.objections === 1 ? 'reviewer objection' : 'reviewer objections',
+      tipText: `Hand-offs because the reviewer agent objected (needs_human, reason review_objected).\n${window}` }),
+    stat({ key: 'repairs', labelFirst: true, label: 'Repairs worked:', value: r.rate == null ? '—' : `${Math.round(r.rate * 100)}%`,
+      tipText: `${r.succeeded} of ${r.succeeded + r.failed} repairs worked${r.pending ? `, ${r.pending} pending` : ''}. A repair worked when its task's PR merged afterwards with no needs_human in between.\n${window}` }));
+}
+
+function renderHuman(v) {
+  if (!state.loaded) {
+    replaceSection('human', empty('…'));
+    return;
+  }
+  const x = v.human;
+  replaceSection('human',
+    stat({ key: 'actions', value: String(x.total), label: `actions, ${x.days} days`,
+      tipText: `${plural(x.reviews, 'review')}, ${x.enqueues} PR${x.enqueues === 1 ? '' : 's'} queued to merge by hand${x.other ? `, ${x.other} other` : ''}, in the last ${x.days} days.\nhuman_action events, plus queued events by a person (not a [bot]).` }),
+    stat({ key: 'resolve', value: shortDuration(x.medianResolveMs), label: 'to unblock',
+      tipText: `Median time to unblock a hand-off: from needs_human to the next event that moves the task on (re-dispatch, a person's action, merge, or the task closing).\n${x.resolved} resolved, ${x.unresolved} not yet, in the loaded window; drills left out.` }));
+}
+
+function liveSig(m, v) {
+  return [m.heartbeat.level, v.live, v.board.counts.running];
+}
+
+function renderLive(m, v) {
+  if (!state.loaded) {
+    replaceSection('live', empty('…'));
+    return;
+  }
+  const L = v.live;
+  const hb = m.heartbeat;
+  const level = hb.level === 'ok' ? null : hb.level === 'none' ? 'alert' : hb.level;
+  const lastTip = [
+    L.lastAt == null ? `No controller event in the last ${DAYS} days.` : `Last controller poll: ${L.lastType} event, ${iso(L.lastAt)}.`,
+    hb.ageMin == null ? `No heartbeat in the last ${DAYS} days.` : `Last heartbeat ${formatAge(hb.ageMin)} ago (${hb.at}).`,
+    cadenceLines().heartbeat,
+    `Heartbeat: green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}`,
+    CADENCE_NOTE,
+  ].join('\n');
+  const nextTip = L.mode === 'follow-up'
+    ? `Work is in flight or dispatch is paused by a gate, so the controller's follow-up chain polls again about ${FOLLOW_UP_MIN} min after its last poll (${iso(L.nextAt)}).`
+    : [`Next scheduled (hourly) poll: ${L.nextAt == null ? 'unknown' : iso(L.nextAt)}.`, L.followUpMissed ? `The follow-up poll expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
+      'GitHub\'s cron often runs scheduled jobs hours late on Free plans.', cadenceLines().heartbeat].filter(Boolean).join('\n');
+  replaceSection('live',
+    stat({ key: 'last', labelFirst: true, label: 'Polled', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
+    stat({ key: 'next', labelFirst: true, label: 'Next', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: `Next controller poll expected ${relativeTime(L.nextAt, now())}.\n${nextTip}` }));
+}
+
+function renderRecent(v) {
+  if (!state.loaded) {
+    replaceSection('recent', empty('…'));
+    return;
+  }
+  if (!v.recent.length) {
+    replaceSection('recent', empty('No activity yet'));
+    return;
+  }
+  replaceSection('recent', h('ol', { class: 'recent' }, v.recent.map((r, i) => tip(h('li', { 'data-row-key': `${i}:${r.text}` },
+    h('span', { class: 'recent-t' }, r.text), h('span', { class: 'recent-at' }, timeEl(r.at, { bare: true }))),
+  [`${r.type}${r.task ? ` · ${r.task}` : ''}${r.issue != null ? ` · issue #${r.issue}` : ''}${r.pr != null ? ` · PR #${r.pr}` : ''}`, r.at != null ? iso(r.at) : null].filter(Boolean).join('\n')))));
+}
+
+// ---------------------------------------------------------------------------
+// Folded details: latest checks and where the time goes
 
 const CHECKS_SHOWN = 5;
 
@@ -1258,7 +1372,7 @@ function checkRow(ev, i) {
       tip(runHref ? link(runHref, wf) : h('b', {}, wf), lines),
       h('span', { class: 'chk-on' }, prs.length ? prs.flatMap((n, j) => [j ? ' ' : '', link(`${GH}/${REPO}/pull/${n}`, `#${n}`)])
         : typeof p.event === 'string' ? h('span', { class: 'muted' }, p.event) : '—'),
-      h('span', { class: 'mono muted' }, shortTimeEl(at)));
+      h('span', { class: 'muted' }, timeEl(at)));
   } catch (err) {
     return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
   }
@@ -1266,9 +1380,7 @@ function checkRow(ev, i) {
 
 function renderChecks(m) {
   const passed = m.checks.filter((ev) => ev.payload?.conclusion === 'success').length;
-  $('checks-count').textContent = m.checks.length ? `${passed}/${m.checks.length}` : '';
-  setTip('checks-info', `Newest check runs first: pass or fail, workflow, PR and time (UTC). ${m.checks.length ? `${passed} of ${m.checks.length} passed in ${DAYS} days. ` : ''}Hover or focus a workflow for its run, held-out seed and failure signature.`);
-  $('checks').classList.toggle('panel--compact', !m.checks.length);
+  $('checks-info').textContent = m.checks.length ? `${passed} of ${m.checks.length} passed in ${DAYS} days. Newest first.` : '';
   if (!m.checks.length) {
     replaceSection('checks', empty('No checks yet'));
     return;
@@ -1292,60 +1404,40 @@ const SHORT_STAGE = Object.freeze({
 });
 const INSIGHT_STAGE = Object.freeze({ ...SHORT_STAGE, running: 'Agent running', queued: 'Merge queue', merged: 'Waiting to deploy' });
 
-function stackRow(r, maxMs, isAverage = false) {
+function stackRow(r, maxMs, isMedian = false) {
   const desc = r.segments.map((sg) => `${STAGE_LABELS[sg.stage]} ${formatDuration(sg.ms)}`).join(', ');
   const stack = withWidth(h('div', { class: 'stack', role: 'img', 'aria-label': `${r.label}: ${desc}; total ${formatDuration(r.totalMs)}` },
     r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}` }), (sg.ms / r.totalMs) * 100))),
   (r.totalMs / maxMs) * 100);
-  const lines = `${isAverage ? `Average per task or PR over ${DAYS} days` : r.label}\n${r.segments.map((sg) => `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}`).join('\n')}\nTotal ${formatDuration(r.totalMs)}`;
-  return h('div', { class: `srow${isAverage ? ' srow--avg' : ''}`, 'data-row-key': r.key },
-    h('span', { class: 'srow-label' }, isAverage ? tip(h('b', {}, 'Average'), lines) : subjectButton(r.key, r.label.replace(/^PR /, ''), `Show the timeline\n${lines}`)),
+  const lines = `${isMedian ? `Median per stage over the tasks merged in the last ${MEDIAN_DAYS} days` : r.task}\n${r.segments.map((sg) => `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}${isMedian ? ` (${plural(sg.tasks, 'task')})` : ''}`).join('\n')}\n${isMedian ? 'Sum of the medians' : 'Total'} ${formatDuration(r.totalMs)}`;
+  return h('div', { class: `srow${isMedian ? ' srow--avg' : ''}`, 'data-row-key': r.key },
+    h('span', { class: 'srow-label' }, isMedian ? tip(h('b', {}, 'Median'), lines) : subjectButton(r.key, r.label, `Show the timeline\n${lines}`)),
     h('div', { class: 'track' }, stack),
-    h('span', { class: 'mono muted num' }, compactAge(r.totalMs)));
+    h('span', { class: 'muted num' }, shortDuration(r.totalMs)));
 }
 
 function renderStages(m) {
-  const sb = stageBreakdown(m.stageTimes);
+  const sb = stageSummary(stageTimes(state.events), { now: now(), days: MEDIAN_DAYS });
   const shown = sb.rows.slice(-10);
-  setTip('stages-info', `Time from each stage to the next, per task or PR (first arrival at each stage). Bars share one scale; hover or focus a label for the breakdown.${sb.rows.length > shown.length ? `\nShowing the latest ${shown.length} of ${sb.rows.length}.` : ''}`);
-  $('stages').classList.toggle('panel--compact', !sb.rows.length);
+  $('stages-info').textContent = sb.rows.length
+    ? `Tasks merged in the last ${MEDIAN_DAYS} days${sb.rows.length > shown.length ? `, latest ${shown.length} of ${sb.rows.length}` : ''}. The top bar is the median per stage.`
+    : '';
   if (!sb.rows.length) {
-    replaceSection('stages', empty('No stage data yet'));
+    replaceSection('stages', empty(`No task merged in the last ${MEDIAN_DAYS} days`));
     return;
   }
   const used = STAGES.filter((st) => sb.rows.some((r) => r.segments.some((sg) => sg.stage === st)));
   const ins = sb.insight;
   replaceSection('stages',
-    sb.rows.length > 1 ? stackRow(sb.average, sb.maxMs, true) : null,
+    stackRow(sb.median, sb.maxMs, true),
     shown.map((r) => stackRow(r, sb.maxMs)),
     h('p', { class: 'legend' }, used.map((st) => h('span', {}, h('i', { class: `st-${st}`, 'aria-hidden': 'true' }), SHORT_STAGE[st]))),
-    ins ? tip(h('p', { class: 'insight' }, icon('info'), h('span', {}, `${INSIGHT_STAGE[ins.stage]} is ${Math.round(ins.pct)}% of the time`)),
-      `${ins.label} takes the largest share of the time: ${Math.round(ins.pct)}% of ${formatDuration(ins.totalMs)} measured across ${ins.tasks} task${ins.tasks === 1 ? '' : 's'} and PRs.`) : null);
+    ins ? tip(h('p', { class: 'insight' }, icon('info'), h('span', {}, `${INSIGHT_STAGE[ins.stage]} is ${Math.round(ins.pct)}% of the median`)),
+      `${ins.label} takes the largest median time: ${formatDuration(ins.ms)}, ${Math.round(ins.pct)}% of the summed stage medians over ${plural(ins.tasks, 'task')}.`) : null);
 }
 
-function renderCost(m) {
-  const c = costSummary(m.tokensPerTask, DEFAULTS.perTaskAic);
-  $('cost').classList.toggle('panel--compact', !c.rows.length);
-  if (!c.rows.length) {
-    replaceSection('cost', empty('No cost data yet'));
-    return;
-  }
-  const rows = c.rows.slice(0, 10).map((r) => h('div', { class: 'crow', 'data-row-key': r.task },
-    h('span', { class: 'srow-label' }, subjectButton(`task:${r.task}`, r.task,
-      `Show the timeline\n${fmtInt(Math.round(r.aic))} AIC over ${r.runs} run${r.runs === 1 ? '' : 's'}\nTokens: input ${fmtInt(r.tokens_input)}, output ${fmtInt(r.tokens_output)}, cache ${fmtInt(r.tokens_cache)} (${millions(r.tokens_input + r.tokens_output)} in + out)`)),
-    h('div', { class: 'track' }, withWidth(h('div', { class: `cbar${r.aic > DEFAULTS.perTaskAic ? ' cbar--over' : ''}`, role: 'img', 'aria-label': `${r.task}: ${fmtInt(Math.round(r.aic))} AIC` }), (r.aic / c.maxAic) * 100)),
-    h('span', { class: 'num' }, fmtInt(Math.round(r.aic)))));
-  const total = m.tokensPerTask.total;
-  replaceSection('cost',
-    rows,
-    tip(h('p', { class: `insight${c.overBudget.length ? ' insight--warn' : ''}` }, icon(c.overBudget.length ? 'warn' : 'info'),
-      h('span', {}, `Average ${fmtInt(Math.round(c.avgAic))} AIC`),
-      h('span', {}, `${Math.round(c.pct)}% of budget`),
-      c.overBudget.length ? h('span', {}, `${c.overBudget.length} over budget`) : null),
-    [`Average ${fmtInt(Math.round(c.avgAic))} AIC per task: ${Math.round(c.pct)}% of the ${fmtInt(DEFAULTS.perTaskAic)} AIC per-task budget.`,
-      `Total ${fmtInt(Math.round(total.aic))} AIC over ${total.runs} finished run${total.runs === 1 ? '' : 's'}.`,
-      c.overBudget.length ? `Over budget: ${c.overBudget.join(', ')}.` : null].filter(Boolean).join('\n')));
-}
+// ---------------------------------------------------------------------------
+// Folded details: timeline and audit log
 
 function eventDetail(ev) {
   const p = ev.payload || {};
@@ -1365,6 +1457,10 @@ function eventDetail(ev) {
       return isSha(p.merge_commit_sha) ? `as ${p.merge_commit_sha.slice(0, 7)}` : '';
     case 'run_finished':
       return `${p.model ?? ''} · ${fmtInt(p.aic)} AIC · ${formatDuration(p.duration_ms)}`;
+    case 'spend_snapshot':
+      return `${fmtInt(isNum(p.aic_today) ? Math.round(p.aic_today) : null)} AIC on ${p.day ?? '?'} · ${fmtInt(p.runs_total)} runs`;
+    case 'dispatch_state':
+      return `${p.state ?? '?'}${p.reason && p.reason !== 'none' ? ` (${p.reason})` : ''} · ready ${p.ready ?? '?'}, in flight ${p.in_flight ?? '?'}`;
     default:
       return [p.effect, p.reason].filter((x) => typeof x === 'string').join(': ');
   }
@@ -1430,7 +1526,7 @@ function renderEvents() {
   select.value = state.typeFilter;
   select.disabled = !types.length;
 
-  $('events-sum').textContent = records.length ? `· ${records.length} events` : '';
+  $('events-sum').textContent = records.length ? `${records.length.toLocaleString('en-US')} events in the last ${DAYS} days, newest first.` : '';
   if (!records.length) {
     replaceSection('events', empty(state.noLog ? 'No audit log yet.' : state.loaded ? 'No events in the window.' : 'Loading…'));
     return;

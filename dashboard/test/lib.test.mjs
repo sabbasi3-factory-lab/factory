@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
-  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dailySeries, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
+  CADENCE_NOTE, DEFAULTS, anchorTimes, cadenceText, canonicalize, computeEventSha, dayPaths, deriveMetrics, formatAge, formatDuration, formatHours,
   formatLimit, heartbeatLevel, heartbeatTimes, isPlanOnly, limitsText, listSubjects, observedCadence, parseJsonl, stageTimes, statusSummary,
   subjectLabel, timelineFor, verifyChain,
 } from '../lib.js';
@@ -208,8 +208,10 @@ test('fixture metrics: tiles', () => {
   assert.deepEqual(m.mergedToday, { count: 1, prs: [7] });
   // Factory PRs 6 (reviewed) and 7 (no human action); PR 5 has no task, so it's not a factory PR.
   assert.deepEqual(m.zeroTouch, { merged: 2, untouched: 1, rate: 0.5 });
-  // 312 + 410 today; yesterday's 280 is excluded.
-  assert.equal(m.aicToday.total, 722);
+  // Today's newest spend snapshot: 312 + 95 + 410 measured + 2 x 900 reserved (run_finished adds
+  // up to only 312 + 410 today); yesterday's 280 is excluded.
+  assert.equal(m.aicToday.total, 2617);
+  assert.equal(m.aicToday.source, 'spend_snapshot');
   assert.equal(m.aicToday.level, 'ok');
   assert.deepEqual(m.needsYou.items.map((i) => [i.kind, i.task]), [
     ['needs_human', 'en/time-expression'],
@@ -317,7 +319,7 @@ test('the quiet fixture is current, every hash in it is real, and it is the quie
   assert.equal(m.dryRun, true);
   assert.equal(m.heartbeat.level, 'ok');
   assert.equal(m.running.rows.length, 0);
-  assert.equal(events.filter((e) => e.type === 'merged').length, 10);
+  assert.equal(events.filter((e) => e.type === 'merged').length, 13); // ten owner PRs and three task PRs
   // Heartbeats at the cadence GitHub really delivers: median 2.4 h, worst 7.6 h.
   assert.equal(cadenceText('Heartbeats', observedCadence(heartbeatTimes(events)), 7), 'Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)');
 });
@@ -511,7 +513,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
 
   const fresh = statusSummary({ ...base, heartbeat: hbAt(12) });
   assert.equal(fresh.level, 'ok');
-  assert.equal(fresh.text, 'Data fresh · 46 events · audit head abcdef0 · controller heartbeat ok');
+  assert.equal(fresh.text, 'Data fresh · 54 events · audit head abcdef0 · controller heartbeat ok');
 
   assert.equal(statusSummary({ ...base, heartbeat: hbAt(480) }).level, 'ok');
   const late = statusSummary({ ...base, heartbeat: hbAt(481) });
@@ -539,7 +541,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   const err = statusSummary({ ...base, error: 'GitHub API error (HTTP 502).', heartbeat: hbAt(12) });
   assert.equal(err.level, 'alert');
   assert.match(err.text, /^Problem: GitHub API error \(HTTP 502\)\. Showing the last data loaded · controller heartbeat ok$/);
-  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 46 events · /);
+  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 54 events · /);
 
   assert.equal(formatAge(null), 'unknown');
   assert.equal(formatAge(119.9), '119 min');
@@ -563,11 +565,9 @@ test('AIC today comes from the newest real spend_snapshot (measured + reserved),
   assert.equal(m.aicToday.reserved, 900);
   assert.equal(m.aicToday.runs, 3);
   assert.equal(m.aicToday.at, '2026-10-22T18:42:36Z');
-  // Days without a snapshot fall back to run_finished; the daily series uses each day's snapshot.
+  // Days without a snapshot fall back to run_finished.
   assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.total, 0);
   assert.equal(deriveMetrics(events, { now: at('2026-10-23T00:10:00Z') }).aicToday.source, null);
-  const s = dailySeries(events, { now: at('2026-10-22T19:00:00Z'), days: 2 });
-  assert.deepEqual(s.aic, [31.38, 967.24]);
   // A truncated run list (the controller lists at most 50): the total stands, the split is unavailable.
   const many = Array.from({ length: 50 }, (_, i) => ({ run_id: 100 + i, status: 'measured', aic: 30 }));
   const trunc = deriveMetrics([{ ...snap('2026-10-22T18:59:00Z', 1530, many), payload: { ...snap('2026-10-22T18:59:00Z', 1530, many).payload, runs_total: 51 } }], { now: at('2026-10-22T19:00:00Z') }).aicToday;
