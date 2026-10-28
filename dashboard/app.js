@@ -9,7 +9,7 @@ import {
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
   allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, latestOutcomes, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
-  subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
+  isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -803,7 +803,7 @@ function render({ full = false } = {}) {
   renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
   renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
-  renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.lastAt, v?.cost.agentAic], withMetrics((mm, vv) => renderOutcomes(vv)), full);
+  renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.lastAt, v?.cost.agentCompare], withMetrics((mm, vv) => renderOutcomes(vv)), full);
   renderIf('about', [loaded, v && scoreSig(v), state.partialHistory, state.records.length], withMetrics((mm, vv) => renderAbout(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
   renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
@@ -1122,7 +1122,7 @@ function renderParts(m, v, needs, health) {
 // Scoreboard: five sentences, each with one big number; definitions in the tooltips
 
 function scoreSig(v) {
-  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known,
+  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known, v.cost.spend,
     v.taskCost, v.quality, v.steps.total, state.statics.build, state.statics.drills, state.taskIssues.error, state.taskIssues.map != null,
     v.outcomesSum, v.outcomes && outcomesStale(v.outcomes, now())];
 }
@@ -1157,7 +1157,7 @@ function renderScore(v) {
         : `Start and merge times for these tasks aren't in the audit log. ${partial ?? 'Details explains how speed is measured.'}`),
     scoreItem(costItem({ build: st.build, cost: c, acceptedPrs: os?.real.prs.accepted ?? null }), [
       build ? `Build: one-time sessions to make the factory, as of ${shortDate(build.asOf)}.` : `Build cost unavailable: ${shortError(st.build?.error ?? 'not read yet')}.`,
-      partial ?? (c.known ? `Run: the factory's full agent runs${since ? ` since ${shortDate(since)}` : ''}, at $0.01 per AI credit.` : 'Run: the real and drill split needs gh-aw Outcomes, not available yet.'),
+      c.spend === 'missing' ? 'Run: the agent runs have no cost measurement yet.' : partial ?? (c.known ? `Run: the factory's full agent runs${since ? ` since ${shortDate(since)}` : ''}, at $0.01 per AI credit.` : 'Run: the real and drill split needs gh-aw Outcomes, not available yet.'),
     ].join(' ')),
     scoreItem(handsOffItem(os, steps), os
       ? `gh-aw counts a PR as zero-touch if no person edited it. ${stale ?? partial ?? 'Manual steps outside the PR are counted separately below.'}`
@@ -1207,10 +1207,14 @@ function renderAbout(v) {
       'Counted: a person putting an agent PR in the merge queue, and label changes, pushes or hand-started runs on agent PRs or factory tasks when the log records them.',
       "Not counted: plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared account).",
       steps.total ? `By kind: ${Object.entries(steps.byKind).map(([k, n]) => `${k} ${n}`).join(', ')}.` : null),
+    entry('Repairs', repairSentence(v.quality.repairs), repairSentence(v.quality.drillRepairs, 'Safety drills: '),
+      'A repair fixed the PR when the PR merged next; it was handed to a person when a hand-off came first.'),
     entry('Quality', 'Reverts: merges the factory undid automatically after main broke. Changes blocked: hand-offs because the reviewer agent objected before the merge. Both leave out safety drills.',
       drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}; ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${drills.value.asOf}.` : `Drill record unavailable: ${drills?.error ?? 'not read yet'}.`),
     entry('Data', 'Everything comes from GitHub, read-only: the audit log, the task map and contracts, the task issues and the open PRs. gh-aw Outcomes results arrive in the audit log as outcomes_snapshot events. The build cost and drill record are files published with this page. Every event is re-hashed and its chain checked in your browser.')));
 }
+
+const WORKFLOW_WORD = Object.freeze({ implement: 'coder', repair: 'repair', review: 'reviewer' });
 
 // Details: the gh-aw Outcomes snapshot, as a per-status table (real work vs safety drills).
 function renderOutcomes(v) {
@@ -1227,17 +1231,28 @@ function renderOutcomes(v) {
   const statuses = [...new Set([...OUTCOME_STATUSES, ...Object.keys(s.real.items), ...Object.keys(s.drills.items)])];
   const rows = statuses.map((st) => row(st, h('span', {}, st), String(s.real.prStatus[st] ?? 0), String(s.drills.prStatus[st] ?? 0), String(s.real.items[st] ?? 0), String(s.drills.items[st] ?? 0)));
   const c = v.cost;
-  const ratio = c.agentAic.real > 0 ? (c.total - c.drillAic) / c.agentAic.real : null;
-  const runUrl = `${GH}/${REPO}/actions/runs/${L.snapshot.sourceRunId}`;
+  const ac = c.agentCompare;
+  const ratio = ac.agent > 0 ? ac.full / ac.agent : null;
+  const runUrl = (id) => `${GH}/${REPO}/actions/runs/${id}`;
+  const runs = L.snapshot.runs;
+  // `gh aw outcomes` takes an agent run id: the newest real coder run that opened a PR, else any.
+  const isPr = (r) => r.items.some((x) => x.type === 'create_pull_request');
+  const real = runs.filter((r) => !(r.drill === true || isDrill(r.task)));
+  const example = [...real].reverse().find((r) => r.workflow === 'implement' && isPr(r)) ?? real.at(-1) ?? runs.at(-1);
   replaceSection('outcomes',
     h('p', { class: 'hint' }, `gh-aw Outcomes judges what each agent run produced (PRs, comments, checks): accepted, rejected, pending and so on. Last evaluated `, timeEl(L.snapshot.evaluatedAt),
       L.checkedAt != null ? ['; last checked unchanged ', timeEl(L.checkedAt)] : null, `. gh-aw ${L.snapshot.ghAwVersion ?? '?'}, ${plural(s.real.runs + s.drills.runs, 'run')}.`),
     table('gh-aw Outcomes by status', ['Status', 'Real PRs', 'Drill PRs', 'All real outputs', 'All drill outputs'], rows, { numeric: [1, 2, 3, 4] }),
     h('p', { class: 'hint' }, `Hands-off: ${s.real.zeroTouch} of ${s.real.prs.accepted} accepted real PRs are zero-touch (no person edited them).`),
     h('p', { class: 'hint' }, "gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost.",
-      ratio ? ` For real runs the full cost is about ${ratio.toFixed(2)}× gh-aw's (${Math.round(c.total - c.drillAic).toLocaleString('en-US')} vs ${Math.round(c.agentAic.real).toLocaleString('en-US')} AI credits).` : ''),
-    h('p', { class: 'hint' }, 'Reproduce: ', h('code', {}, `gh aw outcomes ${L.snapshot.sourceRunId}`), ' (the ', link(runUrl, 'snapshot run'), ').',
-      L.ignored ? ` ${plural(L.ignored, 'malformed snapshot')} ignored.` : '', L.snapshot.dropped ? ` ${plural(L.snapshot.dropped, 'malformed entry')} skipped.` : ''));
+      ratio ? ` For real runs the full cost is about ${ratio.toFixed(2)}× gh-aw's (${Math.round(ac.full).toLocaleString('en-US')} vs ${Math.round(ac.agent).toLocaleString('en-US')} AI credits, over the ${ac.runs} of ${plural(ac.of, 'measured real run')} that have both figures).` : ''),
+    example ? h('p', { class: 'hint' }, 'Reproduce for one agent run: ', h('code', {}, `gh aw outcomes ${example.runId}`), ', or ', h('a', { href: '#outcome-runs' }, 'any run id below'), '.') : null,
+    h('p', { class: 'hint' }, 'Collected by the ', link(runUrl(L.snapshot.sourceRunId), 'snapshot run'), '.',
+      L.ignored ? ` ${plural(L.ignored, 'malformed snapshot')} ignored.` : '', L.snapshot.dropped ? ` ${plural(L.snapshot.dropped, 'malformed entry')} skipped.` : ''),
+    h('details', { class: 'fold fold--sub', id: 'outcome-runs-fold' }, h('summary', {}, `Agent runs in the snapshot (${runs.length})`),
+      h('ul', { class: 'recent', id: 'outcome-runs', tabindex: '-1' }, [...runs].reverse().map((r) => h('li', { 'data-row-key': `r${r.runId}` },
+        h('span', { class: 'recent-t' }, link(runUrl(r.runId), String(r.runId)), ` · ${WORKFLOW_WORD[r.workflow] ?? r.workflow}${r.task ? ` · ${shortTaskName(r.task)}` : ''}${r.drill === true || isDrill(r.task) ? ' (drill)' : ''}`),
+        h('span', { class: 'recent-at' }, r.items.map((x) => x.status).join(', ') || 'no outputs'))))));
 }
 
 function renderSteps(v) {

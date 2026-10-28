@@ -335,16 +335,22 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     await page.evaluate("document.getElementById('human-fold').open = false; document.getElementById('details').open = false");
     // Details › Outcomes (gh-aw): the per-status table, freshness, the cost note and how to reproduce.
     const o = await page.evaluate(`(() => {
-      document.getElementById('details').open = true; document.getElementById('outcomes-fold').open = true;
+      document.getElementById('details').open = true; document.getElementById('outcomes-fold').open = true; document.getElementById('about-fold').open = true;
       const el = document.getElementById('outcomes');
-      const out = { text: el.innerText.replace(/\\s+/g, ' '), rows: [...el.querySelectorAll('tbody tr')].map((tr) => [...tr.cells].map((c) => c.innerText.trim())) };
-      document.getElementById('outcomes-fold').open = false; document.getElementById('details').open = false;
+      const out = { about: document.getElementById('about').innerText.replace(/\\s+/g, ' '), runs: el.querySelectorAll('#outcome-runs li').length, text: el.innerText.replace(/\\s+/g, ' '), rows: [...el.querySelectorAll('tbody tr')].map((tr) => [...tr.cells].map((c) => c.innerText.trim())) };
+      document.getElementById('outcomes-fold').open = false; document.getElementById('about-fold').open = false; document.getElementById('details').open = false;
       return out;
     })()`);
     assert.deepEqual(o.rows.slice(0, 3), [['accepted', '2', '0', '2', '0'], ['rejected', '0', '1', '0', '1'], ['pending', '1', '0', '3', '0']]);
     assert.match(o.text, /Last evaluated \d+[smhd] ago; last checked unchanged \d+[smhd] ago\./);
     assert.match(o.text, /gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost\./);
-    assert.match(o.text, /Reproduce: gh aw outcomes 9001 /);
+    // `gh aw outcomes` takes an agent run id (the newest real coder run with a PR), not the collector's.
+    assert.match(o.text, /Reproduce for one agent run: gh aw outcomes 4102, or any run id below\. Collected by the snapshot run\./);
+    assert.match(o.text, /over the 4 of 4 measured real runs that have both figures/);
+    assert.doesNotMatch(o.text, /gh aw outcomes 9001/);
+    assert.equal(o.runs, 7);
+    // Repairs are ours (Outcomes can't see them): plain sentences in Details, drills apart.
+    assert.match(o.about, /Repairs 1 repair: 0 fixed the PR, 1 still running\. Safety drills: No repairs\./);
     assert.match(o.text, /1 malformed snapshot ignored\. 1 malformed entry skipped\./);
     // The run-to-task join is the Outcomes snapshot now: no Actions API request at all.
     const urls = await page.evaluate("performance.getEntriesByType('resource').map((e) => e.name)");

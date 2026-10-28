@@ -1689,8 +1689,16 @@ export function runSpend(events) {
  *
  * Returns { known (a snapshot was given), total, perTask: [{ task, aic, runs }] (non-drill, highest
  * first), drillAic, unattributed, unattributedRuns, perDay: { days, aic }, byWorkflow: { implement,
- * repair, review, unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns, agentAic: { real,
- * drills } (gh-aw's agent-only figures of the same runs) }. `total` is every measured run.
+ * repair, review, unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns, spend, agentCompare }.
+ * `total` is every measured run.
+ *
+ * `spend` says whether the run cost is known: "measured" (some run has a measured cost), "none"
+ * (no real agent run yet, so $0 is a known zero, e.g. a dry run) or "missing" (real agent runs
+ * exist but no spend measurement does: the run cost is unavailable, not $0).
+ *
+ * `agentCompare` sets our full cost against gh-aw's agent-only `aic` for real runs over the SAME
+ * run ids, those with both figures: { full, agent, runs, of } where `of` counts every measured
+ * real run, so `runs < of` means partial coverage.
  */
 export function costJoin(events, outcomeRuns, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
   const { measured } = runSpend(events);
@@ -1703,7 +1711,7 @@ export function costJoin(events, outcomeRuns, { now = Date.now(), days = MEDIAN_
   let drillAic = 0;
   let unattributed = 0;
   let unattributedRuns = 0;
-  const agentAic = { real: 0, drills: 0 };
+  const agentCompare = { full: 0, agent: 0, runs: 0, of: 0 };
   const unknownRunIds = [];
   const end = Date.parse(utcDay(now) + 'T00:00:00Z');
   const dayLabels = [];
@@ -1721,7 +1729,14 @@ export function costJoin(events, outcomeRuns, { now = Date.now(), days = MEDIAN_
     byWorkflow[wf].aic += m.aic;
     if (!run) unknownRunIds.push(id);
     const drill = !!run && (run.drill === true || isDrill(run.task));
-    if (run && isNum(run.aic)) agentAic[drill ? 'drills' : 'real'] += run.aic;
+    if (!drill) {
+      agentCompare.of++;
+      if (run && isNum(run.aic)) {
+        agentCompare.full += m.aic;
+        agentCompare.agent += run.aic;
+        agentCompare.runs++;
+      }
+    }
     if (drill) drillAic += m.aic;
     else if (run && isStr(run.task)) {
       const row = perTask.get(run.task) ?? perTask.set(run.task, { task: run.task, aic: 0, runs: 0 }).get(run.task);
@@ -1743,8 +1758,14 @@ export function costJoin(events, outcomeRuns, { now = Date.now(), days = MEDIAN_
     byWorkflow,
     unknownRunIds,
     measuredRuns: measured.size,
-    agentAic,
+    spend: measured.size ? 'measured' : realAgentRuns(events) ? 'missing' : 'none',
+    agentCompare,
   };
+}
+
+/** How many real (not dry-run) agent runs the controller started: dispatches of any agent. */
+export function realAgentRuns(events) {
+  return (events || []).filter((ev) => ev && AGENT_EVENTS.has(ev.type) && !isPlanOnly(ev)).length;
 }
 
 /** Median AIC over the given (done) tasks that have attributed cost: { medianAic, count }. */
@@ -1757,9 +1778,9 @@ export function medianTaskCost(cost, taskIds) {
 // --- Quality and human touch ---------------------------------------------------------
 
 /**
- * Quality over the loaded window, drills excluded: `reverts`, the real `auto_revert` events, and
- * `objections`, the real `needs_human` with reason "review_objected" (the reviewer agent blocked a
- * change before merge).
+ * Quality, drills excluded: `reverts`, the real `auto_revert` events, and `objections`, the real
+ * `needs_human` with reason "review_objected" (the reviewer agent blocked a change before merge);
+ * plus `repairs` (real work) and `drillRepairs` (safety drills), from repairStats().
  */
 export function qualityStats(events) {
   const list = (events || []).filter((e) => e && typeof e === 'object');
@@ -1772,7 +1793,49 @@ export function qualityStats(events) {
     if (ev.type === 'auto_revert') reverts++;
     if (ev.type === 'needs_human' && ev.payload?.reason === 'review_objected') objections++;
   }
-  return { reverts, objections };
+  const rs = repairStats(list, taskOf);
+  return { reverts, objections, repairs: rs.real, drillRepairs: rs.drills };
+}
+
+/**
+ * Per real `repair_dispatched`: "succeeded" (it fixed the PR) when the task's PR merged next, with
+ * no `needs_human` for the task in between; "failed" (handed to a person) when a `needs_human`
+ * came first; otherwise pending. Real work and safety drills apart; `rate` = succeeded /
+ * (succeeded + failed), null without any.
+ */
+export function repairStats(events, taskOf = null) {
+  const list = (events || []).filter((e) => e && typeof e === 'object');
+  const prTask = taskOf ? null : prTaskMap(list);
+  const of = taskOf ?? ((ev) => (isStr(ev.payload?.task) ? ev.payload.task : prTask.get(ev.payload?.pr) ?? null));
+  const blank = () => ({ total: 0, succeeded: 0, failed: 0, pending: 0, rate: null });
+  const out = { real: blank(), drills: blank() };
+  list.forEach((ev, i) => {
+    if (ev.type !== 'repair_dispatched' || isPlanOnly(ev)) return;
+    const task = of(ev);
+    if (!task) return;
+    let outcome = 'pending';
+    for (let j = i + 1; j < list.length; j++) {
+      const later = list[j];
+      if (of(later) !== task || isPlanOnly(later)) continue;
+      if (later.type === 'needs_human') { outcome = 'failed'; break; }
+      if (later.type === 'merged') { outcome = 'succeeded'; break; }
+    }
+    const r = out[isDrill(task) ? 'drills' : 'real'];
+    r.total++;
+    r[outcome]++;
+  });
+  for (const r of Object.values(out)) r.rate = r.succeeded + r.failed ? r.succeeded / (r.succeeded + r.failed) : null;
+  return out;
+}
+
+/** "2 repairs: 1 fixed the PR, 1 was handed to a person, 1 still running." */
+export function repairSentence(r, label = '') {
+  if (!r?.total) return `${label}No repairs.`;
+  const parts = [`${r.succeeded} fixed the PR`];
+  if (r.failed) parts.push(`${r.failed} ${r.failed === 1 ? 'was' : 'were'} handed to a person`);
+  if (r.pending) parts.push(`${r.pending} still running`);
+  const rate = r.rate == null ? '' : ` ${Math.round(r.rate * 100)}% of finished repairs fixed the PR.`;
+  return `${label}${r.total} repair${r.total === 1 ? '' : 's'}: ${parts.join(', ')}.${rate}`;
 }
 
 const isBot = (actor) => /\[bot\]$/.test(String(actor ?? ''));
@@ -2063,14 +2126,19 @@ export function humanSteps(events) {
     const p = ev.payload || {};
     if (ev.type === 'pr_opened' && isNum(p.pr)) authors.set(p.pr, p.author);
     if (isStr(p.task) && isNum(p.issue)) issueTask.set(p.issue, p.task);
-    if (goLive == null && ev.type === 'dispatched' && isStr(p.task) && !isDrill(p.task) && !isPlanOnly(ev)) goLive = parseTime(ev.timestamp);
+    if (ev.type === 'dispatched' && isStr(p.task) && !isDrill(p.task) && !isPlanOnly(ev)) {
+      const t = eventTime(ev);
+      if (t != null && (goLive == null || t < goLive)) goLive = t;
+    }
   }
   const agentPr = (pr) => isNum(pr) && (prTask.has(pr) || isBot(authors.get(pr)));
   const steps = [];
   if (goLive != null) {
     for (const ev of list) {
       const p = ev.payload || {};
-      const t = parseTime(ev.timestamp);
+      // The action's own time (payload `at` / `submitted_at`), as the list shows it, not the
+      // time the controller wrote the record.
+      const t = eventTime(ev);
       if (t == null || t < goLive) continue;
       let kind = null;
       if (ev.type === 'queued' && isStr(p.actor) && !isBot(p.actor) && agentPr(p.pr)) kind = 'enqueue';
@@ -2222,10 +2290,17 @@ function dateSpan(a, b) {
  * validateBuildCost() result; `cost` a costJoin() result: the run total always counts (it's the
  * spend snapshots); the real/drill split and the per-PR cost need the Outcomes snapshot
  * (`cost.known`) and `acceptedPrs`, the real PRs it accepted. Run cost not tied to a task counts
- * as real tasks.
+ * as real tasks. With real agent runs but no spend measurement (`cost.spend` "missing") the run
+ * cost is "not available yet"; with no real run at all it's a known $0.00.
  */
 export function costItem({ build = null, cost = null, acceptedPrs = null } = {}) {
   const b = build?.ok ? build.value : null;
+  if (cost?.spend === 'missing') {
+    // Real agent runs but no spend measurement yet: unavailable, never a $0.00 run cost.
+    return b
+      ? { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build'), SEP, T('running cost not available yet')]], perPr: null }
+      : { key: 'cost', main: [T('Running cost:'), BIG('—'), T('not available yet')], subs: [], perPr: null };
+  }
   const run = cost ? cost.total : null;
   const drills = cost?.drillAic ?? 0;
   const real = cost ? cost.total - drills : null;

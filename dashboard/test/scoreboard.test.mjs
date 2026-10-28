@@ -251,6 +251,10 @@ test('cost: build (one-time) + full run cost, split into real tasks and drills, 
   assert.deepEqual(text(costItem({ build: noBuild, cost: cost(), acceptedPrs: 26 })), ['Running cost: about $16.32', '$11.43 tasks + $4.89 drills · about $0.44 per accepted PR']);
   assert.deepEqual(text(costItem({ build, cost: null })), ['Total cost: about $1,110', '= $1,110 one-time build · running cost not available right now']);
   assert.deepEqual(text(costItem({ build: noBuild, cost: null })), ['Total cost: — not available right now']);
+  // Real agent runs but no spend measurement: unavailable, never $0.00.
+  assert.deepEqual(text(costItem({ build, cost: cost({ known: true, total: 0, drillAic: 0, measuredRuns: 0, spend: 'missing' }), acceptedPrs: 2 })),
+    ['Total cost: about $1,110', '= $1,110 one-time build · running cost not available yet']);
+  assert.deepEqual(text(costItem({ build: noBuild, cost: cost({ total: 0, measuredRuns: 0, spend: 'missing' }) })), ['Running cost: — not available yet']);
   // No measured runs at all (a dry run): the run cost is $0.
   assert.deepEqual(text(costItem({ build, cost: cost({ known: false, total: 0, drillAic: 0, measuredRuns: 0 }) })), ['Total cost: about $1,110', '= $1,110 one-time build + $0.00 running']);
 });
@@ -351,6 +355,36 @@ test('quality: reverts of real work · reviewer blocks · safety drills passed f
 });
 
 // --- lifetime numbers: the whole log, not the 14-day window -------------------------------------
+
+test('cost: spend data is tracked apart from Outcomes; a real run with no measurement is "missing", a dry run a known zero', () => {
+  const real = [ev('dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', issue: 1, attempt: 1 })];
+  const dry = [ev('dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', issue: 1, attempt: 1, dry_run: true, effect: 'dispatch_workflow:implement' })];
+  const snapRun = { runId: 7, workflow: 'implement', task: 'en/a', drill: false, aic: 5, items: [] };
+  assert.equal(costJoin(real, [snapRun]).spend, 'missing', 'Outcomes known, spend missing');
+  assert.equal(costJoin(real, null).spend, 'missing');
+  assert.equal(costJoin(dry, null).spend, 'none');
+  assert.equal(costJoin([], null).spend, 'none');
+  const measured = [...real, ev('spend_snapshot', '2026-10-27T11:00:00Z', { day: '2026-10-27', aic_today: 8, runs: [{ run_id: 7, aic: 8, status: 'measured' }], runs_total: 1 })];
+  assert.equal(costJoin(measured, null).spend, 'measured', 'spend known without Outcomes');
+  assert.equal(text(costItem({ build, cost: costJoin(dry, null) }))[1], '= $1,110 one-time build + $0.00 running');
+  assert.equal(text(costItem({ build, cost: costJoin(real, [snapRun]), acceptedPrs: 1 }))[1], '= $1,110 one-time build · running cost not available yet');
+});
+
+test('go-live and the manual steps use each action\'s own time, not the record time', () => {
+  const events = [
+    // Recorded late: the person enqueued at 10:05, the controller wrote it after go-live at 10:20.
+    ev('queued', '2026-10-27T10:20:00Z', { pr: 54, actor: 'owner', at: '2026-10-27T10:05:00Z' }),
+    ev('dispatched', '2026-10-27T10:10:00Z', { task: 'en/a', issue: 31, attempt: 1 }),
+    ev('pr_opened', '2026-10-27T10:12:00Z', { pr: 54, task: 'en/a', author: 'agent[bot]' }),
+    // Recorded before go-live's record order but done after it.
+    ev('human_action', '2026-10-27T10:30:00Z', { action: 'label', pr: 54, reviewer: 'owner', submitted_at: '2026-10-27T10:31:00Z' }),
+    ev('queued', '2026-10-27T10:40:00Z', { pr: 54, actor: 'owner', at: '2026-10-27T10:39:00Z' }),
+  ];
+  const h = humanSteps(events);
+  assert.equal(h.goLive, at('2026-10-27T10:10:00Z'));
+  assert.deepEqual(h.steps.map((x) => [x.kind, new Date(x.at).toISOString()]), [['label', '2026-10-27T10:31:00.000Z'], ['enqueue', '2026-10-27T10:39:00.000Z']],
+    'the 10:05 enqueue came before go-live, although its record is later');
+});
 
 test('lifetime: after an idle fortnight the run cost, speed, go-live and human steps still count the old days', () => {
   const now = at('2026-11-20T12:00:00Z'); // 3+ weeks after the last activity

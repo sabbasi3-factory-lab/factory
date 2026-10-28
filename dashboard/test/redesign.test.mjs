@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
-  parseContract, parseJsonl, parseTaskmap, qualityStats, recentActivity, relativeTime, runSpend, shortDuration, shortTaskName, latestOutcomes, outcomesSummary,
+  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, latestOutcomes, outcomesSummary,
   stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
@@ -265,7 +265,9 @@ test('bug 2, now via gh-aw Outcomes: full cost per task joined by run id; drills
   assert.equal(c.drillAic, 40 + 50);
   assert.deepEqual([c.unattributed, c.unattributedRuns], [30 + 60, 2]);
   assert.deepEqual(c.unknownRunIds, [106]);
-  assert.deepEqual(c.agentAic, { real: 12 + 6 + 13 + 20, drills: 25 });
+  // Full vs gh-aw's agent-only cost over the SAME runs: 106 (no Outcomes entry) is left out of both.
+  assert.deepEqual(c.agentCompare, { full: 20 + 10 + 20 + 30, agent: 12 + 6 + 13 + 20, runs: 4, of: 5 });
+  assert.equal(c.spend, 'measured');
   assert.deepEqual(Object.fromEntries(Object.entries(c.byWorkflow).map(([w, x]) => [w, [x.runs, x.measured, x.aic]])), {
     implement: [3, 3, 20 + 10 + 40], repair: [1, 1, 20], review: [2, 2, 30 + 50], unknown: [0, 1, 60],
   });
@@ -346,8 +348,32 @@ test('quality: reverts and reviewer objections, safety drills left out', () => {
     ev('needs_human', '2026-10-27T20:47:21Z', { task: 'common/forward', reason: 'repeated_signature', issue: 28, pr: 143 }),
     ev('needs_human', '2026-10-27T21:00:00Z', { task: 'common/plan', reason: 'review_objected', effect: 'label' }, true), // a dry-run plan
   ];
-  assert.deepEqual(qualityStats(events), { reverts: 2, objections: 1 });
-  assert.deepEqual(qualityStats([]), { reverts: 0, objections: 0 });
+  const blank = { total: 0, succeeded: 0, failed: 0, pending: 0, rate: null };
+  assert.deepEqual(qualityStats(events), { reverts: 2, objections: 1, repairs: blank, drillRepairs: blank });
+  assert.deepEqual(qualityStats([]), { reverts: 0, objections: 0, repairs: blank, drillRepairs: blank });
+});
+
+test('repairs: fixed the PR, handed to a person or still running; real work and drills apart', () => {
+  const events = [
+    ev('repair_dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', issue: 1, pr: 11, reason: 'ci_failed', run_id: 1 }),
+    ev('merged', '2026-10-27T10:30:00Z', { pr: 11, task: 'en/a' }), // fixed the PR
+    ev('repair_dispatched', '2026-10-27T11:00:00Z', { task: 'common/b', issue: 2, pr: 12, reason: 'ci_failed', run_id: 2 }),
+    ev('needs_human', '2026-10-27T11:30:00Z', { task: 'common/b', issue: 2, pr: 12, reason: 'repeated_signature' }), // handed over
+    ev('merged', '2026-10-27T12:00:00Z', { pr: 12, task: 'common/b' }),
+    ev('repair_dispatched', '2026-10-27T12:10:00Z', { task: 'en/c', issue: 3, pr: 13, reason: 'ci_failed', run_id: 3 }), // pending
+    ev('repair_dispatched', '2026-10-27T12:20:00Z', { task: 'en/d', issue: 4, pr: 14, reason: 'ci_failed' }, true), // a dry-run plan
+    ev('repair_dispatched', '2026-10-27T13:00:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, reason: 'ci_failed', run_id: 4 }),
+    ev('needs_human', '2026-10-27T13:30:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, reason: 'repeated_signature' }),
+  ];
+  const r = repairStats(events);
+  assert.deepEqual(r.real, { total: 3, succeeded: 1, failed: 1, pending: 1, rate: 0.5 });
+  assert.deepEqual(r.drills, { total: 1, succeeded: 0, failed: 1, pending: 0, rate: 0 });
+  assert.deepEqual(qualityStats(events).repairs, r.real);
+  assert.equal(repairSentence(r.real), '3 repairs: 1 fixed the PR, 1 was handed to a person, 1 still running. 50% of finished repairs fixed the PR.');
+  assert.equal(repairSentence({ total: 2, succeeded: 1, failed: 1, pending: 0, rate: 0.5 }), '2 repairs: 1 fixed the PR, 1 was handed to a person. 50% of finished repairs fixed the PR.');
+  assert.equal(repairSentence(r.drills, 'Safety drills: '), 'Safety drills: 1 repair: 0 fixed the PR, 1 was handed to a person. 0% of finished repairs fixed the PR.');
+  assert.equal(repairSentence({ total: 0 }, 'Safety drills: '), 'Safety drills: No repairs.');
+  assert.equal(realAgentRuns(events), 4, 'the dry-run plan is not a real run');
 });
 test('human touch: actions in the last 7 days (reviews, enqueues by a person) and the median time to unblock', () => {
   const now = at('2026-10-28T19:00:00Z');
@@ -473,7 +499,8 @@ test('the meta stand-ins are current, and the busy sample shows every board stat
   assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 296, count: 2 });
   const s = outcomesSummary(outcomes.snapshot);
   assert.deepEqual([s.real.prs, s.real.zeroTouch, s.drills.prs], [{ accepted: 2, rejected: 0, pending: 1, other: 0 }, 1, { accepted: 0, rejected: 1, pending: 0, other: 0 }]);
-  assert.deepEqual(qualityStats(events), { reverts: 0, objections: 0 });
+  const q = qualityStats(events);
+  assert.deepEqual([q.reverts, q.objections, q.repairs.total, q.repairs.pending], [0, 0, 1, 1]);
 });
 
 // --- task issues: done-ness that doesn't depend on the audit window ---------------------------
