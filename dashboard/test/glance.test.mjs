@@ -289,6 +289,9 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     const colorOf = (label) => r.find((t) => t.label === label).color;
     assert.equal(new Set(['iso-date: waiting', 'ordinal: done', 'casual-date: running', 'time-expression: needs you'].map(colorOf)).size, 4);
     assert.equal(r.find((t) => t.label === 'ordinal: done').href, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/41');
+    assert.match(r.find((t) => t.label === 'ordinal: done').tip, /^State: done \(issue closed as completed\)$/m);
+    assert.match(r.find((t) => t.label === 'casual-date: running').tip, /^Issue: open$/m);
+    assert.match(r.find((t) => t.label === 'range: waiting').tip, /^No task issue found$/m);
     const range = r.find((t) => t.label === 'range: waiting');
     assert.match(range.tip, /^en\/range · Port Range$/m);
     assert.match(range.tip, /^Tier: auto$/m);

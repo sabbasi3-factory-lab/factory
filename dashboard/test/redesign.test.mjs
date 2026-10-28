@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
   parseContract, parseJsonl, parseRunTitle, parseTaskmap, qualityStats, recentActivity, relativeTime, runSpend, shortDuration, shortTaskName, snapshotRunIds,
-  stageSummary, stageTimes, stateLine, taskBoard, taskCatalog,
+  stageSummary, stageTimes, stateLine, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
 
@@ -522,4 +522,80 @@ test('the meta stand-ins are current, and the busy sample shows every board stat
   assert.deepEqual([cost.total, cost.unattributed], [1097, 0]);
   assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 343.5, count: 2 });
   assert.equal(qualityStats(events).escaped.count, 1);
+});
+
+// --- task issues: done-ness that doesn't depend on the audit window ---------------------------
+
+const gh = (number, title, body, state = 'open', extra = {}) => ({ number, title, body, state, state_reason: state === 'closed' ? 'completed' : null, closed_at: state === 'closed' ? '2026-10-27T23:49:06Z' : null, ...extra });
+
+test('task issues: the hidden marker names the task, else the title prefix; PRs and other issues are ignored', () => {
+  assert.deepEqual(summarizeTaskIssue(gh(29, 'common/iso-format-parser: Port ISOFormatParser', '<!-- factory-task: common/iso-format-parser -->\nPort it.', 'closed')),
+    { task: 'common/iso-format-parser', number: 29, state: 'closed', stateReason: 'completed', closedAt: at('2026-10-27T23:49:06Z') });
+  // The marker wins over a title that names something else.
+  assert.equal(summarizeTaskIssue(gh(117, 'Drill D8d: the code-health gate (drill/gate-code-health)', '<!-- factory-task: drill/gate-code-health -->')).task, 'drill/gate-code-health');
+  assert.equal(summarizeTaskIssue(gh(37, 'en/extract-year-suffix-refiner: Port ENExtractYearSuffixRefiner', null)).task, 'en/extract-year-suffix-refiner');
+  assert.equal(summarizeTaskIssue(gh(149, 'common/iso-format-parser: Port ISOFormatParser', '<!-- factory-task: common/iso-format-parser -->', 'closed', { pull_request: {} })), null, 'a PR');
+  assert.equal(summarizeTaskIssue(gh(144, 'mutation gate: feed surviving mutants to the repair agent', 'no marker')), null);
+  assert.equal(summarizeTaskIssue(null), null);
+  assert.equal('body' in summarizeTaskIssue(gh(1, 'en/a: Port A', 'x')), false, 'the body is not kept');
+  const map = taskIssueMap([gh(30, 'en/a: Port A', '', 'closed'), gh(31, 'en/a: Port A', ''), gh(5, 'en/b: Port B', '')].map(summarizeTaskIssue));
+  assert.deepEqual([...map].map(([id, x]) => [id, x.number, x.state]), [['en/a', 31, 'open'], ['en/b', 5, 'open']], 'the newest issue for a task wins');
+});
+
+test('task issues take precedence over the audit window: closed as completed is done with no events at all', () => {
+  const catalog = cat('common/a', 'en/b', 'en/c', 'en/d');
+  const issues = taskIssueMap([
+    gh(29, 'common/a: Port A', '<!-- factory-task: common/a -->', 'closed'),
+    gh(30, 'en/b: Port B', '<!-- factory-task: en/b -->', 'closed', { state_reason: 'not_planned' }),
+    gh(31, 'en/c: Port C', '<!-- factory-task: en/c -->'),
+  ].map(summarizeTaskIssue));
+  const b = taskBoard([], catalog, { issues });
+  assert.deepEqual(b.tasks.map((t) => [t.id, t.state, t.reason, t.issue]), [
+    ['common/a', 'done', 'issue closed as completed', 29],
+    ['en/b', 'waiting', 'issue closed, not completed', 30],
+    ['en/c', 'waiting', 'no events in the loaded window', 31],
+    ['en/d', 'waiting', 'no events in the loaded window', null], // no issue: the audit-derived state
+  ]);
+  assert.equal(b.tasks[0].since, at('2026-10-27T23:49:06Z'));
+  assert.deepEqual(b.byTier, { unknown: { done: 1, total: 4 } });
+  // Without the issue list (unreadable): back to the audit log, where nothing is done.
+  assert.equal(taskBoard([], catalog, { issues: null }).counts.done, 0);
+  // A closed-completed issue beats a later merge-less audit trail, and a not-completed one beats a merge.
+  const merged = [ev('merged', '2026-10-27T10:00:00Z', { task: 'en/b', pr: 40, merged_at: '2026-10-27T10:00:00Z' })];
+  assert.equal(taskBoard(merged, catalog, { issues }).tasks[1].state, 'waiting');
+  assert.equal(taskBoard(merged, catalog, {}).tasks[1].state, 'done');
+});
+
+test('task issues: an open issue with a recent merge is done only after the controller\'s task_done', () => {
+  const catalog = cat('en/c');
+  const issues = taskIssueMap([summarizeTaskIssue(gh(31, 'en/c: Port C', '<!-- factory-task: en/c -->'))]);
+  const events = [
+    ev('dispatched', '2026-10-28T10:00:00Z', { task: 'en/c', issue: 31, attempt: 1 }),
+    ev('merged', '2026-10-28T10:30:00Z', { task: 'en/c', pr: 50, merged_at: '2026-10-28T10:30:00Z' }),
+  ];
+  assert.deepEqual(taskBoard(events, catalog, { issues }).tasks.map((t) => [t.state, t.reason]), [['running', 'implement agent running']]);
+  const closedByController = [...events, ev('task_done', '2026-10-28T10:30:05Z', { task: 'en/c', issue: 31, pr: 50, effect: 'close_task', reason: 'task_merged' })];
+  const done = taskBoard(closedByController, catalog, { issues }).tasks[0];
+  assert.deepEqual([done.state, done.since, done.issue], ['done', at('2026-10-28T10:30:05Z'), 31]);
+  // A dry-run task_done is only a plan; a reopening dispatch after it undoes it.
+  const plan = [...events, ev('task_done', '2026-10-28T10:30:05Z', { task: 'en/c', issue: 31, effect: 'close_task' }, true)];
+  assert.equal(taskBoard(plan, catalog, { issues }).tasks[0].state, 'running');
+  const reopened = [...closedByController, ev('dispatched', '2026-10-28T11:00:00Z', { task: 'en/c', issue: 31, attempt: 2 })];
+  assert.equal(taskBoard(reopened, catalog, { issues }).tasks[0].state, 'running');
+});
+
+test('the sample task issues: done from the issues, the newest issue numbers on the tiles', () => {
+  const meta = buildMeta();
+  const events = parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
+  const entries = parseTaskmap(meta.taskmap);
+  const catalog = taskCatalog(entries, new Map(entries.map((e) => [e.id, parseContract(meta.contracts[e.id])])));
+  const issues = taskIssueMap(meta.issues.map(summarizeTaskIssue));
+  assert.equal(issues.size, 8, 'seven tasks and a drill; the PR is ignored');
+  assert.equal(issues.get('en/relative').number, 46, 'title prefix without a marker');
+  const m = deriveMetrics(events, { now: at(FIXTURE_NOW) });
+  const b = taskBoard(events, catalog, { needsItems: m.needsYou.items, issues });
+  assert.deepEqual(b.counts, { done: 2, running: 2, needs: 2, waiting: 2 });
+  assert.deepEqual(b.tasks.filter((t) => t.state === 'done').map((t) => [t.id, t.reason]), [['en/ordinal', 'issue closed as completed'], ['en/weekday-parser', 'issue closed as completed']]);
+  // Without any audit events the done tasks stay done; the rest fall back to "no events".
+  assert.deepEqual(taskBoard([], catalog, { issues }).counts, { done: 2, running: 0, needs: 0, waiting: 6 });
 });

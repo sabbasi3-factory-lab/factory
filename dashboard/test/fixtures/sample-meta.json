@@ -47,5 +47,82 @@
         "display_title": "Review one factory PR"
       }
     ]
-  }
+  },
+  "issues": [
+    {
+      "number": 47,
+      "title": "common/iso-date: Port IsoDate",
+      "body": "<!-- factory-task: common/iso-date -->\nPort `IsoDate`.",
+      "state": "open",
+      "state_reason": null,
+      "closed_at": null
+    },
+    {
+      "number": 46,
+      "title": "en/relative: Port Relative",
+      "body": "Port `Relative`.",
+      "state": "open",
+      "state_reason": null,
+      "closed_at": null
+    },
+    {
+      "number": 45,
+      "title": "en/time-expression: Port TimeExpression",
+      "body": "<!-- factory-task: en/time-expression -->\nPort `TimeExpression`.",
+      "state": "open",
+      "state_reason": null,
+      "closed_at": null
+    },
+    {
+      "number": 44,
+      "title": "en/casual-date: Port CasualDate",
+      "body": "<!-- factory-task: en/casual-date -->\nPort `CasualDate`.",
+      "state": "open",
+      "state_reason": null,
+      "closed_at": null
+    },
+    {
+      "number": 43,
+      "title": "en/month-parser: Port MonthParser",
+      "body": "<!-- factory-task: en/month-parser -->\nPort `MonthParser`.",
+      "state": "open",
+      "state_reason": null,
+      "closed_at": null
+    },
+    {
+      "number": 42,
+      "title": "en/weekday-parser: Port WeekdayParser",
+      "body": "<!-- factory-task: en/weekday-parser -->\nPort `WeekdayParser`.",
+      "state": "closed",
+      "state_reason": "completed",
+      "closed_at": "2026-10-16T09:10:31Z"
+    },
+    {
+      "number": 41,
+      "title": "en/ordinal: Port Ordinal",
+      "body": "<!-- factory-task: en/ordinal -->\nPort `Ordinal`.",
+      "state": "closed",
+      "state_reason": "completed",
+      "closed_at": "2026-10-15T15:31:02Z"
+    },
+    {
+      "number": 40,
+      "title": "drill/repair-ok: Port RepairOk",
+      "body": "<!-- factory-task: drill/repair-ok -->\nPort `RepairOk`.",
+      "state": "closed",
+      "state_reason": "not_planned",
+      "closed_at": "2026-10-15T09:00:00Z"
+    },
+    {
+      "number": 7,
+      "title": "en/weekday-parser: Port WeekdayParser",
+      "body": "<!-- factory-task: en/weekday-parser -->\nPort `WeekdayParser`.",
+      "state": "closed",
+      "state_reason": "completed",
+      "closed_at": "2026-10-16T09:10:00Z",
+      "pull_request": {
+        "url": "x"
+      }
+    }
+  ]
 }

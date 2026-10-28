@@ -1451,6 +1451,42 @@ export function fallbackCatalog(events) {
 
 // --- Task board ---------------------------------------------------------------------
 
+// --- Task issues: GET /issues?state=all&labels=factory:task ---------------------------------
+
+const TASK_MARKER = /<!--\s*factory-task:\s*([^\s>]+?)\s*-->/;
+const TASK_TITLE = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+):\s/;
+
+/**
+ * The fields kept from one task-issue list entry: { task, number, state, stateReason, closedAt },
+ * or null for a PR or an issue that names no task. The task id comes from the body's hidden
+ * marker (<!-- factory-task: <id> -->), else the title prefix ("<id>: Port <Class>"). The body
+ * isn't kept.
+ */
+export function summarizeTaskIssue(issue) {
+  if (!issue || typeof issue !== 'object' || issue.pull_request != null || !isNum(issue.number)) return null;
+  const task = TASK_MARKER.exec(typeof issue.body === 'string' ? issue.body : '')?.[1] ?? TASK_TITLE.exec(typeof issue.title === 'string' ? issue.title : '')?.[1] ?? null;
+  if (!task) return null;
+  return {
+    task,
+    number: issue.number,
+    state: issue.state === 'closed' ? 'closed' : 'open',
+    stateReason: isStr(issue.state_reason) ? issue.state_reason : null,
+    closedAt: parseTime(issue.closed_at),
+  };
+}
+
+/** Task id → { number, state, stateReason, closedAt } from summarized task issues; the newest issue wins. */
+export function taskIssueMap(summaries) {
+  const map = new Map();
+  for (const s of summaries || []) {
+    if (!s?.task) continue;
+    const prev = map.get(s.task);
+    if (!prev || s.number > prev.number) map.set(s.task, { number: s.number, state: s.state, stateReason: s.stateReason, closedAt: s.closedAt });
+  }
+  return map;
+}
+
+
 export const TASK_STATES = Object.freeze(['done', 'running', 'needs', 'waiting']);
 export const TASK_STATE_LABELS = Object.freeze({ done: 'done', running: 'running', needs: 'needs you', waiting: 'waiting' });
 const AGENT_EVENTS = new Set(['dispatched', 'repair_dispatched', 'review_dispatched']);
@@ -1474,11 +1510,17 @@ const STEP_TEXT = {
  *   without a merge, or no events in the loaded window.
  *
  * Dry-run decisions are plans and never start or reopen a task. `since` is when the task
- * entered its state (ms), `issue` the task's issue number from the events.
+ * entered its state (ms), `issue` the task's issue number.
+ *
+ * `issues` (taskIssueMap(), or null when the task-issue list couldn't be read) takes precedence
+ * over the audit window: an issue closed as "completed" is done even with no events loaded; an
+ * issue closed otherwise is not done; while the issue is open, only a `task_done` (the
+ * controller closing it) makes the task done, not a merge alone. Tasks without a known issue keep
+ * the audit-derived state. The issue's number is the tile's link.
  */
-export function taskBoard(events, catalog, { open = null, asOf = null, needsItems = [] } = {}) {
+export function taskBoard(events, catalog, { open = null, asOf = null, needsItems = [], issues = null } = {}) {
   const prTask = prTaskMap(events || []);
-  const info = new Map((catalog || []).map((t) => [t.id, { issue: null, prs: [], pr: null, seen: false, readyAt: null, started: null, doneAt: null, step: null, stepAt: null }]));
+  const info = new Map((catalog || []).map((t) => [t.id, { issue: null, prs: [], pr: null, seen: false, readyAt: null, started: null, doneAt: null, taskDoneAt: null, step: null, stepAt: null }]));
   for (const ev of events || []) {
     if (!ev || typeof ev !== 'object') continue;
     const p = ev.payload || {};
@@ -1492,14 +1534,25 @@ export function taskBoard(events, catalog, { open = null, asOf = null, needsItem
       if (isNum(p.issue) && isStr(p.task)) s.issue = p.issue;
       for (const pr of eventPrs(ev)) if (!s.prs.includes(pr)) s.prs.push(pr);
       if (plan || t == null) continue;
-      if (REOPENS_TASK.has(ev.type) && s.doneAt != null) s.doneAt = null;
+      if (REOPENS_TASK.has(ev.type)) [s.doneAt, s.taskDoneAt] = [null, null];
       if (ev.type === 'ready' || ev.type === 'auto_ready') s.readyAt = t;
       if (AGENT_EVENTS.has(ev.type)) s.started ??= t;
       if (ev.type === 'dispatched') s.pr = null; // a new attempt has no PR yet
       if (isNum(p.pr) && ev.type !== 'merged') s.pr = p.pr;
       if (STEP_TEXT[ev.type]) [s.step, s.stepAt] = [STEP_TEXT[ev.type], t];
       if ((ev.type === 'merged' || ev.type === 'task_done') && s.doneAt == null) s.doneAt = t;
+      if (ev.type === 'task_done') s.taskDoneAt ??= t;
     }
+  }
+  // The task issue, when known, decides done-ness (see above).
+  for (const [id, s] of info) {
+    const iss = issues instanceof Map ? issues.get(id) : null;
+    s.issueState = iss ? (iss.state === 'closed' ? (iss.stateReason === 'completed' ? 'completed' : 'closed') : 'open') : null;
+    if (!iss) continue;
+    s.issue = iss.number;
+    if (s.issueState === 'completed') s.doneAt = iss.closedAt ?? s.doneAt ?? s.taskDoneAt;
+    else if (s.issueState === 'closed') s.doneAt = null;
+    else s.doneAt = s.taskDoneAt;
   }
   const needsByTask = new Map();
   for (const it of needsItems || []) if (isStr(it?.task) && !needsByTask.has(it.task)) needsByTask.set(it.task, it);
@@ -1507,15 +1560,17 @@ export function taskBoard(events, catalog, { open = null, asOf = null, needsItem
 
   const tasks = (catalog || []).map((c) => {
     const s = info.get(c.id);
-    const base = { ...c, issue: s.issue, prs: s.prs.slice(), step: s.step };
+    const base = { ...c, issue: s.issue, prs: s.prs.slice(), step: s.step, issueState: s.issueState };
+    if (s.issueState === 'completed') return { ...base, state: 'done', since: s.doneAt, reason: 'issue closed as completed' };
     if (s.doneAt != null) return { ...base, state: 'done', since: s.doneAt, reason: 'merged' };
     const need = needsByTask.get(c.id);
     if (need) return { ...base, state: 'needs', since: parseTime(need.since), reason: need.reason ?? need.kind ?? null };
-    const closed = s.started != null && isClosedRef({ issue: s.issue, pr: s.pr, at: s.stepAt }, open, asOf);
+    const closed = s.issueState === 'closed' || (s.started != null && isClosedRef({ issue: s.issue, pr: s.pr, at: s.stepAt }, open, asOf));
     if (s.started != null && !closed) return { ...base, state: 'running', since: s.stepAt ?? s.started, reason: s.step };
     const blockedBy = c.dependsOn.filter((d) => !doneIds.has(d));
     let reason;
-    if (closed) reason = 'issue or PR closed without a merge';
+    if (s.issueState === 'closed') reason = 'issue closed, not completed';
+    else if (closed) reason = 'issue or PR closed without a merge';
     else if (blockedBy.length) reason = `waiting on ${blockedBy.map(shortTaskName).join(', ')}`;
     else if (s.readyAt != null) reason = 'ready, waiting for a free slot';
     else if (!s.seen) reason = 'no events in the loaded window';

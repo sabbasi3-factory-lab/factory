@@ -312,6 +312,18 @@ function taskmapYaml(tasks) {
 
 const run = (id, createdAt, title) => ({ id, created_at: createdAt, display_title: title });
 
+// A task-issue list entry as GitHub returns it (only the fields the page reads). `marker: false`
+// leaves the body without the hidden task marker, so the title prefix is used.
+const issue = (number, task, state, closedAt = null, { marker = true, reason = state === 'closed' ? 'completed' : null, pr = false } = {}) => ({
+  number,
+  title: `${task}: Port ${upstreamOf(task)}`,
+  body: `${marker ? `<!-- factory-task: ${task} -->\n` : ''}Port \`${upstreamOf(task)}\`.`,
+  state,
+  state_reason: reason,
+  closed_at: closedAt,
+  ...(pr ? { pull_request: { url: 'x' } } : {}),
+});
+
 export function buildMeta() {
   return {
     taskmap: taskmapYaml(SAMPLE_TASKS),
@@ -327,6 +339,18 @@ export function buildMeta() {
       repair: [run(4103, '2026-10-16T10:00:08Z', 'Repair en/month-parser #43 attempt 2')],
       review: [run(4105, '2026-10-16T08:51:10Z', 'Review one factory PR')],
     },
+    // GET /issues?state=all&labels=factory:task. en/range has no issue (its tile links the contract).
+    issues: [
+      issue(47, 'common/iso-date', 'open'),
+      issue(46, 'en/relative', 'open', null, { marker: false }),
+      issue(45, 'en/time-expression', 'open'),
+      issue(44, 'en/casual-date', 'open'),
+      issue(43, 'en/month-parser', 'open'),
+      issue(42, 'en/weekday-parser', 'closed', '2026-10-16T09:10:31Z'),
+      issue(41, 'en/ordinal', 'closed', '2026-10-15T15:31:02Z'),
+      issue(40, 'drill/repair-ok', 'closed', '2026-10-15T09:00:00Z', { reason: 'not_planned' }),
+      issue(7, 'en/weekday-parser', 'closed', '2026-10-16T09:10:00Z', { pr: true }), // a PR: ignored
+    ],
   };
 }
 
@@ -336,6 +360,7 @@ export function buildQuietMeta() {
     taskmap: taskmapYaml(tasks),
     contracts: Object.fromEntries(tasks.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
     runs: { implement: [], repair: [], review: [] }, // dry run: no agent ran
+    issues: QUIET_TASKS.map(([id, num, , ready, , mergeMin]) => issue(num, id, 'closed', new Date(Date.parse(ready) + mergeMin * 60000 + 10000).toISOString().replace(/\.\d{3}Z$/, 'Z'))),
   };
 }
 

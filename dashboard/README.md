@@ -199,7 +199,15 @@ After changing `make-fixture.mjs`, regenerate the fixtures with
    tier, area, `depends_on`). A failed task map is retried after 5 minutes; meanwhile the board
    shows the tasks seen in the audit log and says the task map is unavailable. A missing contract
    only leaves that task's tier unknown.
-7. It reads the **agent workflow run lists** for the cost join, three API calls with ETags:
+7. It reads the **task issues**, one API call with an ETag:
+   `GET /repos/sabbasi3-factory-lab/chrono-node-rs/issues?state=all&labels=factory:task&per_page=100`.
+   Each issue's task id comes from the hidden `<!-- factory-task: <id> -->` marker in its body,
+   else the title prefix (`<id>: Port <Class>`); PRs are ignored and bodies aren't kept. On load,
+   then at most every 30 minutes, or sooner (at most every 2 minutes) when the audit log shows a
+   new `task_done` or `merged`; only with at least 6 API requests left. If it can't be read, the
+   board falls back to the audit log (the last good list is kept if there is one) and its
+   tooltips say so.
+8. It reads the **agent workflow run lists** for the cost join, three API calls with ETags:
    `GET /repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/{implement,repair,review}.lock.yml/runs?per_page=100`.
    Only when a spend snapshot names a run id the lists don't have yet (each id is looked for
    once), at most every 10 minutes, and only with at least 8 API requests left in the hour.
@@ -208,8 +216,10 @@ After changing `make-fixture.mjs`, regenerate the fixtures with
 
 **Rate limits.** Without a token, GitHub allows 60 API requests an hour per IP, and
 conditional requests that return 304 still count against it (they're only free when
-authenticated). A first load takes about nine (branch, tree, two PR lists, open issues, the
-anchors probe, three run lists); after that the run lists are read only for new runs. The
+authenticated). A first load takes about ten (branch, tree, two PR lists, open issues, the
+anchors probe, task issues, three run lists). In steady state the side reads take about 14 an
+hour (the PR lists and open issues every 15 min, the task issues every 30 min, the run lists
+only for new runs, a few more after merges), and the branch polls are spread over the rest. The
 dashboard spreads the remaining requests over the time left in the rate-limit window: without a
 token that's about one check a minute; with a token it checks every 30 s. The "updated" tooltip and Settings show the requests left and the
 reset time. Hidden tabs don't poll. Raw file downloads don't use the API limit.
@@ -269,7 +279,7 @@ Drill tasks (`drill/*`, the factory's own fire drills) are left out of every tas
 |---|---|
 | Health chip, kill switch | As before: `healthSummary()`, and `factory_enabled` from the latest `heartbeat` |
 | State | `stateLine()`: the newest `dispatch_state` if paused by a gate; otherwise from the board: running tasks, tasks needing you, all done, ready tasks waiting for a slot, tasks waiting on dependencies |
-| Task board | `taskBoard()`: per task of the catalog, **done** after a `merged` or `task_done` not followed by a reopening `ready`, `auto_ready`, `dispatched` or `repair_dispatched`; **needs you** with an open Needs-you item for the task; **running** once real work started (`dispatched`, `repair_dispatched` or `review_dispatched`) and not done, unless its issue or current PR is closed (the closed rule); **waiting** otherwise: a dependency not done, ready but no free slot, not started, closed without a merge, or no events in the loaded window. "Since" is when it entered that state |
+| Task board | `taskBoard()`: per task of the catalog, **done** when its task issue is closed as "completed" (no audit events needed); while the issue is open, only after the controller's `task_done`; an issue closed otherwise is never done. Without a known issue (or when the issue list can't be read): after a `merged` or `task_done` not followed by a reopening `ready`, `auto_ready`, `dispatched` or `repair_dispatched`. The tile links to the task issue; **needs you** with an open Needs-you item for the task; **running** once real work started (`dispatched`, `repair_dispatched` or `review_dispatched`) and not done, unless its issue or current PR is closed (the closed rule); **waiting** otherwise: a dependency not done, ready but no free slot, not started, closed without a merge, or no events in the loaded window. "Since" is when it entered that state |
 | Tasks done | Done tiles over all tiles, and done per tier (from the contracts) |
 | Issue → merged | `issueToMerged()`: per task merged in the last 14 days, from its first real `auto_ready` (else its first real `dispatched`) to its last `merged` (`merged_at`); the median |
 | Cost per task | `costJoin()` + `medianTaskCost()`: each run's latest measured AIC across the real `spend_snapshot` events (a "reserved" entry is a placeholder and never replaces a measurement), joined with the run lists. Implement and repair runs name their task in the title ("Implement <task> #<issue> attempt <n>"); a review run ("Review one factory PR"), or an older untitled implement or repair run ("Implement one factory task"), is matched to the `review_dispatched`, `dispatched` or `repair_dispatched` event it was created at or within 30 min after (nearest pairs first, each event and run once). A task's cost is the sum over its runs; the number is the median over the done tasks with attributed cost, in dollars (1 AIC = $0.01) |
@@ -293,8 +303,9 @@ Drill tasks (`drill/*`, the factory's own fire drills) are left out of every tas
 
 - *Human-tier PRs* and *closed issues or PRs*: v1 events carry neither, so they're read from
   GitHub's open lists (see above).
-- *Tasks done before the loaded window*: a task with no events in the last 14 days shows as
-  waiting ("no events in the loaded window"); load more with `?days=31`.
+- *Running or waiting tasks without events in the window*: done tasks come from their issues,
+  but a task with an open issue and no events in the last 14 days shows as waiting ("no events in
+  the loaded window"); load more with `?days=31`.
 - *Golden pass %, per-job durations (queue wait, run setup, detection) and deploys* need
   outcome events the controller doesn't log yet.
 

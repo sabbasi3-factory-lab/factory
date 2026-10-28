@@ -8,7 +8,7 @@ import {
   fallbackCatalog, formatAge, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, prRef, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, shortTitle, snapshotRunIds, stageSummary, stageTimes, stateLine, statusSummary,
-  subjectLabel, summarizePr, taskBoard, taskCatalog, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
+  subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -55,6 +55,12 @@ const META_RETRY_MS = 5 * 60000;
 // a run that isn't in them yet, at most every 10 min, and only with enough API budget left.
 const RUNS_MIN_MS = 10 * 60000;
 const RUNS_RESERVE = 5;
+// The task issues (one API call, with an ETag): their open/closed state decides which tasks are
+// done, whatever the audit window holds. Read on load, then at most every 30 min, or sooner (but
+// at most every 2 min) when the audit log shows a new task_done or merged.
+const TASK_ISSUES_MAX_AGE_MS = 30 * 60000;
+const TASK_ISSUES_MIN_MS = 2 * 60000;
+const TASK_ISSUES_RESERVE = 5;
 
 const params = new URLSearchParams(location.search);
 const FIXTURE_PARAM = Object.hasOwn(FIXTURES, params.get('fixture') ?? '') ? params.get('fixture') : null;
@@ -98,6 +104,9 @@ const state = {
   meta: { status: 'pending', catalog: null, missing: [], error: null, fetchedAt: null, attemptedAt: null },
   // Agent workflow runs: status 'idle' (not needed yet) | 'ok' | 'error'; lists: workflow -> { etag, runs }.
   runs: { status: 'idle', lists: new Map(), error: null, fetchedAt: null, attemptedAt: null, tried: new Set(), waitingForRate: false },
+  // Task issues: map (task id -> issue) from the last good read, or null; doneMark is the count of
+  // task_done and merged events when it was read, so a new one triggers an early refresh.
+  taskIssues: { map: null, etag: null, items: null, error: null, fetchedAt: null, attemptedAt: null, doneMark: null, truncated: false },
   fixtureMeta: null,
 };
 
@@ -625,6 +634,51 @@ async function maybeRefreshRuns() {
   state.dataVersion++;
 }
 
+const doneMark = () => state.events.filter((e) => e.type === 'task_done' || e.type === 'merged').length;
+
+// Never throws: on failure the last good map stays (and says so), or the board uses the audit log only.
+async function maybeRefreshTaskIssues() {
+  const ti = state.taskIssues;
+  if (FIXTURE) {
+    if (ti.map) return;
+    try {
+      const meta = await loadFixtureMeta();
+      Object.assign(ti, { map: taskIssueMap((meta.issues ?? []).map(summarizeTaskIssue)), error: null, fetchedAt: Date.now(), doneMark: doneMark() });
+    } catch (err) {
+      ti.error = err instanceof Error ? err.message : String(err);
+    }
+    state.dataVersion++;
+    return;
+  }
+  const age = ti.fetchedAt == null ? Infinity : Date.now() - ti.fetchedAt;
+  const newDone = ti.doneMark != null && doneMark() !== ti.doneMark;
+  if (!(ti.map == null || age >= TASK_ISSUES_MAX_AGE_MS || newDone)) return;
+  if (ti.attemptedAt != null && Date.now() - ti.attemptedAt < TASK_ISSUES_MIN_MS) return;
+  if (state.rate && state.rate.remaining < 1 + TASK_ISSUES_RESERVE) return; // try on a later tick
+  ti.attemptedAt = Date.now();
+  try {
+    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+    if (ti.etag && ti.items) headers['If-None-Match'] = ti.etag;
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${API}/repos/${REPO}/issues?state=all&labels=${encodeURIComponent('factory:task')}&per_page=100`, {
+      headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+    });
+    readRate(res);
+    if (res.status !== 304) {
+      if (!res.ok) throw new Error(`task issues: HTTP ${res.status}`);
+      const body = await res.json();
+      if (!Array.isArray(body)) throw new Error('task issues: unexpected response');
+      // Bodies are matched for the task marker and dropped.
+      Object.assign(ti, { items: body.map(summarizeTaskIssue).filter(Boolean), etag: res.headers.get('etag'), truncated: body.length >= 100 });
+    }
+    Object.assign(ti, { map: taskIssueMap(ti.items), error: null, fetchedAt: Date.now(), doneMark: doneMark() });
+  } catch (err) {
+    ti.error = err instanceof Error ? err.message : String(err);
+  }
+  state.dataVersion++;
+}
+
 /** Every listed agent run, or null when the lists haven't been read. */
 function agentRuns() {
   const r = state.runs;
@@ -642,6 +696,7 @@ async function tick() {
       if (!state.loaded) await loadFixture();
       await maybeRefreshVerifier();
       await maybeRefreshMeta();
+      await maybeRefreshTaskIssues();
       await maybeRefreshRuns();
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
@@ -653,6 +708,7 @@ async function tick() {
         await maybeRefreshPrs(state.headSha !== headBefore);
         await maybeRefreshVerifier();
         await maybeRefreshMeta();
+        await maybeRefreshTaskIssues();
         await maybeRefreshRuns();
       }
     }
@@ -697,7 +753,7 @@ function withWidth(el, pct) {
 function buildView(m) {
   const t = now();
   const catalog = state.meta.catalog ?? (state.meta.status === 'error' ? fallbackCatalog(state.events) : []);
-  const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items });
+  const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items, issues: state.taskIssues.map });
   const dispatch = latestDispatchState(state.events);
   const cost = costJoin(state.events, agentRuns(), { now: t, days: MEDIAN_DAYS });
   const doneIds = board.tasks.filter((x) => x.state === 'done').map((x) => x.id);
@@ -758,7 +814,7 @@ function render({ full = false } = {}) {
   const known = FIXTURE || prsKnown();
   renderIf('numbers', [loaded, v && numbersSig(v)], withMetrics((mm, vv) => renderNumbers(vv)), full);
   renderIf('needs', [loaded, state.error, known, needs?.rs, needs?.items.map((i) => [i.key, i.since, i.title, i.reason])], withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))), full);
-  renderIf('board', [loaded, state.meta.status, state.meta.error, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
+  renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
   renderIf('cost', [loaded, v && costSig(m, v)], withMetrics((mm, vv) => renderCost(mm, vv)), full);
   renderIf('quality', [loaded, v?.quality], withMetrics((mm, vv) => renderQuality(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
@@ -1017,7 +1073,7 @@ function numTile({ key, label, iconName, value, sub = null, tipText, level = nul
 }
 
 function numbersSig(v) {
-  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.taskCost, v.cost.known, state.runs.status, state.runs.error, state.meta.status];
+  return [state.taskIssues.error, state.taskIssues.map != null, v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.taskCost, v.cost.known, state.runs.status, state.runs.error, state.meta.status];
 }
 
 function tierSplit(byTier) {
@@ -1057,6 +1113,7 @@ function renderNumbers(v) {
         ...tiers,
         `Also: ${c.running} running, ${c.needs} need you, ${c.waiting} waiting.`,
         'Tasks are the task map\'s entries; drill/* tasks were fire drills and are not counted.',
+        taskIssuesLine(),
       ].join('\n'),
     }),
     numTile({
@@ -1181,6 +1238,7 @@ function boardTile(t) {
     `${t.id}${t.title ? ` · ${t.title}` : ''}`,
     `Tier: ${t.tier ?? 'unknown'}`,
     `State: ${word}${t.reason && t.reason !== 'merged' ? ` (${t.reason})` : ''}`,
+    t.issueState ? `Issue: ${t.issueState === 'completed' ? 'closed as completed' : t.issueState === 'closed' ? 'closed, not completed' : 'open'}` : state.taskIssues.map ? 'No task issue found' : null,
     t.since != null ? `Since ${relativeTime(t.since, now())} (${iso(t.since)})` : null,
     [t.issue != null ? `Issue #${t.issue}` : null, t.prs.length ? `PR ${t.prs.map((n) => `#${n}`).join(', ')}` : null].filter(Boolean).join(' · ') || null,
     t.issue != null ? `View issue #${t.issue} on GitHub` : 'View its contract on GitHub (no issue in the loaded events)',
@@ -1189,6 +1247,15 @@ function boardTile(t) {
     h('span', { class: 'tile-i' }, icon(STATE_ICON[t.state])),
     h('span', { class: 'tile-n' }, t.short));
   return h('li', { 'data-row-key': t.id }, tip(a, lines.filter(Boolean).join('\n')));
+}
+
+/** Where the done states come from, for the tooltips. */
+function taskIssuesLine() {
+  const ti = state.taskIssues;
+  if (ti.map && !ti.error) return `Done = task issue closed as completed (or, while it's open, the controller's task_done). Task issues read ${relativeTime(ti.fetchedAt + state.clockOffset, now())}.${ti.truncated ? ' The list is a full page of 100, so some may be missing: those use the audit log.' : ''}`;
+  if (ti.map) return `Couldn't refresh the task issues (${ti.error}); using the list read ${relativeTime(ti.fetchedAt + state.clockOffset, now())}.`;
+  if (ti.error) return `Task issues unavailable (${ti.error}): done comes from the audit log only (merged or task_done in the last ${DAYS} days).`;
+  return 'Reading the task issues…';
 }
 
 function renderBoard(v) {
@@ -1203,6 +1270,7 @@ function renderBoard(v) {
     'One tile per task of the task map, grouped by its contract area. Select a tile to view its issue on GitHub.',
     'Done: merged. Running: work started (implement, repair or review agent, checks, merge queue) and not merged, issue open. Needs you: an open needs-human item. Waiting: a dependency not done, or ready for a free slot.',
     'Drill tasks (drill/*) were fire drills of the factory and are not shown.',
+    taskIssuesLine(),
     mm.status === 'error' ? `Task map unavailable (${mm.error}): showing the tasks seen in the audit log.` : null,
     mm.missing.length ? `Contracts not read: ${mm.missing.join(', ')}.` : null,
   ].filter(Boolean).join('\n'));
