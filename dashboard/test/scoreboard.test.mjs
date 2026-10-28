@@ -39,11 +39,17 @@ test('plain durations, dates and the earliest spend day', () => {
 // --- build-cost.json and drills.json -------------------------------------------------------------
 
 test('build-cost.json: the committed file is valid; every field is required and checked; extra keys are rejected', () => {
+  // The committed figure changes daily (one-line PRs from the journal), so check it's valid and
+  // self-consistent rather than pinning its values: dollars = AI credits / 100, rounded.
   const file = read('build-cost.json');
-  assert.deepEqual(file, { ai_units: 111000, usd: 1110, as_of: '2026-10-27', source: 'build journal (coordinator + build sessions)' });
-  assert.deepEqual(validateBuildCost(file), { ok: true, value: { aiUnits: 111000, usd: 1110, asOf: '2026-10-27', source: 'build journal (coordinator + build sessions)' } });
+  const committed = validateBuildCost(file);
+  assert.equal(committed.ok, true, committed.error);
+  assert.ok(Math.abs(file.usd - file.ai_units / 100) <= 1, `usd ${file.usd} should be ai_units / 100 (${file.ai_units / 100})`);
+  assert.ok(file.ai_units > 0 && file.as_of >= '2026-10-27', 'a real, current build figure');
+  const sample = { ai_units: 111000, usd: 1110, as_of: '2026-10-27', source: 'build journal (coordinator + build sessions)' };
+  assert.deepEqual(validateBuildCost(sample), { ok: true, value: { aiUnits: 111000, usd: 1110, asOf: '2026-10-27', source: 'build journal (coordinator + build sessions)' } });
   const bad = (patch, msg) => {
-    const r = validateBuildCost({ ...file, ...patch });
+    const r = validateBuildCost({ ...sample, ...patch });
     assert.equal(r.ok, false, JSON.stringify(patch));
     assert.match(r.error, msg);
   };
@@ -54,7 +60,7 @@ test('build-cost.json: the committed file is valid; every field is required and 
   bad({ as_of: '27 Oct 2026' }, /as_of is not a YYYY-MM-DD date/);
   bad({ source: '' }, /source is not a non-empty string/);
   bad({ note: 'x' }, /unexpected note/);
-  const { usd: _usd, ...missing } = file;
+  const { usd: _usd, ...missing } = sample;
   assert.match(validateBuildCost(missing).error, /missing usd/);
   for (const notObject of [null, [], 'x', 3]) assert.deepEqual(validateBuildCost(notObject), { ok: false, error: 'not a JSON object' });
 });
