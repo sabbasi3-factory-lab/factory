@@ -79,7 +79,8 @@ const STEPS = [
   ['2026-10-15T14:50:00Z', { type: 'check_result', workflow: 'ci', run_id: 3003, run_attempt: 1, event: 'pull_request', head_sha: hex('h6'), prs: [6], conclusion: 'success', completed_at: '2026-10-15T14:49:30Z' }],
   ['2026-10-15T14:55:00Z', { type: 'check_result', workflow: 'gates', run_id: 3004, run_attempt: 1, event: 'pull_request', head_sha: hex('h6'), prs: [6], conclusion: 'success', completed_at: '2026-10-15T14:54:31Z', heldout_seed: '17345990012231457' }],
   ['2026-10-15T15:10:00Z', { type: 'human_action', action: 'review', pr: 6, reviewer: OWNER, state: 'commented', submitted_at: '2026-10-15T15:09:12Z' }],
-  ['2026-10-15T15:12:00Z', { type: 'queued', pr: 6, actor: CONTROLLER, at: '2026-10-15T15:11:58Z' }],
+  // The owner puts the agent's PR 6 in the merge queue by hand: one manual step after go-live.
+  ['2026-10-15T15:12:00Z', { type: 'queued', pr: 6, actor: OWNER, at: '2026-10-15T15:11:58Z' }],
   ['2026-10-15T15:30:00Z', { type: 'merged', pr: 6, task: 'en/ordinal', merge_commit_sha: hex('m6'), merged_at: '2026-10-15T15:29:44Z' }],
   ['2026-10-15T15:31:00Z', { type: 'task_done', task: 'en/ordinal', issue: 41, pr: 6, effect: 'close_task', reason: 'task_merged' }],
   ['2026-10-15T15:45:00Z', { type: 'deployed', task: 'en/ordinal', pr: 6, merge_commit_sha: hex('m6'), deployment_id: 5001 }],
@@ -340,6 +341,12 @@ export function buildMeta() {
       repair: [run(4103, '2026-10-16T10:00:08Z', 'Repair en/month-parser #43 attempt 2')],
       review: [run(4105, '2026-10-16T08:51:10Z', 'Review one factory PR')],
     },
+    // build-cost.json and drills.json stand-ins (one drill failed, to show the count is computed).
+    buildCost: { ai_units: 111000, usd: 1110, as_of: '2026-10-15', source: 'sample build journal' },
+    drills: {
+      as_of: '2026-10-15', source: 'docs/JOURNAL.md', defects_found_and_fixed: 1,
+      runs: [{ id: 'D1', result: 'pass', note: 'after 1 manual replay' }, { id: 'D2', result: 'fail', note: 'gate missed' }, { id: 'D3', result: 'pass' }],
+    },
     // GET /issues?state=all&labels=factory:task. en/range has no issue (its tile links the contract).
     issues: [
       issue(47, 'common/iso-date', 'open'),
@@ -361,6 +368,8 @@ export function buildQuietMeta() {
     taskmap: taskmapYaml(tasks),
     contracts: Object.fromEntries(tasks.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
     runs: { implement: [], repair: [], review: [] }, // dry run: no agent ran
+    // No buildCost: the quiet sample shows the "build cost unavailable" path.
+    drills: { as_of: '2026-10-17', source: 'docs/JOURNAL.md', defects_found_and_fixed: 0, runs: [{ id: 'D1', result: 'pass' }] },
     issues: QUIET_TASKS.map(([id, num, , ready, , mergeMin]) => issue(num, id, 'closed', new Date(Date.parse(ready) + mergeMin * 60000 + 10000).toISOString().replace(/\.\d{3}Z$/, 'Z'))),
   };
 }

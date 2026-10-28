@@ -1,8 +1,9 @@
 // The 5-second glance test: word budgets, the one-screen layout and keyboard behaviour measured
 // on the rendered sample pages in headless Chrome. The budgets are checked on both fixtures:
-// ?fixture=1 (a busy factory: two tasks running, two need the owner, two waiting, two done) and
-// ?fixture=quiet (the quiet state: nothing needs the owner, factory off, dry run, all three
-// tasks done, the verifier OK, ten merged owner PRs). No npm dependencies: see
+// ?fixture=1 (a busy factory: two tasks running, two need the owner, two waiting, two done, one
+// manual step, a build cost and a drill record) and ?fixture=quiet (nothing needs the owner,
+// factory off, dry run, all three tasks done, no build cost: the "unavailable" wording). No npm
+// dependencies: see
 // headless.mjs. Word, fold and sentence rules are defined on measureGlance() in
 // glance-measure.mjs. Chrome is found via CHROME_PATH, common Linux names or the macOS
 // app; without it the test is skipped locally and fails in CI (process.env.CI).
@@ -12,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { findChrome, launchChrome, serveDir } from './headless.mjs';
 import { CADENCE_NOTE, anchorTimes, cadenceText, heartbeatTimes, observedCadence, parseAnchors, parseJsonl } from '../lib.js';
-import { FIXTURE_PATH, QUIET_ANCHORS_FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH } from './make-fixture.mjs';
+import { META_FIXTURE_PATH, QUIET_ANCHORS_FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH } from './make-fixture.mjs';
 import { BUDGETS, READY_EXPR, formatDetails, formatMeasurement, measureGlance, measureLayout } from './glance-measure.mjs';
 
 const chrome = findChrome();
@@ -96,44 +97,43 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     });
   }
 
-  test('quiet: the quiet state reads at a glance, and nothing needs you is a green ✓ 0', async () => {
+  test('quiet: the status line and the scoreboard read as plain sentences', async () => {
     await open('quiet');
     await page.setViewport(1440, 900);
     const r = await page.evaluate(`(() => {
-      const text = (id) => document.getElementById(id)?.innerText.trim() ?? null;
-      const panel = document.getElementById('needs-panel');
-      const ok = panel.querySelector('.needs-ok');
-      const stat = (id) => [...document.querySelectorAll('#' + id + ' .stat')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim());
+      const flat = (el) => el?.innerText.replace(/\\s+/g, ' ').trim() ?? null;
       return {
-        chips: ['health', 'kill-chip', 'state-chip', 'dry-badge'].map(text),
-        said: (document.body.innerText.match(/Nothing needs you/g) || []).length,
-        panel: { heading: document.getElementById('needs-h').textContent.trim(), body: text('needs'), clear: panel.classList.contains('needs--clear'),
-          okLabel: ok?.getAttribute('role') === 'img' ? ok.getAttribute('aria-label') : null, tip: !!document.querySelector('#needs .has-tip'),
-          // The ✓ and the 0 are both the "ok" colour, never the amber of a waiting count.
-          green: (() => { const probe = document.createElement('i'); probe.style.color = 'var(--ok)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove();
-            return [ok, panel.querySelector('.needs-n')].every((e) => e && getComputedStyle(e).color === c); })() },
-        numbers: [...document.querySelectorAll('#numbers .ntile')].map((t) => t.innerText.replace(/\\s+/g, ' ').trim()),
+        status: flat(document.querySelector('.glance')),
+        score: [...document.querySelectorAll('#score .score-item')].map((li) => [...li.querySelectorAll('p')].map(flat).join(' / ')),
+        bigs: [...document.querySelectorAll('#score .score-item')].map((li) => li.querySelectorAll('.big').length),
         tiles: [...document.querySelectorAll('#board .tile')].map((t) => [t.getAttribute('aria-label'), t.querySelector('use').getAttribute('href')]),
         groups: [...document.querySelectorAll('#board .group-h')].map((g) => g.textContent.trim()),
-        legend: text('board-legend'),
-        live: stat('live'),
-        cost: stat('cost'),
+        legend: flat(document.getElementById('board-legend')),
+        costTip: document.getElementById(document.querySelector('.score--cost').getAttribute('aria-describedby')).textContent,
+        drillsHref: document.querySelector('.score--quality a')?.getAttribute('href'),
       };
     })()`);
-    assert.deepEqual(r.chips, ['Healthy', 'Factory off', 'Idle: all 3 tasks done', 'Dry run']);
-    assert.equal(r.said, 0, 'the ✓ says "Nothing needs you" to screen readers; no visible sentence repeats it');
-    assert.deepEqual(r.panel, { heading: 'Needs you', body: '0', clear: true, okLabel: 'Nothing needs you', tip: true, green: true });
-    assert.deepEqual(r.numbers, ['Tasks done 3/3 auto 2 · auto-strict 1', 'Issue → merged 14m median, 14 days', 'Cost per task — median']);
+    assert.equal(r.status, 'Healthy · switched off · nothing needs you · Dry run · Sample');
+    assert.deepEqual(r.score, [
+      'Shipped: 3 of 3 tasks / 2 routine + 1 core, ported from JavaScript to Rust',
+      'Speed: about 15 min per task / Oct 15 → Oct 16',
+      'Running cost: about $0.00',
+      'Human effort: 0 manual steps; not live yet',
+      'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge · 1 safety drill passed (0 defects found and fixed)',
+    ]);
+    assert.deepEqual(r.bigs, [1, 1, 1, 1, 1], 'one big number per sentence');
+    assert.match(r.costTip, /^Build cost unavailable: buildCost missing from the sample\.$/m);
+    assert.equal(r.drillsHref, 'https://github.com/sabbasi3-factory-lab/factory/blob/main/docs/JOURNAL.md');
     assert.deepEqual(r.tiles, [
       ['casual-time-parser: done', '#i-ok'], ['month-name-parser: done', '#i-ok'], ['iso-format-parser: done', '#i-ok'],
     ]);
-    assert.deepEqual(r.groups, ['Casual', 'Month names', 'Common parsers']);
-    assert.equal(r.legend, '', 'one state only: the "Tasks done" number says it');
-    // The clock is pinned 12 min after the last event (a heartbeat) and then runs on.
-    assert.match(r.live[0], /^Polled 1[23]m ago$/);
-    assert.match(r.live[1], /^Next ~in 4[78]m$/, 'nothing in flight: the next hourly run');
-    // Dry run: no real spend snapshot, so no measured runs. The window reaches the log's start.
-    assert.deepEqual(r.cost, ['$0.00 today, cap $100', '— to date']);
+    assert.deepEqual(r.groups, ['Casual', 'Months', 'Common parsers']);
+    assert.equal(r.legend, '', 'one state only: the shipped sentence says it');
+    // Switched off is the deliberate safe state: muted, not the alert colour.
+    const colour = await page.evaluate(`(() => { const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+      return [getComputedStyle(document.getElementById('state-part')).color, probe('var(--muted)'), probe('var(--alert)')]; })()`);
+    assert.equal(colour[0], colour[1]);
+    assert.notEqual(colour[0], colour[2]);
   });
 
   test('quiet: the liveness and health tooltips show the observed cadence and the limits', async () => {
@@ -147,8 +147,10 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(vfLine, 'Verifications: median every 2.9 h, longest gap 5.1 h (14 days)');
     const before = await measure(1440, 900);
     const tipOf = (expr) => page.evaluate(`(() => { const el = ${expr}; el.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()`);
+    await page.evaluate("document.getElementById('details').open = true; document.getElementById('live-fold').open = true");
     const polled = await tipOf("document.querySelector('#live .stat')");
     const next = await tipOf("document.querySelectorAll('#live .stat')[1]");
+    await page.evaluate("document.getElementById('live-fold').open = false; document.getElementById('details').open = false");
     const health = await tipOf("document.getElementById('health')");
     await press('Escape');
     for (const [tip, lines] of [
@@ -212,12 +214,14 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
         }
       }
       opened.forEach((d) => { d.open = false; });
-      const outbound = [...document.querySelectorAll('#needs a.btn')].map((a) => a.innerText.trim());
+      const outbound = [...document.querySelectorAll('#needs-part a')].map((a) => [a.innerText.trim(), a.getAttribute('href')]);
       return { out, outbound };
     })()`);
     assert.deepEqual(found.out, []);
-    assert.ok(found.outbound.length > 0, 'the sample Needs-you items have outbound buttons');
-    for (const label of found.outbound) assert.match(label, /^View (PR|issue)$/);
+    assert.deepEqual(found.outbound, [
+      ['#45', 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/45'],
+      ['#46', 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/46'],
+    ], 'what needs you links to its issue');
   });
 
   test('cursors: nothing uses the "help" cursor; tooltip-only elements use the default, clickable ones the pointer', async () => {
@@ -241,22 +245,18 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
   });
 
   for (const fx of FIXTURES) {
-    test(`${fx.name}: layout at 1440x900: one screen, the numbers in a row and every panel above the fold`, async () => {
+    test(`${fx.name}: layout at 1440x900: the status line and the five sentences above the fold, then the board, then Details`, async () => {
       await open(fx.param);
       await page.setViewport(1440, 900);
       const L = await page.call(measureLayout);
       const detail = JSON.stringify(L);
-      assert.equal(L.numbers.length, 4, `three numbers and Needs you: ${detail}`);
-      assert.equal(new Set(L.numbers.map((n) => n.top)).size, 1, `the numbers share a row: ${detail}`);
-      assert.ok(L.board && L.board.bottom <= BUDGETS.foldY, `the task board ends above the fold: ${detail}`);
-      assert.ok(L.tiles > 0, `the board has tiles: ${detail}`);
-      assert.equal(L.minis.length, 5, detail);
-      assert.equal(new Set(L.minis.map((p) => p.top)).size, 1, `the small panels share a row: ${detail}`);
-      for (const p of L.minis) assert.ok(p.bottom <= BUDGETS.foldY, `${p.id} ends above the fold: ${detail}`);
-      assert.ok(L.minis[0].top > L.board.bottom && L.board.top > L.numbers[0].bottom, `numbers, board, panels, top to bottom: ${detail}`);
-      assert.equal(L.folds.length, 4, `four folded sections: ${detail}`);
-      assert.ok(L.folds.every((f) => f.top > L.minis[0].bottom), detail);
-      assert.equal(await page.evaluate("[...document.querySelectorAll('main details')].filter((d) => d.open).length"), 0, 'the details start closed');
+      assert.equal(L.items.length, 5, detail);
+      assert.ok(L.status.bottom <= L.score.top, detail);
+      for (const it of L.items) assert.ok(it.bottom <= BUDGETS.foldY, `every scoreboard sentence is above the fold: ${detail}`);
+      assert.ok(L.board.top > L.score.bottom && L.details.top > L.board.bottom, `scoreboard, board, Details, top to bottom: ${detail}`);
+      assert.ok(L.tiles > 0, detail);
+      assert.equal(await page.evaluate("[...document.querySelectorAll('main details')].filter((d) => d.open).length"), 0, 'Details starts closed');
+      assert.equal(await page.evaluate("document.querySelectorAll('main > section > details').length"), 1, 'one Details fold holds the rest');
     });
 
     test(`${fx.name}: no raw ISO time is visible; times are relative`, async () => {
@@ -264,7 +264,9 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       await page.setViewport(1440, 900);
       const text = await page.evaluate("document.body.innerText");
       assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\b\d{2}:\d{2}(:\d{2})?Z\b/);
-      assert.match(text, /\d+[mhd] ago|just now/);
+      // No jargon on the visible page.
+      assert.doesNotMatch(text, /\bAIC\b|auto-strict|escaped defect|dispatch|heartbeat/i);
+      assert.match(text, /\d+[smhd] ago|just now/);
     });
 
     test(`${fx.name}: sample mode makes no request to GitHub`, async () => {
@@ -294,13 +296,13 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.match(r.find((t) => t.label === 'range: waiting').tip, /^No task issue found$/m);
     const range = r.find((t) => t.label === 'range: waiting');
     assert.match(range.tip, /^en\/range · Port Range$/m);
-    assert.match(range.tip, /^Tier: auto$/m);
+    assert.match(range.tip, /^Tier: routine \(auto: merges by itself once its checks pass\)$/m);
     assert.match(range.tip, /^State: waiting \(waiting on month-parser\)$/m);
     assert.match(r.find((t) => t.label === 'month-parser: running').tip, /^Since \d+[mhd] ago \(2026-10-16T10:00:00Z\)$/m);
     // No issue in the events: the tile links to the task's contract instead.
     assert.equal(r.find((t) => t.label === 'range: waiting').href, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/blob/main/contracts/en/range.yaml');
-    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#board .group-h')].map((g) => g.textContent)"), ['Common parsers', 'Numeric dates', 'Casual', 'Month names', 'Relative']);
-    assert.equal(await page.evaluate("document.getElementById('state-chip').innerText.trim()"), 'Running: 2 tasks');
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#board .group-h')].map((g) => g.textContent)"), ['Common parsers', 'Numeric', 'Casual', 'Months', 'Relative']);
+    assert.match(r.find((t) => t.label === 'ordinal: done').tip, /^Tier: routine \(auto: merges by itself once its checks pass\)$/m);
     assert.equal(await page.evaluate("document.getElementById('board-legend').innerText.replace(/\\s+/g, ' ').trim()"), '2 done 2 running 2 needs you 2 waiting');
     // Keyboard: a tile takes focus and shows its tooltip.
     const tip = await page.evaluate("(() => { document.querySelector('#board .tile').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
@@ -308,28 +310,34 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     await press('Escape');
   });
 
-  test('sample: the key numbers and small panels show their numbers', async () => {
+  test('sample: the status line, the five sentences and the human-steps list', async () => {
     await open('1');
     await page.setViewport(1440, 900);
     const r = await page.evaluate(`(() => {
-      const stat = (id) => [...document.querySelectorAll('#' + id + ' .stat')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim());
+      const flat = (el) => el?.innerText.replace(/\\s+/g, ' ').trim() ?? null;
       return {
-        numbers: [...document.querySelectorAll('#numbers .ntile')].map((t) => t.innerText.replace(/\\s+/g, ' ').trim()),
-        needs: document.querySelector('#needs .needs-n').innerText.trim(),
-        cost: stat('cost'), quality: stat('quality'), human: stat('human'), live: stat('live'),
-        recent: [...document.querySelectorAll('#recent li')].map((li) => li.innerText.replace(/\\s+/g, ' ').trim()),
+        status: flat(document.querySelector('.glance')),
+        score: [...document.querySelectorAll('#score .score-item')].map((li) => [...li.querySelectorAll('p')].map(flat).join(' / ')),
+        running: [...document.querySelectorAll('#state-part a')].map((a) => a.getAttribute('href')),
+        stepsLink: document.querySelector('.score--human a').getAttribute('href'),
       };
     })()`);
-    assert.deepEqual(r.numbers, ['Tasks done 2/8 auto 2 · auto-strict 0', 'Issue → merged 1h 16m median, 14 days', 'Cost per task $3.44 median']);
-    assert.equal(r.needs, '2');
-    assert.deepEqual(r.cost, ['$26.17 today, cap $100', '$10.97 to date']);
-    assert.deepEqual(r.quality, ['0 reverts', '1 escaped defect', '0 reviewer objections', 'Repairs worked: —']);
-    assert.deepEqual(r.human, ['5 actions, 7 days', '— to unblock']);
-    assert.match(r.live[0], /^Polled 1[12]m ago$/);
-    // Two tasks running, but the follow-up poll due 10 min after the last one hasn't come: the next hourly run.
-    assert.match(r.live[1], /^Next ~in 4[78]m$/);
-    // One line per task or PR (its latest event): #9 shows once.
-    assert.deepEqual(r.recent.map((x) => x.replace(/ \d+[mh]$/, '')), ['#47 iso-date ready', '#9 queued by hand', '#46 relative contract changed', '#44 casual-date started', '#43 month-parser repairing']);
+    assert.equal(r.status, 'Healthy · working on 2 tasks: casual-date, month-parser · 2 tasks need you: #45, #46 · Sample');
+    assert.deepEqual(r.running, ['https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/44', 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/43']);
+    assert.deepEqual(r.score, [
+      'Shipped: 2 of 8 tasks / 2 routine + 0 core, ported from JavaScript to Rust',
+      'Speed: about 77 min per task / Oct 15 → Oct 16',
+      'Total cost: about $1,121 / = $1,110 to build the factory (one-time) + $10.97 to run it / $10.97 real tasks (median $3.44 each)',
+      'Human effort after go-live: 1 manual step',
+      'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge · 2 safety drills passed (1 defect found and fixed)',
+    ]);
+    // The link opens Details at the list of steps.
+    assert.equal(r.stepsLink, '#human-steps');
+    await page.evaluate("document.querySelector('.score--human a').click()");
+    await page.waitFor("document.getElementById('details').open && document.getElementById('human-fold').open", { what: 'Details to open at the steps' });
+    assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#human-steps li')].map((li) => li.innerText.replace(/\\s+/g, ' ').replace(/ \\d+[mhd] ago$/, '').trim())"),
+      ['#6 ordinal · put an agent PR in the merge queue']);
+    await page.evaluate("document.getElementById('human-fold').open = false; document.getElementById('details').open = false");
   });
 
   test('tooltips are reachable by Tab, show on focus and hide on Escape', async () => {
@@ -348,16 +356,16 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(await page.evaluate("document.getElementById('health').getAttribute('aria-describedby')"), 'health-tip');
     await press('Escape');
     assert.equal(await page.evaluate("document.getElementById('tip').hidden"), true);
-    // A key number is focusable and its tooltip carries the detail that left the tile.
-    const tileTip = await page.evaluate("(() => { const k = document.querySelector('#numbers .ntile'); k.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
-    assert.match(tileTip ?? '', /^auto: 2 of 7 done$/m);
-    assert.match(tileTip ?? '', /drill\/\* tasks were fire drills/);
+    // A scoreboard sentence is focusable and its tooltip has the definitions.
+    const tileTip = await page.evaluate("(() => { const k = document.querySelector('#score .score-item'); k.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
+    assert.match(tileTip ?? '', /^Routine \(tier auto: merges by itself once its checks pass\): 2 of 7 done\.$/m);
+    assert.match(tileTip ?? '', /Safety drills \(drill\/\*\) are not tasks/);
   });
 
   test('"View all" expands the checks with Enter and collapses with Space, keeping focus', async () => {
     await open('1');
     await page.setViewport(1440, 900);
-    await page.evaluate("document.getElementById('checks-fold').open = true");
+    await page.evaluate("document.getElementById('details').open = true; document.getElementById('checks-fold').open = true");
     const state = () => page.evaluate(`(() => {
       const b = document.querySelector('#checks button.more');
       return { expanded: b?.getAttribute('aria-expanded'), text: b?.innerText.trim(), rows: document.querySelectorAll('#checks li').length,
@@ -369,21 +377,21 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.deepEqual(await state(), { expanded: 'true', text: 'Fewer', rows: 8, focused: true });
     await press(' ');
     assert.deepEqual(await state(), { expanded: 'false', text: 'View all', rows: 5, focused: true });
-    await page.evaluate("document.getElementById('checks-fold').open = false");
+    await page.evaluate("document.getElementById('checks-fold').open = false; document.getElementById('details').open = false");
   });
 
   test('focus returns to the same element after new data re-renders its section', async () => {
     await open('1');
     await page.setViewport(1440, 900);
     const key = await page.evaluate(`(() => {
-      const a = document.querySelector('#needs li:nth-child(2) a.btn');
+      const a = document.querySelectorAll('#score a')[1];
       a.focus();
       window.__glanceOld = a;
       document.getElementById('refresh').click(); // in sample mode this reloads the data
       return a.getAttribute('data-focus-key');
     })()`);
     assert.ok(key, 'the focused link has a focus key');
-    await page.waitFor('document.activeElement !== window.__glanceOld && document.activeElement?.closest("#needs") != null', { timeoutMs: 10000, what: 'the re-render' });
+    await page.waitFor('document.activeElement !== window.__glanceOld && document.activeElement?.closest("#score") != null', { timeoutMs: 10000, what: 'the re-render' });
     assert.equal(await page.evaluate('document.activeElement.getAttribute("data-focus-key")'), key);
     assert.equal(await page.evaluate('window.__glanceOld.isConnected'), false, 'the section really was rebuilt');
   });
@@ -398,7 +406,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       const paused = page.once('Fetch.requestPaused', 30000);
       await page.navigate(`${server.url}index.html?fixture=1`);
       ({ requestId } = await paused);
-      await page.waitFor("document.querySelectorAll('#numbers .ntile').length > 0", { what: 'the first render' });
+      await page.waitFor("document.querySelectorAll('#score .score-item').length > 0", { what: 'the first render' });
       const seen = await page.evaluate(`(() => {
         const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
         const bad = new Set([probe('var(--alert)'), probe('var(--warn)')]);
@@ -414,8 +422,8 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
         }
         return {
           health: document.getElementById('health').innerText.trim(),
-          numbers: [...document.querySelectorAll('#numbers .num-v')].map((v) => v.innerText.trim()),
-          stateChip: document.getElementById('state-chip').hidden,
+          score: document.getElementById('score').innerText.trim(),
+          parts: ['state-part', 'needs-part'].map((id) => document.getElementById(id).hidden),
           tiles: document.querySelectorAll('#board .tile').length,
           ready: document.documentElement.dataset.ready ?? null,
           out,
@@ -423,8 +431,8 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       })()`);
       assert.equal(seen.ready, null, 'still loading');
       assert.equal(seen.health, '… Loading');
-      assert.deepEqual(seen.numbers, ['…', '…', '…']);
-      assert.equal(seen.stateChip, true, 'no state before the data arrives');
+      assert.equal(seen.score, '…');
+      assert.deepEqual(seen.parts, [true, true], 'no state before the data arrives');
       assert.equal(seen.tiles, 0, 'no task states before the data arrives');
       assert.deepEqual(seen.out, [], 'no alert- or warning-coloured elements while loading');
     } finally {
@@ -436,35 +444,33 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(await page.evaluate("document.getElementById('health').innerText.trim()"), 'Healthy');
   });
 
-  test('"Factory off" is neutral grey with its power icon, not red', async () => {
-    // Serve the sample with the kill switch off. (Its hashes no longer match, so the chain
-    // reads as broken; only the kill-switch chip is checked here.)
-    const off = readFileSync(FIXTURE_PATH, 'utf8').replaceAll('"factory_enabled":true', '"factory_enabled":false');
-    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*test/fixtures/sample.jsonl*' }] });
+  test('an unreadable build cost or drill record drops only that part, and the hover says why', async () => {
+    const bad = JSON.parse(readFileSync(META_FIXTURE_PATH, 'utf8'));
+    bad.buildCost = { ...bad.buildCost, usd: -5 };
+    bad.drills = { ...bad.drills, extra: true };
+    await page.send('Fetch.enable', { patterns: [{ urlPattern: '*test/fixtures/sample-meta.json*' }] });
     try {
       const paused = page.once('Fetch.requestPaused', 30000);
       await page.navigate(`${server.url}index.html?fixture=1`);
       const { requestId } = await paused;
       await page.send('Fetch.fulfillRequest', {
-        requestId, responseCode: 200, responseHeaders: [{ name: 'content-type', value: 'text/plain; charset=utf-8' }],
-        body: Buffer.from(off).toString('base64'),
+        requestId, responseCode: 200, responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+        body: Buffer.from(JSON.stringify(bad)).toString('base64'),
       });
       await page.waitFor(READY_EXPR, { timeoutMs: 30000, what: 'the modified sample to render' });
     } finally {
       await page.send('Fetch.disable');
     }
     const r = await page.evaluate(`(() => {
-      const chip = document.getElementById('kill-chip');
-      const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
-      return { text: chip.innerText.trim(), icon: !!chip.querySelector('svg use[href="#i-power"]'), color: getComputedStyle(chip).color,
-        muted: probe('var(--muted)'), alert: probe('var(--alert)'), alertBg: probe('var(--alert-bg)'), bg: getComputedStyle(chip).backgroundColor };
+      const item = (k) => document.querySelector('.score--' + k);
+      const tipOf = (el) => document.getElementById(el.getAttribute('aria-describedby')).textContent;
+      return { cost: [...item('cost').querySelectorAll('p')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim()), costTip: tipOf(item('cost')),
+        quality: item('quality').querySelector('p').innerText.replace(/\\s+/g, ' ').trim(), qualityTip: tipOf(item('quality')) };
     })()`);
-    assert.equal(r.text, 'Factory off');
-    assert.ok(r.icon, 'keeps the power icon');
-    assert.equal(r.color, r.muted, 'neutral grey text');
-    assert.notEqual(r.color, r.alert);
-    assert.notEqual(r.bg, r.alertBg);
-    // Back to the untouched sample for the remaining checks.
+    assert.deepEqual(r.cost, ['Running cost: about $10.97', '$10.97 real tasks (median $3.44 each)']);
+    assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\.$/m);
+    assert.equal(r.quality, 'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge');
+    assert.match(r.qualityTip, /^Safety drills: drills: unexpected extra$/m);
     await open('1', { force: true });
   });
 

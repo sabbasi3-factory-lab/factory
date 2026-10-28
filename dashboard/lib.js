@@ -308,34 +308,36 @@ export const STALE_DATA_MIN = 10; // live data older than this is not fresh
  * GitHub's scheduler really delivers on a Free plan, every 2 to 8 h for hourly jobs, so
  * a normal late run doesn't read as Degraded.
  *
- * `reasons` lists every condition that isn't healthy, worst first, for the tooltip.
+ * `reasons` lists every condition that isn't healthy, worst first, for the tooltip; `problems`
+ * has the same as { level, code, text }, so the status line can say it in plain words.
  */
 export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null, verifier = null, dispatch = null } = {}) {
   if (!loaded && !error) return { level: 'loading', label: HEALTH_LABELS.loading, reasons: ['Loading the audit log'] };
   const found = [];
-  const add = (level, text) => found.push({ level, text });
-  if (noLog) add('alert', 'No audit log yet');
-  if (error) add(loaded ? 'warn' : 'alert', `${loaded ? 'Last refresh failed' : "Couldn't load the audit log"}: ${error}`);
-  if (!error && isNum(dataAgeMin) && dataAgeMin > STALE_DATA_MIN) add('warn', `Data is ${formatAge(dataAgeMin)} old`);
+  const add = (level, text, code) => found.push({ level, text, code });
+  if (noLog) add('alert', 'No audit log yet', 'no-log');
+  if (error) add(loaded ? 'warn' : 'alert', `${loaded ? 'Last refresh failed' : "Couldn't load the audit log"}: ${error}`, loaded ? 'refresh-failed' : 'load-failed');
+  if (!error && isNum(dataAgeMin) && dataAgeMin > STALE_DATA_MIN) add('warn', `Data is ${formatAge(dataAgeMin)} old`, 'data-stale');
   if (loaded && !noLog) {
-    if (chain?.status === 'broken') add('alert', `Chain broken at event ${chain.brokenAt}`);
-    else if (chain?.status !== 'verified') add('warn', 'Chain not verified');
+    if (chain?.status === 'broken') add('alert', `Chain broken at event ${chain.brokenAt}`, 'chain-broken');
+    else if (chain?.status !== 'verified') add('warn', 'Chain not verified', 'chain-unverified');
     const level = heartbeat?.level ?? 'unknown';
-    if (level === 'alert') add('alert', `Heartbeat stale (${formatAge(heartbeat.ageMin)})`);
-    else if (level === 'none') add('alert', 'No heartbeat in the window');
-    else if (level === 'warn') add('warn', `Heartbeat late (${formatAge(heartbeat.ageMin)})`);
-    else if (level !== 'ok') add('warn', 'Heartbeat unknown');
+    if (level === 'alert') add('alert', `Heartbeat stale (${formatAge(heartbeat.ageMin)})`, 'hb-stale');
+    else if (level === 'none') add('alert', 'No heartbeat in the window', 'hb-none');
+    else if (level === 'warn') add('warn', `Heartbeat late (${formatAge(heartbeat.ageMin)})`, 'hb-late');
+    else if (level !== 'ok') add('warn', 'Heartbeat unknown', 'hb-unknown');
   }
-  if (verifier && (verifier.level === 'warn' || verifier.level === 'alert')) add(verifier.level, verifierReason(verifier));
+  if (verifier && (verifier.level === 'warn' || verifier.level === 'alert')) add(verifier.level, verifierReason(verifier), `verifier:${verifier.reason}`);
   // Dispatch held by a gate (a dispatchBanner() result) is never "Healthy". The kill switch is
   // the deliberate safe state with its own chip, so it doesn't count.
   const paused = dispatch?.state === 'paused' && dispatch.reason !== 'kill_switch';
-  if (paused) add('warn', dispatch.text);
+  if (paused) add('warn', dispatch.text, 'paused');
   const worst = found.reduce((a, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[a] ? f.level : a), 'ok');
-  const reasons = found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]).map((f) => f.text);
+  found.sort((a, b) => LEVEL_RANK[b.level] - LEVEL_RANK[a.level]);
+  const reasons = found.map((f) => f.text);
   // Paused and nothing else wrong: say "Paused", not "Degraded".
   const label = paused && worst === 'warn' && found.length === 1 ? HEALTH_LABELS.paused : HEALTH_LABELS[worst];
-  return { level: worst, label, reasons };
+  return { level: worst, label, reasons, problems: found.map(({ level, code, text }) => ({ level, code, text })) };
 }
 
 /** One-token age: "45s", "12m", "7h", "3d"; "—" when unknown. */
@@ -346,18 +348,6 @@ export function compactAge(ms) {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
-}
-
-/** At most `maxWords` whitespace-separated words (and 48 characters), with "…" when cut. */
-export function shortTitle(text, maxWords = 5, maxChars = 48) {
-  const words = String(text ?? '').trim().split(/\s+/).filter(Boolean);
-  let out = words.slice(0, maxWords).join(' ');
-  let cut = words.length > maxWords;
-  if (out.length > maxChars) {
-    out = out.slice(0, maxChars - 1).trimEnd();
-    cut = true;
-  }
-  return cut ? `${out.replace(/[\s,.;:–-]+$/, '')}…` : out;
 }
 
 /** "#22" for a PR in the home repo, "factory#3" for one elsewhere. */
@@ -1405,8 +1395,8 @@ export const AREA_LABELS = Object.freeze({
   'common-parsers': 'Common parsers',
   'common-refiners': 'Common refiners',
   'en-casual': 'Casual',
-  'en-month-names': 'Month names',
-  'en-numeric-dates': 'Numeric dates',
+  'en-month-names': 'Months',
+  'en-numeric-dates': 'Numeric',
   'en-relative': 'Relative',
   'en-refiners': 'English refiners',
   other: 'Other',
@@ -1595,26 +1585,6 @@ export function taskBoard(events, catalog, { open = null, asOf = null, needsItem
   return { tasks, counts, byTier, groups, total: tasks.length, readyWaiting: tasks.filter((t) => t.ready).length };
 }
 
-/**
- * The status line's plain-English state: { text, level }. In order: loading; paused by a gate
- * (not the kill switch, which has its own chip); tasks running; tasks needing you; all done;
- * ready tasks waiting for a slot; tasks waiting on dependencies; idle.
- */
-export function stateLine({ loaded = true, board = null, dispatch = null } = {}) {
-  if (!loaded) return { text: 'Loading…', level: 'loading' };
-  const p = dispatch ?? null;
-  if (p?.state === 'paused' && p.reason !== 'kill_switch') {
-    return { text: `Paused: ${p.reason === 'budget_unknown' ? 'spend unknown' : PAUSE_TEXT[p.reason] ?? 'held by a gate'}`, level: 'warn' };
-  }
-  const c = board?.counts ?? null;
-  if (!c || !board.total) return { text: p?.state === 'running' ? 'Running' : 'Idle: no tasks yet', level: 'info' };
-  if (c.running) return { text: `Running: ${plural(c.running, 'task')}`, level: 'info' };
-  if (c.needs) return { text: `Waiting on you: ${plural(c.needs, 'task')}`, level: 'warn' };
-  if (c.done === board.total) return { text: `Idle: all ${board.total} tasks done`, level: 'ok' };
-  if (board.readyWaiting) return { text: `Waiting: ${plural(board.readyWaiting, 'task')} ready`, level: 'info' };
-  return { text: `Waiting: ${plural(c.waiting, 'task')} on dependencies`, level: 'info' };
-}
-
 /** The newest dispatch_state payload with a usable timestamp, or null. */
 export function latestDispatchState(events) {
   let last = null;
@@ -1626,10 +1596,11 @@ export function latestDispatchState(events) {
 
 /**
  * Issue → merged per non-drill task merged in the last `days` days: from the task's first real
- * `auto_ready` (else its first real `dispatched`) to its last `merged`. Returns
+ * `auto_ready` (else its first real `dispatched`) to its last `merged`; `days: Infinity` takes every
+ * merge in the events, and `tasks` (a Set) keeps only those tasks. Returns
  * { medianMs, count, items: [{ task, ms }] }.
  */
-export function issueToMerged(events, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
+export function issueToMerged(events, { now = Date.now(), days = MEDIAN_DAYS, tasks = null } = {}) {
   const from = now - days * DAY_MS;
   const per = new Map();
   const get = (t) => per.get(t) ?? per.set(t, { ready: null, dispatched: null, merged: null }).get(t);
@@ -1648,6 +1619,7 @@ export function issueToMerged(events, { now = Date.now(), days = MEDIAN_DAYS } =
   for (const [task, s] of per) {
     const start = s.ready ?? s.dispatched;
     if (start == null || s.merged == null || s.merged < from || s.merged > now || s.merged < start) continue;
+    if (tasks && !tasks.has(task)) continue;
     items.push({ task, ms: s.merged - start });
   }
   return { medianMs: median(items.map((i) => i.ms)), count: items.length, items };
@@ -1851,63 +1823,22 @@ export function medianTaskCost(cost, taskIds) {
 // --- Quality and human touch ---------------------------------------------------------
 
 /**
- * Quality over the loaded window, drills excluded:
- * - reverts: real `auto_revert` events;
- * - escaped defects: main commits whose post-merge `ci` failed (`check_result` with event
- *   "push", workflow "ci", conclusion "failure"), counted once per commit, leaving out merge
- *   commits of drill tasks;
- * - objections: `needs_human` with reason "review_objected";
- * - repairs: per real `repair_dispatched`, "succeeded" when the task's PR later merged with no
- *   `needs_human` for the task in between, "failed" when a `needs_human` came first, otherwise
- *   pending. `rate` = succeeded / (succeeded + failed), null without any.
+ * Quality over the loaded window, drills excluded: `reverts`, the real `auto_revert` events, and
+ * `objections`, the real `needs_human` with reason "review_objected" (the reviewer agent blocked a
+ * change before merge).
  */
 export function qualityStats(events) {
   const list = (events || []).filter((e) => e && typeof e === 'object');
   const prTask = prTaskMap(list);
   const taskOf = (ev) => (isStr(ev.payload?.task) ? ev.payload.task : prTask.get(ev.payload?.pr) ?? null);
-  const drillShas = new Set();
-  for (const ev of list) {
-    if ((ev.type === 'merged' || ev.type === 'auto_revert') && isDrill(taskOf(ev)) && isStr(ev.payload?.merge_commit_sha)) drillShas.add(ev.payload.merge_commit_sha);
-  }
   let reverts = 0;
   let objections = 0;
-  const escaped = new Set();
   for (const ev of list) {
-    const p = ev.payload || {};
-    if (isPlanOnly(ev)) continue;
-    if (ev.type === 'auto_revert' && !isDrill(taskOf(ev))) reverts++;
-    if (ev.type === 'needs_human' && p.reason === 'review_objected' && !isDrill(taskOf(ev))) objections++;
-    if (ev.type === 'check_result' && p.event === 'push' && p.workflow === 'ci' && p.conclusion === 'failure' && isStr(p.head_sha) && !drillShas.has(p.head_sha)) escaped.add(p.head_sha);
+    if (isPlanOnly(ev) || isDrill(taskOf(ev))) continue;
+    if (ev.type === 'auto_revert') reverts++;
+    if (ev.type === 'needs_human' && ev.payload?.reason === 'review_objected') objections++;
   }
-  let succeeded = 0;
-  let failed = 0;
-  let pending = 0;
-  list.forEach((ev, i) => {
-    if (ev.type !== 'repair_dispatched' || isPlanOnly(ev)) return;
-    const task = taskOf(ev);
-    if (!task || isDrill(task)) return;
-    let outcome = 'pending';
-    for (const later of list.slice(i + 1)) {
-      if (taskOf(later) !== task || isPlanOnly(later)) continue;
-      if (later.type === 'needs_human') {
-        outcome = 'failed';
-        break;
-      }
-      if (later.type === 'merged') {
-        outcome = 'succeeded';
-        break;
-      }
-    }
-    if (outcome === 'succeeded') succeeded++;
-    else if (outcome === 'failed') failed++;
-    else pending++;
-  });
-  return {
-    reverts,
-    escaped: { count: escaped.size, shas: [...escaped] },
-    objections,
-    repairs: { succeeded, failed, pending, rate: succeeded + failed ? succeeded / (succeeded + failed) : null },
-  };
+  return { reverts, objections };
 }
 
 const isBot = (actor) => /\[bot\]$/.test(String(actor ?? ''));
@@ -2048,4 +1979,321 @@ export function recentActivity(events, { limit = 5 } = {}) {
     out.push({ text, at: eventTime(ev), type: ev.type, task, issue, pr });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// The results scoreboard and the status line. Builders return "segments", so the page can render
+// each number and link as its own inline-block run and the tests can read the sentence:
+//   { t: 'text', text } · { t: 'big', text } (the sentence's one big number) · { t: 'num', text }
+//   · { t: 'link', text, href } · { t: 'time', at } (a relative time) · { t: 'sep' } (" · ")
+
+export const SOURCE_REPO = 'sabbasi3-factory-lab/chrono-node-rs';
+export const JOURNAL_URL = 'https://github.com/sabbasi3-factory-lab/factory/blob/main/docs/JOURNAL.md';
+const ghIssue = (n) => `https://github.com/${SOURCE_REPO}/issues/${n}`;
+const ghPull = (n) => `https://github.com/${SOURCE_REPO}/pull/${n}`;
+const T = (text) => ({ t: 'text', text });
+const NUM = (text) => ({ t: 'num', text });
+const BIG = (text) => ({ t: 'big', text });
+const SEP = { t: 'sep' };
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** The plain text of segments (relative times against `now`), as a person reads it. */
+export function segText(segs, now = Date.now()) {
+  let out = '';
+  for (const s of segs || []) {
+    const text = s.t === 'sep' ? '·' : s.t === 'time' ? relativeTime(s.at, now) : s.text;
+    if (!out || /^[,.:;)]/.test(text) || out.endsWith('(')) out += text;
+    else out += ` ${text}`;
+  }
+  return out;
+}
+
+/** "Oct 22" (UTC) from epoch ms or "YYYY-MM-DD"; "—" when unknown. */
+export function shortDate(value) {
+  const ms = typeof value === 'string' ? Date.parse(value.length === 10 ? `${value}T00:00:00Z` : value) : value;
+  if (!isNum(ms)) return '—';
+  const d = new Date(ms);
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+/** A typical duration in plain words: "9 min" up to 90 minutes, then "2.5 hours". */
+export function plainDuration(ms) {
+  if (!isNum(ms) || ms < 0) return '—';
+  const min = ms / 60000;
+  if (min < 90) return `${Math.max(1, Math.round(min))} min`;
+  const h = Math.round((min / 60) * 10) / 10;
+  return `${h} hour${h === 1 ? '' : 's'}`;
+}
+
+/** The earliest day ("YYYY-MM-DD") of a real spend snapshot, or null. */
+export function earliestSpendDay(events) {
+  let first = null;
+  for (const ev of events || []) {
+    const p = ev?.payload;
+    if (ev?.type === 'spend_snapshot' && p?.dry_run === false && isStr(p.day) && /^\d{4}-\d{2}-\d{2}$/.test(p.day) && (first == null || p.day < first)) first = p.day;
+  }
+  return first;
+}
+
+// --- Static files deployed with the page: build-cost.json and drills.json --------------------
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const validDay = (v) => {
+  if (typeof v !== 'string' || !DAY_RE.test(v)) return false;
+  const ms = Date.parse(`${v}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === v;
+};
+const keyProblems = (obj, required, optional = []) => {
+  const keys = Object.keys(obj);
+  const missing = required.filter((k) => !keys.includes(k));
+  const extra = keys.filter((k) => !required.includes(k) && !optional.includes(k));
+  return [missing.length ? `missing ${missing.join(', ')}` : null, extra.length ? `unexpected ${extra.join(', ')}` : null].filter(Boolean);
+};
+const plainObject = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * build-cost.json: exactly { ai_units, usd, as_of, source }. Strict: extra keys are rejected (a
+ * renamed field must not be silently ignored); ai_units and usd are finite numbers ≥ 0, as_of a
+ * real "YYYY-MM-DD" date, source a non-empty string. Returns { ok: true, value: { aiUnits, usd,
+ * asOf, source } } or { ok: false, error }.
+ */
+export function validateBuildCost(data) {
+  if (!plainObject(data)) return { ok: false, error: 'not a JSON object' };
+  const errors = keyProblems(data, ['ai_units', 'usd', 'as_of', 'source']);
+  for (const k of ['ai_units', 'usd']) if (k in data && !(isNum(data[k]) && data[k] >= 0)) errors.push(`${k} is not a number ≥ 0`);
+  if ('as_of' in data && !validDay(data.as_of)) errors.push('as_of is not a YYYY-MM-DD date');
+  if ('source' in data && !isStr(data.source)) errors.push('source is not a non-empty string');
+  if (errors.length) return { ok: false, error: errors.join('; ') };
+  return { ok: true, value: { aiUnits: data.ai_units, usd: data.usd, asOf: data.as_of, source: data.source } };
+}
+
+/**
+ * drills.json: exactly { as_of, source, defects_found_and_fixed, runs }, runs a non-empty list of
+ * { id, result: "pass" | "fail", note? } with unique ids. Strict like build-cost.json. Returns
+ * { ok: true, value: { asOf, source, defects, runs }, passed, total } or { ok: false, error }.
+ */
+export function validateDrills(data) {
+  if (!plainObject(data)) return { ok: false, error: 'not a JSON object' };
+  const errors = keyProblems(data, ['as_of', 'source', 'defects_found_and_fixed', 'runs']);
+  if ('as_of' in data && !validDay(data.as_of)) errors.push('as_of is not a YYYY-MM-DD date');
+  if ('source' in data && !isStr(data.source)) errors.push('source is not a non-empty string');
+  if ('defects_found_and_fixed' in data && !(Number.isSafeInteger(data.defects_found_and_fixed) && data.defects_found_and_fixed >= 0)) errors.push('defects_found_and_fixed is not an integer ≥ 0');
+  if ('runs' in data) {
+    if (!Array.isArray(data.runs) || !data.runs.length) errors.push('runs is not a non-empty list');
+    else {
+      const ids = new Set();
+      data.runs.forEach((r, i) => {
+        if (!plainObject(r)) return errors.push(`runs[${i}] is not an object`);
+        for (const e of keyProblems(r, ['id', 'result'], ['note'])) errors.push(`runs[${i}]: ${e}`);
+        if (!isStr(r.id)) errors.push(`runs[${i}].id is not a non-empty string`);
+        else if (ids.has(r.id)) errors.push(`runs[${i}].id ${r.id} is repeated`);
+        else ids.add(r.id);
+        if (r.result !== 'pass' && r.result !== 'fail') errors.push(`runs[${i}].result is not "pass" or "fail"`);
+        if ('note' in r && typeof r.note !== 'string') errors.push(`runs[${i}].note is not a string`);
+        return null;
+      });
+    }
+  }
+  if (errors.length) return { ok: false, error: errors.join('; ') };
+  const runs = data.runs.map((r) => ({ id: r.id, result: r.result, note: r.note ?? null }));
+  return { ok: true, value: { asOf: data.as_of, source: data.source, defects: data.defects_found_and_fixed, runs }, passed: runs.filter((r) => r.result === 'pass').length, total: runs.length };
+}
+
+// --- Human steps after go-live -------------------------------------------------------------------
+
+const REVIEW_ACTIONS = new Set(['review', 'comment', 'comments', 'commented']);
+const HUMAN_KIND = {
+  enqueue: 'put an agent PR in the merge queue',
+  label: 'changed labels on a factory task',
+  push: 'pushed to an agent PR',
+  dispatch: 'started an agent run by hand',
+};
+
+/**
+ * Hands-on steps a person took after go-live, the first real dispatch of a real (non-drill) task:
+ * - `queued` by an actor that isn't a [bot], on an agent PR (one whose `pr_opened` author is a
+ *   [bot], or that a task event names) → "enqueue";
+ * - `human_action` with an action other than a review or comment, on an agent PR or a factory task
+ *   (a task, or an issue a task event names) → its action ("label", "push", "dispatch", …).
+ * Plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared
+ * account), don't count. Returns { goLive, steps: [{ at, kind, what, pr, issue, task, actor }],
+ * byKind: { kind: n }, total }.
+ */
+export function humanSteps(events) {
+  const list = (events || []).filter((e) => e && typeof e === 'object');
+  const prTask = prTaskMap(list);
+  const authors = new Map();
+  const issueTask = new Map();
+  let goLive = null;
+  for (const ev of list) {
+    const p = ev.payload || {};
+    if (ev.type === 'pr_opened' && isNum(p.pr)) authors.set(p.pr, p.author);
+    if (isStr(p.task) && isNum(p.issue)) issueTask.set(p.issue, p.task);
+    if (goLive == null && ev.type === 'dispatched' && isStr(p.task) && !isDrill(p.task) && !isPlanOnly(ev)) goLive = parseTime(ev.timestamp);
+  }
+  const agentPr = (pr) => isNum(pr) && (prTask.has(pr) || isBot(authors.get(pr)));
+  const steps = [];
+  if (goLive != null) {
+    for (const ev of list) {
+      const p = ev.payload || {};
+      const t = parseTime(ev.timestamp);
+      if (t == null || t < goLive) continue;
+      let kind = null;
+      if (ev.type === 'queued' && isStr(p.actor) && !isBot(p.actor) && agentPr(p.pr)) kind = 'enqueue';
+      else if (ev.type === 'human_action' && isStr(p.action) && !REVIEW_ACTIONS.has(p.action.toLowerCase())
+        && (agentPr(p.pr) || isStr(p.task) || issueTask.has(p.issue))) kind = p.action.toLowerCase();
+      if (!kind) continue;
+      const task = isStr(p.task) ? p.task : prTask.get(p.pr) ?? issueTask.get(p.issue) ?? null;
+      steps.push({ at: eventTime(ev), kind, what: HUMAN_KIND[kind] ?? `${kind} (by hand)`, pr: isNum(p.pr) ? p.pr : null, issue: isNum(p.issue) ? p.issue : null, task, actor: p.actor ?? p.reviewer ?? null });
+    }
+  }
+  const byKind = {};
+  for (const s of steps) byKind[s.kind] = (byKind[s.kind] ?? 0) + 1;
+  return { goLive, steps, byKind, total: steps.length };
+}
+
+// --- Status line --------------------------------------------------------------------------------
+
+const PAUSE_PLAIN = {
+  budget_pause: 'daily AI budget reached',
+  budget_unknown: "today's AI spend can't be measured",
+  busy_jobs_unknown: 'GitHub Actions load unknown',
+  actions_busy: 'GitHub Actions busy',
+};
+
+/** One health problem (healthSummary().problems item) in plain words, as segments. */
+export function plainProblem(problem, { heartbeatAt = null } = {}) {
+  const code = problem?.code ?? '';
+  if (code === 'hb-stale' || code === 'hb-late') return heartbeatAt != null ? [T('last check-in'), { t: 'time', at: heartbeatAt }] : [T('check-in late')];
+  if (code === 'hb-none') return [T('no check-in from the factory')];
+  if (code === 'hb-unknown') return [T('last check-in unknown')];
+  if (code === 'verifier:verifier-not-set-up') return [T("independent audit check isn't set up")];
+  if (code === 'verifier:verifier-late' || code === 'verifier:verifier-stale') return [T('independent audit check is late')];
+  if (code.startsWith('verifier:')) return [T("can't read the independent audit check")];
+  const text = {
+    'no-log': 'no audit log yet',
+    'load-failed': "can't load the audit log",
+    'refresh-failed': "can't refresh the data",
+    'data-stale': 'the data here is out of date',
+    'chain-broken': 'the audit log failed its integrity check',
+    'chain-unverified': "the audit log isn't verified yet",
+  }[code];
+  return [T(text ?? 'something is wrong')];
+}
+
+/**
+ * The status line after the health chip: { state: { level, segs }, needs: { level, segs } }.
+ * State: the worst health problem in plain words; else "switched off"; else the pause reason;
+ * else "working on N tasks:" with links; else "idle". Needs: "nothing needs you", or "N tasks need
+ * you:" with linked refs (#28, #33; the first 3, then "+N"), "checking reviews…" or "review list
+ * unavailable" while the PR lists aren't known.
+ */
+export function statusParts({ health = null, heartbeatAt = null, killSwitch = null, board = null, banner = null, needsItems = [], reviews = 'ok' } = {}) {
+  let state;
+  const problems = (health?.problems ?? []).filter((p) => p.code !== 'paused');
+  if (problems.length) state = { level: problems[0].level, segs: plainProblem(problems[0], { heartbeatAt }) };
+  else if (killSwitch === false) state = { level: 'info', segs: [T('switched off')] };
+  else if (banner?.state === 'paused' && banner.reason !== 'kill_switch') state = { level: 'warn', segs: [T(PAUSE_PLAIN[banner.reason] ?? 'held by a safety gate')] };
+  else if (board?.counts?.running) {
+    const running = board.tasks.filter((x) => x.state === 'running');
+    const links = running.slice(0, 3).flatMap((x, i) => [...(i ? [T(',')] : []), x.issue != null ? { t: 'link', text: x.short, href: ghIssue(x.issue) } : T(x.short)]);
+    state = { level: 'ok', segs: [T(`working on ${plural(running.length, 'task')}:`), ...links, ...(running.length > 3 ? [T(`+${running.length - 3}`)] : [])] };
+  } else state = { level: 'ok', segs: [T('idle')] };
+
+  let needs;
+  const items = needsItems || [];
+  if (items.length) {
+    const word = items.every((i) => i.kind !== 'review') ? 'task' : 'item';
+    const ref = (i) => (i.kind === 'review' ? { text: i.repo === SOURCE_REPO ? `#${i.number}` : `${String(i.repo).split('/').pop()}#${i.number}`, href: i.url }
+      : i.issue != null ? { text: `#${i.issue}`, href: ghIssue(i.issue) } : i.pr != null ? { text: `#${i.pr}`, href: ghPull(i.pr) } : { text: i.task ?? '?', href: null });
+    const links = items.slice(0, 3).flatMap((i, k) => {
+      const r = ref(i);
+      return [...(k ? [T(',')] : []), r.href ? { t: 'link', text: r.text, href: r.href } : T(r.text)];
+    });
+    needs = { level: 'warn', segs: [T(`${plural(items.length, word)} need${items.length === 1 ? 's' : ''} you:`), ...links, ...(items.length > 3 ? [T(`+${items.length - 3}`)] : [])] };
+  } else if (reviews === 'pending') needs = { level: 'info', segs: [T('checking reviews…')] };
+  else if (reviews === 'unavailable') needs = { level: 'warn', segs: [T('review list unavailable')] };
+  else needs = { level: 'ok', segs: [T('nothing needs you')] };
+  return { state, needs };
+}
+
+// --- The five scoreboard sentences ----------------------------------------------------------------
+
+const TIER_WORD = { auto: 'routine', 'auto-strict': 'core' };
+
+/** "Shipped: 26 of 26 tasks" / "18 routine + 8 core, ported from JavaScript to Rust". */
+export function shippedItem(board) {
+  const done = board?.counts?.done ?? 0;
+  const total = board?.total ?? 0;
+  const tiers = Object.entries(board?.byTier ?? {}).sort(([a], [b]) => (a === 'auto' ? -1 : b === 'auto' ? 1 : a.localeCompare(b)));
+  const parts = tiers.flatMap(([tier, x], i) => [...(i ? [T('+')] : []), NUM(`${x.done} ${TIER_WORD[tier] ?? (tier === 'unknown' ? 'other' : tier)}`)]);
+  return {
+    key: 'shipped',
+    main: [T('Shipped:'), BIG(`${done} of ${total}`), T(total === 1 ? 'task' : 'tasks')],
+    subs: total ? [[...parts, T(', ported from JavaScript to Rust')]] : [],
+  };
+}
+
+/** "Speed: about 9 min per task" / "Oct 22 → Oct 27". */
+export function speedItem({ medianMs = null, count = 0, firstAt = null, lastAt = null } = {}) {
+  if (!count || medianMs == null) return { key: 'speed', main: [T('Speed:'), BIG('—'), T('no task merged yet')], subs: [] };
+  return {
+    key: 'speed',
+    main: [T('Speed: about'), BIG(plainDuration(medianMs)), T('per task')],
+    subs: firstAt != null && lastAt != null ? [[NUM(shortDate(firstAt)), T('→'), NUM(shortDate(lastAt))]] : [],
+  };
+}
+
+/**
+ * "Total cost: about $1,126" / "= $1,110 to build the factory (one-time) + $16.32 to run it" /
+ * "$11.43 real tasks (median $0.33 each) + $4.89 safety drills" (the split of the run cost). `build` is a
+ * validateBuildCost() result; `cost` a costJoin() result (its `known` false = the run lists
+ * couldn't be read). Run cost not tied to a task counts as real tasks.
+ */
+export function costItem({ build = null, cost = null, medianAic = null } = {}) {
+  const b = build?.ok ? build.value : null;
+  const runKnown = !!cost && (cost.known || cost.measuredRuns === 0);
+  const run = runKnown ? cost.total : null;
+  const drills = runKnown ? cost.drillAic : 0;
+  const real = runKnown ? cost.total - drills : null;
+  const split = runKnown && cost.measuredRuns
+    ? [NUM(formatUsd(real)), T('real tasks'), ...(medianAic != null ? [T('(median'), NUM(formatUsd(medianAic)), T('each)')] : []),
+      ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('safety drills')] : [])]
+    : null;
+  if (b && runKnown) {
+    return {
+      key: 'cost',
+      main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100 + run))],
+      subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('to build the factory (one-time) +'), NUM(formatUsd(run)), T('to run it')], ...(split ? [split] : [])],
+    };
+  }
+  if (b) return { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('to build the factory (one-time)'), SEP, T('running cost not available right now')]] };
+  if (runKnown) return { key: 'cost', main: [T('Running cost: about'), BIG(formatUsd(run))], subs: split ? [split] : [] };
+  return { key: 'cost', main: [T('Total cost:'), BIG('—'), T('not available right now')], subs: [] };
+}
+
+/** "Human effort after go-live: 2 manual steps" (the words link to the list). */
+export function humanItem(h, href = '#human-steps') {
+  if (!h?.goLive) return { key: 'human', main: [T('Human effort:'), BIG('0'), T('manual steps; not live yet')], subs: [] };
+  return { key: 'human', main: [T('Human effort after go-live:'), BIG(String(h.total)), { t: 'link', text: h.total === 1 ? 'manual step' : 'manual steps', href }], subs: [] };
+}
+
+/**
+ * "Quality: 0 reverts of real work · reviewer blocked 1 bad change before merge · 12 safety drills
+ * passed (6 defects found and fixed)". The drills clause needs a valid drills.json (`drills`, a
+ * validateDrills() result); without it the clause is left out.
+ */
+export function qualityItem(q, drills = null) {
+  const r = q?.reverts ?? 0;
+  const k = q?.objections ?? 0;
+  return {
+    key: 'quality',
+    main: [
+      T('Quality:'), BIG(String(r)), T(`revert${r === 1 ? '' : 's'} of real work`), SEP,
+      T('reviewer blocked'), NUM(`${k} bad change${k === 1 ? '' : 's'}`), T('before merge'),
+      ...(drills?.ok ? [SEP, { t: 'link', text: `${drills.passed} safety drill${drills.passed === 1 ? '' : 's'} passed`, href: JOURNAL_URL },
+        NUM(`(${drills.value.defects} defect${drills.value.defects === 1 ? '' : 's'} found and fixed)`)] : []),
+    ],
+    subs: [],
+  };
 }

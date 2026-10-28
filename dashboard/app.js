@@ -7,7 +7,8 @@ import {
   anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths,
   fallbackCatalog, formatAge, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, prRef, qualityStats, recentActivity,
-  relativeTime, reviewItems, shortDuration, shortTaskName, shortTitle, snapshotRunIds, stageSummary, stageTimes, stateLine, statusSummary,
+  relativeTime, reviewItems, shortDuration, shortTaskName, snapshotRunIds, stageSummary, stageTimes, statusSummary,
+  costItem, earliestSpendDay, humanItem, humanSteps, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
   subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
@@ -54,6 +55,8 @@ const META_RETRY_MS = 5 * 60000;
 // The agent workflow run lists (3 API calls, with ETags), read only when a spend snapshot names
 // a run that isn't in them yet, at most every 10 min, and only with enough API budget left.
 const RUNS_MIN_MS = 10 * 60000;
+// build-cost.json and drills.json: same-origin static files (no API cost), read on load and hourly.
+const STATICS_MAX_AGE_MS = 60 * 60000;
 const RUNS_RESERVE = 5;
 // The task issues (one API call, with an ETag): their open/closed state decides which tasks are
 // done, whatever the audit window holds. Read on load, then at most every 30 min, or sooner (but
@@ -108,6 +111,8 @@ const state = {
   // task_done and merged events when it was read, so a new one triggers an early refresh.
   taskIssues: { map: null, etag: null, items: null, error: null, fetchedAt: null, attemptedAt: null, doneMark: null, truncated: false },
   fixtureMeta: null,
+  // build-cost.json and drills.json, deployed with the page: validateBuildCost/validateDrills results.
+  statics: { build: null, drills: null, attemptedAt: null },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -157,6 +162,7 @@ function relText(ms, bare) {
 
 function showTimeline(key) {
   state.subject = key;
+  $('details').open = true;
   $('timeline-fold').open = true;
   safe('timeline', () => renderTimeline(deriveMetrics(state.events, { now: now() })));
   $('timeline-fold').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -679,6 +685,44 @@ async function maybeRefreshTaskIssues() {
   state.dataVersion++;
 }
 
+// Reads one same-origin JSON file and validates it; never throws.
+async function readStatic(path, validate) {
+  try {
+    const res = await fetch(path, { cache: 'no-cache', credentials: 'omit' });
+    if (!res.ok) return { ok: false, error: `${path}: HTTP ${res.status}` };
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      return { ok: false, error: `${path}: not valid JSON` };
+    }
+    const r = validate(data);
+    return r.ok ? r : { ok: false, error: `${path}: ${r.error}` };
+  } catch (err) {
+    return { ok: false, error: `${path}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+async function maybeRefreshStatics() {
+  const st = state.statics;
+  if (st.attemptedAt != null && Date.now() - st.attemptedAt < STATICS_MAX_AGE_MS) return;
+  st.attemptedAt = Date.now();
+  if (FIXTURE) {
+    // The sample's stand-ins (a missing one exercises the "unavailable" wording).
+    try {
+      const meta = await loadFixtureMeta();
+      const one = (key, validate) => (key in meta ? (validate(meta[key]).ok ? validate(meta[key]) : { ok: false, error: `${key}: ${validate(meta[key]).error}` }) : { ok: false, error: `${key} missing from the sample` });
+      st.build = one('buildCost', validateBuildCost);
+      st.drills = one('drills', validateDrills);
+    } catch (err) {
+      st.build = st.drills = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  } else {
+    [st.build, st.drills] = await Promise.all([readStatic('build-cost.json', validateBuildCost), readStatic('drills.json', validateDrills)]);
+  }
+  state.dataVersion++;
+}
+
 /** Every listed agent run, or null when the lists haven't been read. */
 function agentRuns() {
   const r = state.runs;
@@ -698,6 +742,7 @@ async function tick() {
       await maybeRefreshMeta();
       await maybeRefreshTaskIssues();
       await maybeRefreshRuns();
+      await maybeRefreshStatics();
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
@@ -710,6 +755,7 @@ async function tick() {
         await maybeRefreshMeta();
         await maybeRefreshTaskIssues();
         await maybeRefreshRuns();
+        await maybeRefreshStatics();
       }
     }
     state.error = null;
@@ -756,15 +802,19 @@ function buildView(m) {
   const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items, issues: state.taskIssues.map });
   const dispatch = latestDispatchState(state.events);
   const cost = costJoin(state.events, agentRuns(), { now: t, days: MEDIAN_DAYS });
-  const doneIds = board.tasks.filter((x) => x.state === 'done').map((x) => x.id);
+  const done = board.tasks.filter((x) => x.state === 'done');
+  const doneIds = done.map((x) => x.id);
+  const doneTimes = done.map((x) => x.since).filter(isNum);
   return {
     board,
     dispatch,
     banner: dispatchBanner(state.events, { now: t }),
-    state: stateLine({ loaded: state.loaded, board, dispatch }),
     cost,
     taskCost: medianTaskCost(cost, doneIds),
-    toMerged: issueToMerged(state.events, { now: t, days: MEDIAN_DAYS }),
+    // Speed: every done real task whose start and merge are in the loaded audit log.
+    toMerged: issueToMerged(state.events, { now: t, days: Infinity, tasks: new Set(doneIds) }),
+    doneSpan: doneTimes.length ? [Math.min(...doneTimes), Math.max(...doneTimes)] : null,
+    steps: humanSteps(state.events),
     quality: qualityStats(state.events),
     human: humanTouch(state.events, { now: t, days: HUMAN_DAYS }),
     live: liveness(state.events, { now: t, inFlight: board.counts.running > 0, dispatch }),
@@ -806,17 +856,15 @@ function render({ full = false } = {}) {
     console.error('dashboard: deriving Needs you failed', err);
   }
   try {
-    renderHeader(m, v);
+    renderHeader(m, v, needs);
   } catch (err) {
     setStatus(`Problem showing the header: ${err?.message ?? err}`);
   }
   const loaded = state.loaded;
   const known = FIXTURE || prsKnown();
-  renderIf('numbers', [loaded, v && numbersSig(v)], withMetrics((mm, vv) => renderNumbers(vv)), full);
-  renderIf('needs', [loaded, state.error, known, needs?.rs, needs?.items.map((i) => [i.key, i.since, i.title, i.reason])], withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))), full);
+  renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
-  renderIf('cost', [loaded, v && costSig(m, v)], withMetrics((mm, vv) => renderCost(mm, vv)), full);
-  renderIf('quality', [loaded, v?.quality], withMetrics((mm, vv) => renderQuality(vv)), full);
+  renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
   renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
   renderIf('recent', [loaded, v?.recent.map((r) => [r.text, r.at])], withMetrics((mm, vv) => renderRecent(vv)), full);
@@ -945,7 +993,6 @@ const HEALTH_RULE = `Healthy: fresh data, verified chain, heartbeat within ${HB_
   + `Degraded: last refresh failed, data over ${STALE_DATA_MIN} min old, heartbeat late (over ${HB_WARN}), chain not verified, verifier late (over ${VF_WARN}) or not set up.\n`
   + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.\n`
   + 'Paused: dispatch held by a gate (spend, budget, Actions load), nothing else wrong.';
-const STATE_ICON_NAME = { ok: 'ok', warn: 'warn', info: 'play', loading: null };
 
 /** The anchors in the verifier file, or [] if it isn't loaded or isn't valid. */
 function loadedAnchors() {
@@ -977,18 +1024,7 @@ function setChip(id, { hidden = false, tone = null, iconName = null, text = '', 
   el.setAttribute('aria-describedby', `${id}-tip`);
 }
 
-function stateTip(v) {
-  const c = v.board.counts;
-  const lines = [
-    v.board.total ? `Tasks: ${c.done} done, ${c.running} running, ${c.needs} need you, ${c.waiting} waiting (of ${v.board.total}).` : 'No tasks in the catalog yet.',
-  ];
-  if (v.banner) lines.push('', v.banner.text.replace(/ (since|\(recorded) [^:]*:/, ':'), v.banner.tip);
-  else if (v.dispatch?.state === 'running') lines.push('', 'The controller is dispatching work.');
-  lines.push('', 'Running: work started on a task and not merged yet. Paused: dispatch held by a gate. Waiting: tasks ready for a free slot, or blocked by dependencies. Idle: nothing to do.');
-  return lines.join('\n');
-}
-
-function renderHeader(m, v) {
+function renderHeader(m, v, needs) {
   const chain = state.chain;
   const hb = m?.heartbeat ?? null;
   const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
@@ -1008,19 +1044,10 @@ function renderHeader(m, v) {
       ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE,
       ...(state.loaded ? (({ heartbeat, verifier: vf }) => ['', `Observed: ${heartbeat}`, `Observed: ${vf}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
   });
-  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}${v && state.loaded ? `. ${v.state.text}` : ''}`);
+  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
   renderVerifierLine(verifier);
 
-  const enabled = m?.killSwitch?.enabled ?? null;
-  setChip('kill-chip', {
-    // Off is the deliberate, safe state: neutral grey, not red (red means Down).
-    hidden: enabled == null, tone: enabled ? 'ok' : 'muted', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
-    tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${relativeTime(parseTime(m.killSwitch.at), now())}, ${m.killSwitch.at})` : ''}; off means no new dispatches`,
-  });
-  const st = v?.state ?? null;
-  setChip('state-chip', st && state.loaded
-    ? { tone: TONE[st.level] ?? 'info', iconName: STATE_ICON_NAME[st.level] ?? 'dot', text: st.text, tipText: stateTip(v) }
-    : { hidden: true });
+  renderParts(m, v, needs, health);
   const dryRun = m?.dryRun ?? null;
   const version = m?.factoryVersion ?? null;
   // Live is the normal state, so only a dry run gets a chip (the version is in the "updated" tooltip).
@@ -1040,8 +1067,10 @@ function renderHeader(m, v) {
     meta.push(getToken() ? 'your token' : 'no token');
   }
   const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
-  $('updated-text').textContent = age ? `updated ${age} ago` : state.error ? 'not updated' : 'loading…';
+  // The clock icon and the tooltip say "updated"; the visible text is just the age.
+  $('updated-text').textContent = age ? `${age} ago` : state.error ? 'not updated' : 'loading…';
   setTip('updated', [
+    age ? `Data updated ${age} ago` : null,
     `${REPO}, ${BRANCH} branch, last ${DAYS} UTC days`,
     meta.join(' · '),
     version ? `Factory version ${version}` : null,
@@ -1059,27 +1088,11 @@ function renderVerifierLine(v) {
 }
 
 // ---------------------------------------------------------------------------
-// Key numbers: number + short label; the definition and detail are in each tooltip
+// Segments (lib.js builders) to DOM: every number and link is its own inline-block run, so a long
+// sentence still reads as short runs (the glance test's 8-word rule) without changing its words.
 
 const STATE_ICON = { done: 'ok', running: 'play', needs: 'warn', waiting: 'wait' };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-function numTile({ key, label, iconName, value, sub = null, tipText, level = null }) {
-  const el = h('article', { class: `panel ntile${level ? ` ntile--${level}` : ''}`, 'data-row-key': key },
-    h('h3', { class: 'num-l' }, icon(iconName), label),
-    h('p', { class: 'num-v' }, value),
-    sub ? h('p', { class: 'num-s' }, sub) : null);
-  return tip(el, tipText);
-}
-
-function numbersSig(v) {
-  return [state.taskIssues.error, state.taskIssues.map != null, v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.taskCost, v.cost.known, state.runs.status, state.runs.error, state.meta.status];
-}
-
-function tierSplit(byTier) {
-  const order = ['auto', 'auto-strict', ...Object.keys(byTier).filter((k) => k !== 'auto' && k !== 'auto-strict')];
-  return order.filter((k) => byTier[k]).map((k) => `${k} ${byTier[k].done}`);
-}
 
 /** Why a cost needing the run lists is "—", or null when it's known. */
 function runsProblem(v) {
@@ -1089,50 +1102,6 @@ function runsProblem(v) {
   if (r.waitingForRate) return 'Waiting for API requests to spare (the GitHub rate limit) before reading the agent run lists.';
   if (r.error) return `Couldn't read the agent run lists (implement, repair, review): ${r.error}.`;
   return 'Reading the agent run lists…';
-}
-
-function renderNumbers(v) {
-  if (!state.loaded) {
-    replaceSection('numbers', ['Tasks done', 'Issue → merged', 'Cost per task'].map((label, i) => numTile({ key: `n${i}`, label, iconName: ['grid', 'clock', 'coin'][i], value: '…', tipText: 'Loading the audit log' })));
-    return;
-  }
-  const b = v.board;
-  const c = b.counts;
-  const tiers = Object.entries(b.byTier).map(([k, x]) => `${k}: ${x.done} of ${x.total} done`);
-  const itm = v.toMerged;
-  const sorted = itm.items.slice().sort((a, x) => a.ms - x.ms);
-  const why = runsProblem(v);
-  const tc = v.taskCost;
-  replaceSection('numbers',
-    numTile({
-      key: 'done', label: 'Tasks done', iconName: 'grid', value: b.total ? `${c.done}/${b.total}` : '—',
-      sub: b.total ? tierSplit(b.byTier).join(' · ') : null,
-      level: b.total && c.done === b.total ? 'ok' : null,
-      tipText: [
-        b.total ? `${c.done} of ${b.total} tasks done (merged).` : 'No tasks in the catalog yet.',
-        ...tiers,
-        `Also: ${c.running} running, ${c.needs} need you, ${c.waiting} waiting.`,
-        'Tasks are the task map\'s entries; drill/* tasks were fire drills and are not counted.',
-        taskIssuesLine(),
-      ].join('\n'),
-    }),
-    numTile({
-      key: 'merge', label: 'Issue → merged', iconName: 'clock', value: shortDuration(itm.medianMs), sub: `median, ${MEDIAN_DAYS} days`,
-      tipText: [
-        itm.count ? `Median ${shortDuration(itm.medianMs)} over ${plural(itm.count, 'task')} merged in the last ${MEDIAN_DAYS} days.` : `No task merged in the last ${MEDIAN_DAYS} days.`,
-        itm.count ? `Fastest ${shortDuration(sorted[0].ms)}, slowest ${shortDuration(sorted.at(-1).ms)}.` : null,
-        'From the task\'s first auto_ready (else its first dispatch) to its merge. Drills and plain PRs are left out.',
-        DAYS < MEDIAN_DAYS ? `Only ${DAYS} days are loaded (?days=${DAYS}).` : null,
-      ].filter(Boolean).join('\n'),
-    }),
-    numTile({
-      key: 'cost', label: 'Cost per task', iconName: 'coin', value: why || tc.medianAic == null ? '—' : formatUsd(tc.medianAic), sub: 'median',
-      tipText: [
-        why ?? (tc.count ? `Median ${formatUsd(tc.medianAic)} (${Math.round(tc.medianAic).toLocaleString('en-US')} AIC) over ${plural(tc.count, 'done task')} with attributed cost.` : 'No done task with attributed cost yet.'),
-        'A task\'s cost: the latest measured AIC of each implement, repair and review run attributed to it (1 AIC = $0.01).',
-        'Runs come from the controller\'s spend snapshots, joined with the Actions run lists by title or dispatch time.',
-      ].join('\n'),
-    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,82 +1119,165 @@ function needsView(m) {
   return { rs, items: combineNeedsYou(m.needsYou.items, reviews, REPO) };
 }
 
-function viewLink(href, text) {
-  const a = link(href, text);
-  a.classList.add('btn', 'btn--small');
-  return a;
-}
-
-// At most 3 lines, each a ref, a 2-word title and a "View" button; the rest is in the tooltip.
-const NEEDS_SHOWN = 3;
-const NEEDS_TITLE_WORDS = 2;
-
 function needsLines(it) {
   const since = it.since ? parseTime(it.since) : null;
   const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${iso(since)}`;
   if (it.kind === 'review') {
     return { iconName: 'person', kind: 'Review and merge', ref: prRef(it.repo, it.number, REPO), title: it.title || '(no title)', since,
-      lines: [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, it.title || '(no title)', waited], action: viewLink(it.url, 'View PR') };
+      lines: [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, it.title || '(no title)', waited] };
   }
   const kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
   const title = it.task ? shortTaskName(it.task) : it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`;
   return {
     iconName: it.kind === 'needs_human' ? 'warn' : 'clock', kind, ref: it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—', title, since,
-    lines: [`${kind}: ${it.task ?? title}`, it.reason ? `Reason: ${it.reason}` : null, it.effect ? `Effect: ${it.effect}` : null, waited],
-    action: it.issue != null ? viewLink(`${GH}/${REPO}/issues/${it.issue}`, 'View issue') : it.pr != null ? viewLink(`${GH}/${REPO}/pull/${it.pr}`, 'View PR') : null,
+    lines: [`${kind}: ${it.task ?? title}`, it.reason ? `Reason: ${it.reason}` : null, waited],
   };
 }
 
-function needsRow(it) {
-  const x = needsLines(it);
-  return h('li', { 'data-row-key': it.key },
-    h('span', { class: `needs-icon${it.kind === 'needs_human' ? ' needs-icon--alert' : ''}`, role: 'img', 'aria-label': x.kind }, icon(x.iconName)),
-    h('span', { class: 'needs-ref mono' }, x.ref),
-    tip(h('span', { class: 'needs-t' }, shortTitle(x.title, NEEDS_TITLE_WORDS)), x.lines.filter(Boolean).join('\n')),
-    x.action ?? h('span'));
+function segNodes(segs) {
+  const out = [];
+  (segs || []).forEach((s, i) => {
+    const text = s.t === 'sep' ? '·' : s.t === 'time' ? null : s.text;
+    const prev = segs[i - 1];
+    const glued = (typeof text === 'string' && /^[,.:;)]/.test(text)) || (prev?.t === 'text' && prev.text.endsWith('('));
+    if (i && !glued) out.push(' ');
+    if (s.t === 'big') out.push(h('b', { class: 'big' }, s.text));
+    else if (s.t === 'num') out.push(h('b', { class: 'run' }, s.text));
+    else if (s.t === 'time') out.push(h('span', { class: 'run' }, timeEl(s.at)));
+    else if (s.t === 'sep') out.push(h('span', { class: 'dot', 'aria-hidden': 'true' }, '·'));
+    else if (s.t === 'link') out.push(s.href ? h('a', { class: 'run', href: s.href, rel: s.href.startsWith('#') ? null : 'noopener noreferrer' }, s.text) : h('span', { class: 'run' }, s.text));
+    else out.push(s.text);
+  });
+  return out;
 }
 
-function renderNeeds(m, view = needsView(m)) {
-  const cap = DEFAULTS.humanQueueMax;
-  const { rs, items } = view;
-  const panel = $('needs-panel');
-  if (!state.loaded && !state.error) {
-    panel.classList.remove('needs--clear', 'needs--some');
-    replaceSection('needs', h('p', { class: 'num-v' }, '…'));
+// ---------------------------------------------------------------------------
+// Status line: health chip · state · what needs you
+
+const PART_ICON = { warn: 'warn', alert: 'fail' };
+
+function setPart(id, part, tipText) {
+  const el = $(id);
+  if (!part) {
+    el.hidden = true;
     return;
   }
-  const about = [
-    'Needs-human items, stale contracts and human-tier PRs waiting for your review, oldest first.',
-    'Items whose issue or PR is closed now are left out.',
-    `Above ${cap}, the controller stops admitting new human-tier work.`,
-    rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
-    rs === 'unavailable' ? `Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}, so PRs waiting for your review aren't counted.` : null,
-    rs === 'pending' ? 'Still reading the open-PR lists for reviews.' : null,
+  el.hidden = false;
+  el.className = `part part--${part.level} has-tip`;
+  el.replaceChildren(...(PART_ICON[part.level] ? [h('span', { class: 'part-i', role: 'img', 'aria-label': part.level === 'alert' ? 'Problem' : 'Warning' }, icon(PART_ICON[part.level]))] : []),
+    h('span', {}, segNodes(part.segs)), h('span', { id: `${id}-tip`, class: 'tip-src', hidden: true }, tipText));
+  el.setAttribute('aria-describedby', `${id}-tip`);
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+}
+
+function renderParts(m, v, needs, health) {
+  if (!state.loaded || !m || !v) {
+    setPart('state-part', null);
+    setPart('needs-part', null);
+    return;
+  }
+  const p = statusParts({
+    health, heartbeatAt: parseTime(m.heartbeat.at), killSwitch: m.killSwitch.enabled, board: v.board, banner: v.banner,
+    needsItems: needs?.items ?? [], reviews: needs?.rs === 'sample' ? 'ok' : needs?.rs ?? 'pending',
+  });
+  const c = v.board.counts;
+  const stateTip = [
+    v.board.total ? `Tasks: ${c.done} done, ${c.running} running, ${c.needs} need you, ${c.waiting} waiting (of ${v.board.total}).` : 'No tasks in the catalog yet.',
+    m.killSwitch.enabled == null ? null : `Factory switch: ${m.killSwitch.enabled ? 'on' : 'off (no new work starts)'}, from the last check-in.`,
+    v.banner ? `${v.banner.state === 'paused' ? 'Paused' : v.banner.state === 'waiting' ? 'Waiting' : 'Idle'}: the controller's last scheduling decision, since ${relativeTime(parseTime(v.banner.since), now())} (${v.banner.since}).` : null,
+    health.problems.length ? `Problems: ${health.problems.map((x) => x.text).join('; ')}.` : null,
   ].filter(Boolean).join('\n');
-  const clear = !items.length && (rs === 'ok' || rs === 'sample');
-  panel.classList.toggle('needs--clear', clear);
-  panel.classList.toggle('needs--some', items.length > 0);
-  const head = tip(h('p', { class: 'num-v needs-n' },
-    clear ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Nothing needs you' }, icon('ok'))
-      : rs === 'unavailable' ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Review list unavailable' }, icon('question')) : null,
-    h('span', {}, String(items.length)),
-    items.length > cap ? h('span', { class: 'needs-cap', role: 'img', 'aria-label': `Over the cap of ${cap}` }, icon('warn')) : null),
-  `${items.length ? `${plural(items.length, 'item')} waiting for you.` : 'Nothing needs you.'}\n${about}`);
-  if (!items.length) {
-    replaceSection('needs', head);
+  const items = needs?.items ?? [];
+  const needsTip = [
+    items.length ? items.map((it) => needsLines(it).lines.filter(Boolean).join(' · ')).join('\n') : 'No needs-human items, contract changes or PRs waiting for your review.',
+    needs?.rs === 'unavailable' ? `Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}.` : null,
+    needs?.rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
+    'Items whose issue or PR is closed now are left out.',
+  ].filter(Boolean).join('\n');
+  setPart('state-part', p.state, stateTip);
+  setPart('needs-part', p.needs, needsTip);
+}
+
+// ---------------------------------------------------------------------------
+// Scoreboard: five sentences, each with one big number; definitions in the tooltips
+
+function scoreSig(v) {
+  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known,
+    v.taskCost, v.quality, v.steps.total, state.statics.build, state.statics.drills, state.runs.error, state.taskIssues.error, state.taskIssues.map != null];
+}
+
+function scoreItem(item, tipText) {
+  return tip(h('li', { class: `score-item score--${item.key}`, 'data-row-key': item.key },
+    h('p', { class: 'score-main' }, segNodes(item.main)),
+    item.subs.map((sub) => h('p', { class: 'score-sub' }, segNodes(sub)))), tipText);
+}
+
+function renderScore(v) {
+  if (!state.loaded) {
+    replaceSection('score', h('li', { class: 'score-item' }, h('p', { class: 'score-main' }, h('b', { class: 'big' }, '…'))));
     return;
   }
-  const shown = items.slice(0, NEEDS_SHOWN);
-  replaceSection('needs', head,
-    h('ul', { class: 'needs-list' }, shown.map((it) => {
-      try {
-        return needsRow(it);
-      } catch (err) {
-        return h('li', { class: 'problem', 'data-row-key': it.key ?? '?' }, `Couldn't show this item: ${err?.message ?? err}`);
-      }
-    })),
-    items.length > NEEDS_SHOWN ? tip(h('p', { class: 'needs-more' }, `+${items.length - NEEDS_SHOWN}`),
-      items.slice(NEEDS_SHOWN).map((it) => { const x = needsLines(it); return `${x.ref} ${x.title}`; }).join('\n')) : null);
+  const st = state.statics;
+  const b = v.board;
+  const doneReal = b.counts.done;
+  const itm = v.toMerged;
+  const why = runsProblem(v);
+  const c = v.cost;
+  const since = earliestSpendDay(state.events);
+  const build = st.build?.ok ? st.build.value : null;
+  const tierLines = Object.entries(b.byTier).map(([k, x]) => `${k === 'auto' ? 'Routine (tier auto: merges by itself once its checks pass)' : k === 'auto-strict' ? 'Core (tier auto-strict: also needs the reviewer agent and the strict gates)' : k}: ${x.done} of ${x.total} done.`);
+  const wf = { implement: 'coder', repair: 'repair', review: 'reviewer' };
+  const steps = v.steps;
+  const drills = st.drills;
+  replaceSection('score',
+    scoreItem(shippedItem(b), [
+      'Done: the task\'s issue is closed as completed; without the issue list, a merge (or task_done) in the audit log.',
+      ...tierLines,
+      'Safety drills (drill/*) are not tasks and aren\'t counted.',
+      taskIssuesLine(),
+    ].join('\n')),
+    scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1] }), [
+      itm.count ? `Median ${formatDuration(itm.medianMs)} from start to merge over ${itm.count} of ${doneReal} done tasks: every done real task whose start and merge are in the loaded audit log (the last ${DAYS} days).` : 'No done task has its start and merge in the loaded audit log.',
+      'Start: the task\'s first auto_ready (made ready by the controller), else its first agent run. End: its merge.',
+      v.doneSpan ? `First and last task finished: ${iso(v.doneSpan[0])} and ${iso(v.doneSpan[1])}.` : null,
+    ].filter(Boolean).join('\n')),
+    scoreItem(costItem({ build: st.build, cost: c, medianAic: v.taskCost.medianAic }), [
+      `Build = research, design, coordination and build sessions${build ? ` (as of ${shortDate(build.asOf)}: ${Math.round(build.aiUnits).toLocaleString('en-US')} AI credits, ${build.source})` : ''}. Run = the factory's own agent runs (coder, repair, reviewer)${since ? ` since ${shortDate(since)}` : ''}. 1 AI credit = $0.01.`,
+      st.build && !st.build.ok ? `Build cost unavailable: ${st.build.error}.` : null,
+      why ? `Running cost: ${why}` : null,
+      c.known && c.measuredRuns ? `Run cost by agent: ${Object.entries(wf).map(([k, name]) => `${name} ${formatUsd(c.byWorkflow[k].aic)} (${c.byWorkflow[k].measured} runs)`).join(', ')}.` : null,
+      c.known && c.measuredRuns ? `Run cost not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}) counts as real tasks. Median per task: over ${plural(v.taskCost.count, 'done task')} with a known cost.` : null,
+    ].filter(Boolean).join('\n')),
+    scoreItem(humanItem(steps), [
+      steps.goLive ? `Hands-on steps by a person since go-live (${relativeTime(steps.goLive, now())}, ${iso(steps.goLive)}: the first real agent run of a real task).` : 'Not live yet: no real agent run of a real task in the loaded audit log.',
+      'Counted: a person putting an agent PR in the merge queue; label changes, pushes or hand-started runs on agent PRs or factory tasks when the log records them.',
+      'Not counted: plain reviews and comments, and anything on other PRs (the coordinator\'s own, under the shared account).',
+      steps.total ? `By kind: ${Object.entries(steps.byKind).map(([k, n]) => `${k} ${n}`).join(', ')}.` : null,
+    ].filter(Boolean).join('\n')),
+    scoreItem(qualityItem(v.quality, drills), [
+      'Reverts: merges the factory undid automatically after main broke (auto_revert), safety drills left out.',
+      'Bad changes blocked: hand-offs because the reviewer agent objected before merge (needs_human, review_objected), safety drills left out.',
+      drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}. ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${shortDate(drills.value.asOf)}.` : `Safety drills: ${drills?.error ?? 'reading drills.json…'}`,
+      `In the loaded window (last ${DAYS} days).`,
+    ].join('\n')));
+}
+
+function renderSteps(v) {
+  const s = v.steps;
+  if (!state.loaded) {
+    replaceSection('human-steps', empty('…'));
+    return;
+  }
+  const intro = h('p', { class: 'hint' }, s.goLive
+    ? `Manual steps since go-live (${relativeTime(s.goLive, now())}): a person putting an agent PR in the merge queue, or changing labels, pushing or starting a run on agent PRs and factory tasks. Plain reviews and comments don't count.`
+    : 'Not live yet: no real agent run of a real task in the loaded audit log.');
+  if (!s.steps.length) {
+    replaceSection('human-steps', intro, empty('No manual steps.'));
+    return;
+  }
+  replaceSection('human-steps', intro, h('ol', { class: 'recent' }, s.steps.slice().reverse().map((x, i) => h('li', { 'data-row-key': `${i}` },
+    h('span', { class: 'recent-t' }, `${x.pr != null ? `#${x.pr}` : x.issue != null ? `#${x.issue}` : ''} ${x.task ? shortTaskName(x.task) : ''}`.trim(), ' · ', x.what),
+    h('span', { class: 'recent-at' }, timeEl(x.at))))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,7 +1288,7 @@ function boardTile(t) {
   const word = TASK_STATE_LABELS[t.state];
   const lines = [
     `${t.id}${t.title ? ` · ${t.title}` : ''}`,
-    `Tier: ${t.tier ?? 'unknown'}`,
+    `Tier: ${t.tier === 'auto' ? 'routine (auto: merges by itself once its checks pass)' : t.tier === 'auto-strict' ? 'core (auto-strict: also needs the reviewer agent and the strict gates)' : t.tier ?? 'unknown'}`,
     `State: ${word}${t.reason && t.reason !== 'merged' ? ` (${t.reason})` : ''}`,
     t.issueState ? `Issue: ${t.issueState === 'completed' ? 'closed as completed' : t.issueState === 'closed' ? 'closed, not completed' : 'open'}` : state.taskIssues.map ? 'No task issue found' : null,
     t.since != null ? `Since ${relativeTime(t.since, now())} (${iso(t.since)})` : null,
@@ -1298,78 +1350,10 @@ function stat({ value, label, tipText, level = null, labelFirst = false, key }) 
   return tip(h('p', { class: 'stat', 'data-row-key': key }, ...(labelFirst ? [l, ' ', v] : [v, ' ', l])), tipText);
 }
 
-const aic = (n) => `${Math.round(n).toLocaleString('en-US')} AIC`;
-
-function costSig(m, v) {
-  return [m.aicToday, v.cost.total, v.cost.perDay, v.taskCost, v.cost.known, v.cost.unattributed, state.chain?.windowStart, state.runs.error, state.runs.waitingForRate];
-}
-
-function renderCost(m, v) {
-  if (!state.loaded) {
-    replaceSection('cost', empty('…'));
-    return;
-  }
-  const a = m.aicToday;
-  const c = v.cost;
-  const why = runsProblem(v);
-  const toDate = state.chain?.windowStart === 'genesis';
-  const wf = AGENT_WORKFLOWS.map((w) => `${w}: ${c.byWorkflow[w].measured} runs, ${aic(c.byWorkflow[w].aic)}`);
-  const days = c.perDay;
-  const spendDays = days.aic.filter((x) => x > 0).length;
-  replaceSection('cost',
-    stat({
-      key: 'today', value: formatUsd(a.total), label: `today, cap ${formatUsd(a.budget)}`, level: a.level === 'ok' ? null : a.level,
-      tipText: [
-        `Today (UTC): ${aic(a.total)} of the ${aic(a.budget)} daily cap (${(a.pct ?? 0).toFixed(1)}%). Amber at ${DEFAULTS.aicAlertPct}%, red at 100%.`,
-        'The cap is policies/budgets.yaml factory_per_day.max_aic, enforced by the controller across all workflows.',
-        a.source === 'spend_snapshot'
-          ? (a.measured == null ? `Measured/reserved split unavailable (the snapshot lists ${a.listed} of ${a.runs ?? '?'} runs).` : `${aic(a.measured)} measured + ${aic(a.reserved)} reserved for runs in flight (${a.runs} runs); snapshot ${relativeTime(parseTime(a.at), now())}.`)
-          : 'No spend snapshot today yet.',
-      ].join('\n'),
-    }),
-    stat({
-      key: 'total', value: c.measuredRuns ? formatUsd(c.total) : '—', label: toDate ? 'to date' : `in ${DAYS} days`,
-      tipText: [
-        c.measuredRuns ? `Total ${toDate ? 'to date' : `in the last ${DAYS} days`}: ${aic(c.total)} over ${plural(c.measuredRuns, 'measured run')} (the latest value per run in the spend snapshots).` : 'No measured runs in the spend snapshots yet.',
-        toDate ? 'The loaded window reaches the start of the audit log.' : `Over the loaded window (the last ${DAYS} days).`,
-        ...(c.known ? [...wf, `Drill tasks: ${aic(c.drillAic)}. Not attributed to a task: ${aic(c.unattributed)} (${plural(c.unattributedRuns, 'run')}).`] : [why]),
-        'The median per task is the "Cost per task" number at the top.',
-        spendDays ? `AIC per UTC day, last ${days.days.length} days: ${days.days.map((d, i) => (days.aic[i] ? `${d.slice(5)} ${Math.round(days.aic[i]).toLocaleString('en-US')}` : null)).filter(Boolean).join(', ')}.` : null,
-      ].filter(Boolean).join('\n'),
-    }),
-  );
-}
-
-function renderQuality(v) {
-  if (!state.loaded) {
-    replaceSection('quality', empty('…'));
-    return;
-  }
-  const q = v.quality;
-  const r = q.repairs;
-  const window = `In the loaded window (last ${DAYS} days); drills (drill/*) left out.`;
-  replaceSection('quality',
-    stat({ key: 'reverts', value: String(q.reverts), label: q.reverts === 1 ? 'revert' : 'reverts', level: q.reverts ? 'warn' : null,
-      tipText: `Merges the factory reverted automatically after main regressed (auto_revert).\n${window}` }),
-    stat({ key: 'escaped', value: String(q.escaped.count), label: q.escaped.count === 1 ? 'escaped defect' : 'escaped defects', level: q.escaped.count ? 'warn' : null,
-      tipText: `Escaped defect: a merge whose post-merge ci on main failed (check_result: push, ci, failure), counted once per commit.${q.escaped.shas.length ? `\nCommits: ${q.escaped.shas.map((s) => s.slice(0, 7)).join(', ')}` : ''}\n${window}` }),
-    stat({ key: 'objections', value: String(q.objections), label: q.objections === 1 ? 'reviewer objection' : 'reviewer objections',
-      tipText: `Hand-offs because the reviewer agent objected (needs_human, reason review_objected).\n${window}` }),
-    stat({ key: 'repairs', labelFirst: true, label: 'Repairs worked:', value: r.rate == null ? '—' : `${Math.round(r.rate * 100)}%`,
-      tipText: `${r.succeeded} of ${r.succeeded + r.failed} repairs worked${r.pending ? `, ${r.pending} pending` : ''}. A repair worked when its task's PR merged afterwards with no needs_human in between.\n${window}` }));
-}
 
 function renderHuman(v) {
-  if (!state.loaded) {
-    replaceSection('human', empty('…'));
-    return;
-  }
   const x = v.human;
-  replaceSection('human',
-    stat({ key: 'actions', value: String(x.total), label: `actions, ${x.days} days`,
-      tipText: `${plural(x.reviews, 'review')}, ${x.enqueues} PR${x.enqueues === 1 ? '' : 's'} queued to merge by hand${x.other ? `, ${x.other} other` : ''}, in the last ${x.days} days.\nhuman_action events, plus queued events by a person (not a [bot]).` }),
-    stat({ key: 'resolve', value: shortDuration(x.medianResolveMs), label: 'to unblock',
-      tipText: `Median time to unblock a hand-off: from needs_human to the next event that moves the task on (re-dispatch, a person's action, merge, or the task closing).\n${x.resolved} resolved, ${x.unresolved} not yet, in the loaded window; drills left out.` }));
+  $('human').textContent = state.loaded ? `${x.total} in the last ${x.days} days (${plural(x.reviews, 'review')}, ${x.enqueues} queued to merge by hand${x.other ? `, ${x.other} other` : ''}).` : '…';
 }
 
 function liveSig(m, v) {
@@ -1396,8 +1380,8 @@ function renderLive(m, v) {
     : [`Next scheduled (hourly) poll: ${L.nextAt == null ? 'unknown' : iso(L.nextAt)}.`, L.followUpMissed ? `The follow-up poll expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
       'GitHub\'s cron often runs scheduled jobs hours late on Free plans.', cadenceLines().heartbeat].filter(Boolean).join('\n');
   replaceSection('live',
-    stat({ key: 'last', labelFirst: true, label: 'Polled', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
-    stat({ key: 'next', labelFirst: true, label: 'Next', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: `Next controller poll expected ${relativeTime(L.nextAt, now())}.\n${nextTip}` }));
+    stat({ key: 'last', labelFirst: true, label: 'Last check-in', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
+    stat({ key: 'next', labelFirst: true, label: 'Next check-in', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: `Next controller poll expected ${relativeTime(L.nextAt, now())}.\n${nextTip}` }));
 }
 
 function renderRecent(v) {
@@ -1740,6 +1724,22 @@ function init() {
   });
   initTheme();
   initTips();
+  // In-page links (the scoreboard's "manual steps") open the folds around their target.
+  const openTo = (id) => {
+    const el = id ? document.getElementById(id) : null;
+    if (!el || !el.closest('details')) return false;
+    for (let d = el.closest('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
+  };
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest?.('a[href^="#"]');
+    if (a && openTo(a.getAttribute('href').slice(1))) {
+      e.preventDefault();
+      history.replaceState(null, '', a.getAttribute('href'));
+    }
+  });
+  if (location.hash) addEventListener('load', () => openTo(location.hash.slice(1)), { once: true });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.nextCheckAt && Date.now() >= state.nextCheckAt - 1000) tick();
   });

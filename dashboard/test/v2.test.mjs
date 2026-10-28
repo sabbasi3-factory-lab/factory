@@ -3,12 +3,17 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   HEALTH_LABELS, canonicalize, combineNeedsYou, compactAge, verifierReason, verifierStatus, dayPaths, deriveMetrics, existingDayPaths,
-  healthSummary, isHumanTierPr, parseContract, parseJsonl, parseTaskmap, prRef, reviewItems, shortTitle, stateLine, summarizePr, shortSha,
+  healthSummary as healthSummaryFull, isHumanTierPr, parseContract, parseJsonl, parseTaskmap, prRef, reviewItems, segText, statusParts, summarizePr, shortSha,
   taskBoard, taskCatalog,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildQuietAnchorLines } from './make-fixture.mjs';
 
 const at = (iso) => Date.parse(iso);
+// These tests check the chip (level, label, reasons); the coded `problems` are checked in scoreboard.test.mjs.
+const healthSummary = (opts) => {
+  const { problems: _problems, ...chip } = healthSummaryFull(opts);
+  return chip;
+};
 const fixture = () => parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
 test('shortSha shows 7 characters of a full SHA and leaves other values alone', () => {
   assert.equal(shortSha('320c4fcedefc03648caa4cda140bd93932367986'), '320c4fc');
@@ -143,7 +148,7 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading', 'Paused']);
 });
 
-test('compact ages are one token; short titles keep at most N words; refs are repo-prefixed off the home repo', () => {
+test('compact ages are one token; refs are repo-prefixed off the home repo', () => {
   assert.equal(compactAge(12000), '12s');
   assert.equal(compactAge(59999), '59s');
   assert.equal(compactAge(60000), '1m');
@@ -153,13 +158,6 @@ test('compact ages are one token; short titles keep at most N words; refs are re
   assert.equal(compactAge(50 * 3600000), '2d');
   for (const v of [null, undefined, -5, NaN]) assert.equal(compactAge(v), '—');
 
-  assert.equal(shortTitle('Dashboard v2: needs-you hero, KPI trends, pipeline'), 'Dashboard v2: needs-you hero, KPI…');
-  assert.equal(shortTitle('Dashboard v2: needs-you hero, KPI trends', 4), 'Dashboard v2: needs-you hero…');
-  assert.equal(shortTitle('  Fix   the  parser  '), 'Fix the parser');
-  assert.equal(shortTitle(''), '');
-  assert.equal(shortTitle(null), '');
-  assert.ok(shortTitle('x'.repeat(80)).length <= 48);
-  assert.ok(shortTitle('x'.repeat(80)).endsWith('…'));
 
   const home = 'sabbasi3-factory-lab/chrono-node-rs';
   assert.equal(prRef(home, 22, home), '#22');
@@ -172,7 +170,6 @@ test('not loaded yet is neutral: the health chip and the state say Loading, neve
   const hb = deriveMetrics([], { now: at(FIXTURE_NOW) }).heartbeat;
   assert.equal(hb.level, 'none');
   assert.deepEqual(healthSummary({ loaded: false, heartbeat: hb, chain: null }), { level: 'loading', label: 'Loading', reasons: ['Loading the audit log'] });
-  assert.deepEqual(stateLine({ loaded: false }), { text: 'Loading…', level: 'loading' });
   // Even a stale verifier doesn't turn the loading state red; a real failure does.
   const stale = { level: 'alert', reason: 'verifier-stale', ageMin: 30 * 60, count: 3 };
   assert.equal(healthSummary({ loaded: false, verifier: stale }).level, 'loading');
@@ -250,6 +247,7 @@ test('the quiet fixture reads as the quiet live page: Healthy, nothing needs you
   const entries = parseTaskmap(meta.taskmap);
   const board = taskBoard(events, taskCatalog(entries, new Map(entries.map((e) => [e.id, parseContract(meta.contracts[e.id])]))), { needsItems: m.needsYou.items });
   assert.deepEqual(board.counts, { done: 3, running: 0, needs: 0, waiting: 0 });
-  assert.deepEqual(stateLine({ board, dispatch: { state: 'paused', reason: 'kill_switch' } }), { text: 'Idle: all 3 tasks done', level: 'ok' });
+  const parts = statusParts({ health: { problems: [] }, killSwitch: false, board, banner: { state: 'paused', reason: 'kill_switch' } });
+  assert.deepEqual([segText(parts.state.segs), segText(parts.needs.segs)], ['switched off', 'nothing needs you']);
 });
 

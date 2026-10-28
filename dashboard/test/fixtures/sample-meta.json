@@ -48,6 +48,33 @@
       }
     ]
   },
+  "buildCost": {
+    "ai_units": 111000,
+    "usd": 1110,
+    "as_of": "2026-10-15",
+    "source": "sample build journal"
+  },
+  "drills": {
+    "as_of": "2026-10-15",
+    "source": "docs/JOURNAL.md",
+    "defects_found_and_fixed": 1,
+    "runs": [
+      {
+        "id": "D1",
+        "result": "pass",
+        "note": "after 1 manual replay"
+      },
+      {
+        "id": "D2",
+        "result": "fail",
+        "note": "gate missed"
+      },
+      {
+        "id": "D3",
+        "result": "pass"
+      }
+    ]
+  },
   "issues": [
     {
       "number": 47,

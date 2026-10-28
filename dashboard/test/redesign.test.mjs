@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
   parseContract, parseJsonl, parseRunTitle, parseTaskmap, qualityStats, recentActivity, relativeTime, runSpend, shortDuration, shortTaskName, snapshotRunIds,
-  stageSummary, stageTimes, stateLine, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
+  stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
 
@@ -118,7 +118,7 @@ test('catalog: task map joined with contracts, drills dropped, short names and r
   ]);
   assert.deepEqual(c[0].dependsOn, ['x/y']);
   assert.equal(shortTaskName('en/time-unit-ago-format-parser'), 'time-unit-ago-format-parser');
-  assert.equal(areaLabel('en-month-names'), 'Month names');
+  assert.equal(areaLabel('en-month-names'), 'Months');
   assert.equal(areaLabel('common-refiners'), 'Common refiners');
   assert.equal(areaLabel('en-new-things'), 'New things');
   assert.equal(areaLabel(null), AREA_LABELS.other);
@@ -224,22 +224,6 @@ test('board states: done, running, needs you and waiting (dependency, ready, not
   // A new attempt after a merge reopens the task.
   const reopened = taskBoard([...events, ev('dispatched', '2026-10-27T14:00:00Z', { task: 'common/a', issue: 1, attempt: 2 })], catalog, {});
   assert.equal(reopened.tasks[0].state, 'running');
-});
-
-test('status line: paused, running, waiting on you, all done, ready, dependencies, in plain English', () => {
-  const board = (counts, extra = {}) => ({ counts: { done: 0, running: 0, needs: 0, waiting: 0, ...counts }, total: Object.values(counts).reduce((a, b) => a + b, 0), readyWaiting: 0, ...extra });
-  assert.deepEqual(stateLine({ board: board({ done: 26 }) }), { text: 'Idle: all 26 tasks done', level: 'ok' });
-  assert.deepEqual(stateLine({ board: board({ running: 2, done: 3 }) }), { text: 'Running: 2 tasks', level: 'info' });
-  assert.deepEqual(stateLine({ board: board({ running: 1 }) }), { text: 'Running: 1 task', level: 'info' });
-  assert.deepEqual(stateLine({ board: board({ running: 1 }), dispatch: { state: 'paused', reason: 'budget_pause' } }), { text: 'Paused: daily AI budget reached', level: 'warn' });
-  assert.deepEqual(stateLine({ board: board({ done: 1 }), dispatch: { state: 'paused', reason: 'budget_unknown' } }).text, 'Paused: spend unknown');
-  // The kill switch has its own chip, so the state describes the work.
-  assert.deepEqual(stateLine({ board: board({ done: 3 }), dispatch: { state: 'paused', reason: 'kill_switch' } }).text, 'Idle: all 3 tasks done');
-  assert.deepEqual(stateLine({ board: board({ needs: 2, done: 1 }) }), { text: 'Waiting on you: 2 tasks', level: 'warn' });
-  assert.deepEqual(stateLine({ board: board({ waiting: 3, done: 1 }, { readyWaiting: 3 }) }).text, 'Waiting: 3 tasks ready');
-  assert.deepEqual(stateLine({ board: board({ waiting: 4, done: 1 }) }).text, 'Waiting: 4 tasks on dependencies');
-  assert.deepEqual(stateLine({ board: board({}) }).text, 'Idle: no tasks yet');
-  assert.deepEqual(stateLine({ loaded: false }).level, 'loading');
 });
 
 // --- bug 2: the cost join ------------------------------------------------------------------
@@ -384,37 +368,20 @@ test('issue → merged: first auto_ready (else first real dispatch) to the last 
 
 // --- quality and human touch -------------------------------------------------------------------
 
-test('quality: reverts and objections without drills, escaped defects once per main commit, repair success', () => {
-  const sha = (c) => c.repeat(40);
+test('quality: reverts and reviewer objections, safety drills left out', () => {
   const events = [
-    ev('merged', '2026-10-26T17:25:35Z', { pr: 89, task: null, merge_commit_sha: sha('f') }),
-    ev('check_result', '2026-10-26T17:27:19Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('f'), prs: [] }),
-    ev('check_result', '2026-10-26T17:30:00Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('f'), prs: [] }), // a re-run: same defect
-    ev('check_result', '2026-10-26T17:31:00Z', { workflow: 'gates', event: 'push', conclusion: 'failure', head_sha: sha('e'), prs: [] }), // not ci
-    ev('check_result', '2026-10-26T17:32:00Z', { workflow: 'ci', event: 'pull_request', conclusion: 'failure', head_sha: sha('d'), prs: [3] }), // not main
-    ev('merged', '2026-10-27T16:11:41Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: sha('0') }),
-    ev('check_result', '2026-10-27T16:12:00Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('0'), prs: [] }), // the drill's own failure
-    ev('auto_revert', '2026-10-27T16:14:40Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: sha('0'), revert_pr: 126 }),
-    ev('auto_revert', '2026-10-27T16:20:00Z', { pr: 130, task: 'en/real', merge_commit_sha: sha('1'), revert_pr: 131 }),
+    ev('auto_revert', '2026-10-27T16:14:40Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: 'a'.repeat(40), revert_pr: 126 }),
+    ev('auto_revert', '2026-10-27T16:20:00Z', { pr: 130, task: 'en/real', merge_commit_sha: 'b'.repeat(40), revert_pr: 131 }),
+    ev('merged', '2026-10-27T17:00:00Z', { pr: 140, task: 'en/viaPr' }),
+    ev('auto_revert', '2026-10-27T17:10:00Z', { pr: 140, revert_pr: 141 }), // task via its PR
     ev('needs_human', '2026-10-27T14:41:38Z', { task: 'drill/reviewer-objects', reason: 'review_objected', issue: 111, pr: 118 }),
     ev('needs_human', '2026-10-27T18:17:44Z', { task: 'common/abbr', reason: 'review_objected', issue: 26, pr: 136 }),
-    // Repairs: slash merged with no hand-off in between (worked); forward got a hand-off first (failed); a drill's doesn't count.
-    ev('repair_dispatched', '2026-10-27T19:26:59Z', { task: 'common/slash', issue: 32, pr: 141, attempt: 2 }),
-    ev('merged', '2026-10-27T19:59:00Z', { task: 'common/slash', pr: 141 }),
-    ev('repair_dispatched', '2026-10-27T20:36:24Z', { task: 'common/forward', issue: 28, pr: 143, attempt: 2 }),
     ev('needs_human', '2026-10-27T20:47:21Z', { task: 'common/forward', reason: 'repeated_signature', issue: 28, pr: 143 }),
-    ev('merged', '2026-10-27T22:15:00Z', { task: 'common/forward', pr: 143 }),
-    ev('repair_dispatched', '2026-10-27T16:24:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, attempt: 2 }),
-    ev('repair_dispatched', '2026-10-27T23:00:00Z', { task: 'common/pending', issue: 40, pr: 150, attempt: 2 }),
+    ev('needs_human', '2026-10-27T21:00:00Z', { task: 'common/plan', reason: 'review_objected', effect: 'label' }, true), // a dry-run plan
   ];
-  const q = qualityStats(events);
-  assert.equal(q.reverts, 1);
-  assert.deepEqual(q.escaped, { count: 1, shas: [sha('f')] });
-  assert.equal(q.objections, 1);
-  assert.deepEqual(q.repairs, { succeeded: 1, failed: 1, pending: 1, rate: 0.5 });
-  assert.deepEqual(qualityStats([]), { reverts: 0, escaped: { count: 0, shas: [] }, objections: 0, repairs: { succeeded: 0, failed: 0, pending: 0, rate: null } });
+  assert.deepEqual(qualityStats(events), { reverts: 2, objections: 1 });
+  assert.deepEqual(qualityStats([]), { reverts: 0, objections: 0 });
 });
-
 test('human touch: actions in the last 7 days (reviews, enqueues by a person) and the median time to unblock', () => {
   const now = at('2026-10-28T19:00:00Z');
   const events = [
@@ -535,7 +502,7 @@ test('the meta stand-ins are current, and the busy sample shows every board stat
   assert.deepEqual(cost.perTask.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 407], ['en/ordinal', 280]]);
   assert.deepEqual([cost.total, cost.unattributed], [1097, 0]);
   assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 343.5, count: 2 });
-  assert.equal(qualityStats(events).escaped.count, 1);
+  assert.deepEqual(qualityStats(events), { reverts: 0, objections: 0 });
 });
 
 // --- task issues: done-ness that doesn't depend on the audit window ---------------------------

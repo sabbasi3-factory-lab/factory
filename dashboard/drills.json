@@ -1,0 +1,57 @@
+{
+  "as_of": "2026-10-27",
+  "source": "docs/JOURNAL.md",
+  "defects_found_and_fixed": 6,
+  "runs": [
+    {
+      "id": "D1",
+      "result": "pass",
+      "note": "after 1 manual replay"
+    },
+    {
+      "id": "D1b",
+      "result": "pass"
+    },
+    {
+      "id": "D2",
+      "result": "pass"
+    },
+    {
+      "id": "D3",
+      "result": "pass"
+    },
+    {
+      "id": "D4",
+      "result": "pass"
+    },
+    {
+      "id": "D5",
+      "result": "pass"
+    },
+    {
+      "id": "D6",
+      "result": "pass"
+    },
+    {
+      "id": "D7",
+      "result": "pass"
+    },
+    {
+      "id": "D8a",
+      "result": "pass"
+    },
+    {
+      "id": "D8b",
+      "result": "pass"
+    },
+    {
+      "id": "D8c",
+      "result": "pass"
+    },
+    {
+      "id": "D8d",
+      "result": "pass",
+      "note": "after a gate fix"
+    }
+  ]
+}

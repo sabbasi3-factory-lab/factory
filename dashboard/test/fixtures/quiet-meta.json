@@ -10,6 +10,17 @@
     "repair": [],
     "review": []
   },
+  "drills": {
+    "as_of": "2026-10-17",
+    "source": "docs/JOURNAL.md",
+    "defects_found_and_fixed": 0,
+    "runs": [
+      {
+        "id": "D1",
+        "result": "pass"
+      }
+    ]
+  },
   "issues": [
     {
       "number": 31,
