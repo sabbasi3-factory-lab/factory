@@ -180,8 +180,7 @@ test('empty input gives empty, well-defined metrics', async () => {
   assert.equal(m.running.count, null);
   assert.deepEqual(m.running.rows, []);
   assert.equal(m.queue.count, 0);
-  assert.equal(m.mergedToday.count, 0);
-  assert.equal(m.zeroTouch.rate, null);
+  assert.equal('zeroTouch' in m, false, 'zero-touch comes from gh-aw Outcomes now');
   assert.equal(m.aicToday.total, 0);
   assert.equal(m.needsYou.count, 0);
   assert.deepEqual(m.tokensPerTask.rows, []);
@@ -205,9 +204,6 @@ test('fixture metrics: tiles', () => {
   // PR 9: queued, dequeued, queued again. PRs 5, 6 and 7 were merged.
   assert.equal(m.queue.count, 1);
   assert.deepEqual(m.queue.items.map((q) => q.pr), [9]);
-  assert.deepEqual(m.mergedToday, { count: 1, prs: [7] });
-  // Factory PRs 6 (reviewed) and 7 (no human action); PR 5 has no task, so it's not a factory PR.
-  assert.deepEqual(m.zeroTouch, { merged: 2, untouched: 1, rate: 0.5 });
   // Today's newest spend snapshot: 312 + 95 + 410 measured + 2 x 900 reserved (run_finished adds
   // up to only 312 + 410 today); yesterday's 280 is excluded.
   assert.equal(m.aicToday.total, 2617);
@@ -342,18 +338,6 @@ test('needs-you items close when the task moves again; kill switch and budget le
   assert.equal(m.aicToday.total, 8500);
   assert.equal(m.aicToday.level, 'warn');
   assert.equal(deriveMetrics(events, { now: at('2026-10-17T00:00:01Z') }).aicToday.total, 0);
-});
-
-test('zero-touch is n/a until a factory PR merges, and human PRs never count', () => {
-  const base = { dedupe_key: 'k', factory_version: 'v', dry_run: true };
-  const events = [
-    { type: 'pr_opened', timestamp: '2026-10-16T08:00:00Z', payload: { ...base, pr: 1, author: 'someone' } },
-    { type: 'merged', timestamp: '2026-10-16T09:00:00Z', payload: { ...base, pr: 1, merged_at: '2026-10-16T08:59:00Z' } },
-  ];
-  const m = deriveMetrics(events, { now: at('2026-10-16T10:00:00Z') });
-  assert.equal(m.zeroTouch.rate, null);
-  assert.equal(m.mergedToday.count, 1);
-  assert.equal(m.dryRun, true);
 });
 
 test('helpers: day paths, durations and stage times', () => {
@@ -513,7 +497,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
 
   const fresh = statusSummary({ ...base, heartbeat: hbAt(12) });
   assert.equal(fresh.level, 'ok');
-  assert.equal(fresh.text, 'Data fresh · 54 events · audit head abcdef0 · controller heartbeat ok');
+  assert.equal(fresh.text, 'Data fresh · 57 events · audit head abcdef0 · controller heartbeat ok');
 
   assert.equal(statusSummary({ ...base, heartbeat: hbAt(480) }).level, 'ok');
   const late = statusSummary({ ...base, heartbeat: hbAt(481) });
@@ -541,7 +525,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   const err = statusSummary({ ...base, error: 'GitHub API error (HTTP 502).', heartbeat: hbAt(12) });
   assert.equal(err.level, 'alert');
   assert.match(err.text, /^Problem: GitHub API error \(HTTP 502\)\. Showing the last data loaded · controller heartbeat ok$/);
-  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 54 events · /);
+  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 57 events · /);
 
   assert.equal(formatAge(null), 'unknown');
   assert.equal(formatAge(119.9), '119 min');

@@ -10,9 +10,11 @@
 // The CLI loads the page once (four API requests in live mode) and then measures and,
 // with --shots, screenshots it at 1440x900 and 390x844 in the light and dark themes.
 
-// foldWords was 80. The owner asked for a one-screen layout (status line, key numbers, task board
-// and small panels all above the fold at 1440x900) and approved raising it to 150 for that layout.
-export const BUDGETS = Object.freeze({ foldWords: 150, totalWords: 250, sentenceWords: 8, foldY: 900 });
+// foldWords: 80 originally, 150 for the one-screen layout, now 120: the owner asked for a results
+// scoreboard on top (a status line and five plain sentences, each with one big number) and fewer
+// words above the fold. The requested sentences are longer than 8 words; each number and link is
+// its own inline-block run (and clauses are split by "·"), so every run still fits sentenceWords.
+export const BUDGETS = Object.freeze({ foldWords: 120, totalWords: 250, sentenceWords: 8, foldY: 900 });
 
 /** Truthy once the dashboard has rendered its data (app.js sets data-ready="1"). */
 export const READY_EXPR = "document.documentElement.dataset.ready === '1'";
@@ -162,26 +164,26 @@ export function measureGlance({ foldY = 900, maxSentenceWords = 8 } = {}) {
 }
 
 /**
- * The one-screen layout: the key numbers, the task board, the small panels and the folded
- * details, as document rectangles ({ id, top, bottom, left, width }, in px from the top of the
- * page), so a test can check what sits above the fold.
+ * The layout: the status line, the scoreboard (and its five items), the task board and Details,
+ * as document rectangles ({ id, top, bottom, left, width }, in px from the top of the page), so a
+ * test can check what sits above the fold.
  */
 export function measureLayout() {
   const rect = (el) => {
     const b = el.getBoundingClientRect();
-    return { id: el.id || el.getAttribute('aria-labelledby') || el.className, top: Math.round(b.top + scrollY), bottom: Math.round(b.bottom + scrollY), left: Math.round(b.left), width: Math.round(b.width) };
+    return { id: el.id || el.className, top: Math.round(b.top + scrollY), bottom: Math.round(b.bottom + scrollY), left: Math.round(b.left), width: Math.round(b.width) };
   };
-  const all = (sel) => [...document.querySelectorAll(sel)].filter((el) => el.getBoundingClientRect().height > 0).map(rect);
   const one = (sel) => {
     const el = document.querySelector(sel);
-    return el ? rect(el) : null;
+    return el && el.getBoundingClientRect().height > 0 ? rect(el) : null;
   };
   return {
-    numbers: all('.numbers-main > .ntile, .numbers > .ntile'),
+    status: one('.glance'),
+    score: one('#score'),
+    items: [...document.querySelectorAll('#score .score-item')].map(rect),
     board: one('#board'),
     tiles: document.querySelectorAll('#board .tile').length,
-    minis: all('.minis > .mini'),
-    folds: all('.folds > section'),
+    details: one('#details'),
   };
 }
 

@@ -8,9 +8,9 @@
 //   no agents running, ten merged PRs, and heartbeats and anchors at the irregular
 //   cadence GitHub's scheduler really delivers (every 2 to 8 h, not hourly), plus three
 //   tasks done earlier, so the board reads "all done".
-// - fixtures/sample-meta.json and quiet-meta.json: the task map, contracts and agent run lists
-//   each sample uses instead of GitHub (flow- and block-style task map entries, `[]` and block
-//   dependency lists, titled and untitled runs).
+// - fixtures/sample-meta.json and quiet-meta.json: the task map, contracts, task issues, build
+//   cost and drill record each sample uses instead of GitHub. The busy sample's log also has a
+//   gh-aw outcomes_snapshot; the quiet one has none ("gh-aw Outcomes not available yet").
 //
 //   node dashboard/test/make-fixture.mjs
 //
@@ -24,8 +24,8 @@ export const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample.jsonl', imp
 export const ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/anchors.jsonl', import.meta.url));
 export const QUIET_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet.jsonl', import.meta.url));
 export const QUIET_ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-anchors.jsonl', import.meta.url));
-// Stand-ins for the task map, the contracts and the Actions run lists, so sample mode reads nothing
-// from GitHub: { taskmap, contracts: { id: yaml }, runs: { implement, repair, review } }.
+// Stand-ins for the task map, the contracts, the task issues, the build cost and the drill record,
+// so sample mode reads nothing from GitHub: { taskmap, contracts: { id: yaml }, issues, buildCost?, drills }.
 export const META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample-meta.json', import.meta.url));
 export const QUIET_META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-meta.json', import.meta.url));
 // The preview pins its clock 12 min after the last event, so ages and "today" read as
@@ -47,6 +47,29 @@ function uuid(seed) {
   h[16] = '89ab'[parseInt(h[16], 16) % 4];
   const s = h.join('');
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}`;
+}
+
+// The busy sample's gh-aw Outcomes snapshot: PR 6 accepted (not zero-touch: the owner reviewed
+// and enqueued it), PR 7 accepted zero-touch, PR 8 pending under repair, casual-date's run still
+// without outputs, a reviewer run with no task, a drill PR rejected, and one malformed run.
+function outcomesFixture() {
+  const PR = (n) => `https://github.com/sabbasi3-factory-lab/chrono-node-rs/pull/${n}`;
+  const item = (type, url, status, zeroTouch = null, evidence = 'strong') => ({ type, object_url: url, outcome_status: status, evidence_strength: evidence, zero_touch: zeroTouch });
+  const run = (run_id, workflow, task, drill, created_at, aic, items) => ({ run_id, workflow, task, drill, created_at, aic, conclusion: 'success', eval: 'ok', evaluated_at: '2026-10-16T10:58:00Z', items });
+  const runs = [
+    run(4001, 'implement', 'en/ordinal', false, '2026-10-15T14:00:09Z', 179, [item('create_pull_request', PR(6), 'accepted', false), item('add_comment', null, 'pending', null, 'medium')]),
+    run(4101, 'implement', 'en/weekday-parser', false, '2026-10-16T08:06:08Z', 200, [item('create_pull_request', PR(7), 'accepted', true)]),
+    run(4102, 'implement', 'en/month-parser', false, '2026-10-16T09:01:07Z', 262, [item('create_pull_request', PR(8), 'pending')]),
+    run(4103, 'repair', 'en/month-parser', false, '2026-10-16T10:00:08Z', null, [item('push_to_pull_request_branch', PR(8), 'pending')]),
+    run(4104, 'implement', 'en/casual-date', false, '2026-10-16T10:31:06Z', null, []),
+    run(4105, 'review', null, false, '2026-10-16T08:51:10Z', 61, [item('create_check_run', null, 'unknown', null, 'none')]),
+    run(4200, 'implement', 'drill/repair-ok', true, '2026-10-15T10:00:00Z', 150, [item('create_pull_request', PR(3), 'rejected')]),
+    { run_id: 'not-a-number', workflow: 'implement', drill: false, items: [] },
+  ];
+  return {
+    source_run_id: 9001, source_run_attempt: 1, gh_aw_version: 'v0.92.0', evaluated_at: '2026-10-16T10:58:00Z', mode: 'full', runs,
+    summary: { runs: runs.length, accepted: 2, rejected: 1, pending: 3, unknown: 1 },
+  };
 }
 
 const hb = (hour, runId, openPrs, decisions) => ({
@@ -79,7 +102,8 @@ const STEPS = [
   ['2026-10-15T14:50:00Z', { type: 'check_result', workflow: 'ci', run_id: 3003, run_attempt: 1, event: 'pull_request', head_sha: hex('h6'), prs: [6], conclusion: 'success', completed_at: '2026-10-15T14:49:30Z' }],
   ['2026-10-15T14:55:00Z', { type: 'check_result', workflow: 'gates', run_id: 3004, run_attempt: 1, event: 'pull_request', head_sha: hex('h6'), prs: [6], conclusion: 'success', completed_at: '2026-10-15T14:54:31Z', heldout_seed: '17345990012231457' }],
   ['2026-10-15T15:10:00Z', { type: 'human_action', action: 'review', pr: 6, reviewer: OWNER, state: 'commented', submitted_at: '2026-10-15T15:09:12Z' }],
-  ['2026-10-15T15:12:00Z', { type: 'queued', pr: 6, actor: CONTROLLER, at: '2026-10-15T15:11:58Z' }],
+  // The owner puts the agent's PR 6 in the merge queue by hand: one manual step after go-live.
+  ['2026-10-15T15:12:00Z', { type: 'queued', pr: 6, actor: OWNER, at: '2026-10-15T15:11:58Z' }],
   ['2026-10-15T15:30:00Z', { type: 'merged', pr: 6, task: 'en/ordinal', merge_commit_sha: hex('m6'), merged_at: '2026-10-15T15:29:44Z' }],
   ['2026-10-15T15:31:00Z', { type: 'task_done', task: 'en/ordinal', issue: 41, pr: 6, effect: 'close_task', reason: 'task_merged' }],
   ['2026-10-15T15:45:00Z', { type: 'deployed', task: 'en/ordinal', pr: 6, merge_commit_sha: hex('m6'), deployment_id: 5001 }],
@@ -95,6 +119,8 @@ const STEPS = [
   ['2026-10-16T08:50:30Z', { type: 'review_dispatched', task: 'en/weekday-parser', issue: 42, pr: 7, head_sha: hex('h7'), run_id: 3006, effect: 'dispatch_workflow:review', reason: 'review_needed' }],
   ['2026-10-16T08:52:00Z', { type: 'queued', pr: 7, actor: CONTROLLER, at: '2026-10-16T08:51:51Z' }],
   ['2026-10-16T09:00:06Z', hb('2026-10-16T09', 2025, 1, 6)],
+  // A malformed gh-aw Outcomes snapshot (no runs list): ignored.
+  ['2026-10-16T09:00:15Z', { type: 'outcomes_snapshot', source_run_id: 9000, evaluated_at: '2026-10-16T09:00:10Z', gh_aw_version: 'v0.92.0', mode: 'full' }],
   ['2026-10-16T09:00:20Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 1307, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 900, status: 'reserved' }], runs_total: 3 }],
   ['2026-10-16T09:00:30Z', { type: 'picked', task: 'en/month-parser', issue: 43, effect: 'pick', reason: 'priority' }],
   ['2026-10-16T09:01:00Z', { type: 'dispatched', task: 'en/month-parser', issue: 43, attempt: 1, contract_sha: hex('c43', 7), workflow: 'implement', run_id: 4102, model: 'pinned-model-a', effect: 'dispatch', reason: 'ready' }],
@@ -113,8 +139,10 @@ const STEPS = [
   ['2026-10-16T10:50:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:49:51Z' }],
   ['2026-10-16T10:55:00Z', { type: 'dequeued', pr: 9, actor: CONTROLLER, at: '2026-10-16T10:54:40Z' }],
   ['2026-10-16T10:58:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:57:30Z' }],
+  ['2026-10-16T10:58:30Z', { type: 'outcomes_snapshot', ...outcomesFixture() }],
   ['2026-10-16T10:59:00Z', { type: 'auto_ready', task: 'common/iso-date', issue: 47, reason: 'deps_merged' }],
   ['2026-10-16T11:00:00Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 2617, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 410, status: 'measured' }, { run_id: 4103, aic: 900, status: 'reserved' }, { run_id: 4104, aic: 900, status: 'reserved' }], runs_total: 5 }],
+  ['2026-10-16T11:00:01Z', { type: 'outcomes_checked', source_run_id: 9002, source_run_attempt: 1, same_as_run_id: 9001, runs_hash: 'sha256:' + hex('runs', 64) }],
   ['2026-10-16T11:00:03Z', hb('2026-10-16T11', 2027, 3, 13)],
 ];
 
@@ -311,7 +339,6 @@ function taskmapYaml(tasks) {
   return lines.join('\n');
 }
 
-const run = (id, createdAt, title) => ({ id, created_at: createdAt, display_title: title });
 
 // A task-issue list entry as GitHub returns it (only the fields the page reads). `marker: false`
 // leaves the body without the hidden task marker, so the title prefix is used.
@@ -329,16 +356,11 @@ export function buildMeta() {
   return {
     taskmap: taskmapYaml(SAMPLE_TASKS),
     contracts: Object.fromEntries(SAMPLE_TASKS.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
-    runs: {
-      implement: [
-        run(4104, '2026-10-16T10:31:06Z', 'Implement en/casual-date #44 attempt 1'),
-        run(4102, '2026-10-16T09:01:07Z', 'Implement en/month-parser #43 attempt 1'),
-        // Older runs had no task in the title: attributed by dispatch time.
-        run(4101, '2026-10-16T08:06:08Z', 'Implement one factory task'),
-        run(4001, '2026-10-15T14:00:09Z', 'Implement en/ordinal #41 attempt 1'),
-      ],
-      repair: [run(4103, '2026-10-16T10:00:08Z', 'Repair en/month-parser #43 attempt 2')],
-      review: [run(4105, '2026-10-16T08:51:10Z', 'Review one factory PR')],
+    // build-cost.json and drills.json stand-ins (one drill failed, to show the count is computed).
+    buildCost: { ai_units: 111000, usd: 1110, as_of: '2026-10-15', source: 'sample build journal' },
+    drills: {
+      as_of: '2026-10-15', source: 'docs/JOURNAL.md', defects_found_and_fixed: 1,
+      runs: [{ id: 'D1', result: 'pass', note: 'after 1 manual replay' }, { id: 'D2', result: 'fail', note: 'gate missed' }, { id: 'D3', result: 'pass' }],
     },
     // GET /issues?state=all&labels=factory:task. en/range has no issue (its tile links the contract).
     issues: [
@@ -360,7 +382,8 @@ export function buildQuietMeta() {
   return {
     taskmap: taskmapYaml(tasks),
     contracts: Object.fromEntries(tasks.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
-    runs: { implement: [], repair: [], review: [] }, // dry run: no agent ran
+    // No buildCost: the quiet sample shows the "build cost unavailable" path.
+    drills: { as_of: '2026-10-17', source: 'docs/JOURNAL.md', defects_found_and_fixed: 0, runs: [{ id: 'D1', result: 'pass' }] },
     issues: QUIET_TASKS.map(([id, num, , ready, , mergeMin]) => issue(num, id, 'closed', new Date(Date.parse(ready) + mergeMin * 60000 + 10000).toISOString().replace(/\.\d{3}Z$/, 'Z'))),
   };
 }

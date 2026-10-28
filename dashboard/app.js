@@ -3,12 +3,13 @@
 // and the folded details. All DOM writes use textContent or createElement(NS), never innerHTML,
 // and widths go through the CSSOM, so the strict CSP holds. Every request is a GET.
 import {
-  AGENT_WORKFLOWS, CADENCE_NOTE, DEFAULTS, FOLLOW_UP_MIN, HUMAN_DAYS, MEDIAN_DAYS, STAGES, STAGE_LABELS, STALE_DATA_MIN, TASK_STATES, TASK_STATE_LABELS,
-  anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths,
-  fallbackCatalog, formatAge, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
-  liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, prRef, qualityStats, recentActivity,
-  relativeTime, reviewItems, shortDuration, shortTaskName, shortTitle, snapshotRunIds, stageSummary, stageTimes, stateLine, statusSummary,
-  subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
+  CADENCE_NOTE, DEFAULTS, FOLLOW_UP_MIN, HUMAN_DAYS, MEDIAN_DAYS, STAGES, STAGE_LABELS, STALE_DATA_MIN, TASK_STATES, TASK_STATE_LABELS,
+  anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, eventTime,
+  fallbackCatalog, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
+  liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
+  relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
+  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, latestOutcomes, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
+  isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -20,7 +21,8 @@ const TOKEN_KEY = 'factory-dashboard.github-token';
 const THEME_KEY = 'factory-dashboard.theme';
 // Sample data (relative URLs, so they work locally and on Pages): ?fixture=1 is a busy
 // factory, ?fixture=quiet the quiet state the live page is usually in. The meta file stands in
-// for the task map, the contracts and the Actions run lists, so sample mode makes no GitHub call.
+// for the task map, the contracts, the task issues, the build cost and the drill record, so sample
+// mode makes no GitHub call.
 const FIXTURES = Object.freeze({
   1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl', meta: 'test/fixtures/sample-meta.json' },
   quiet: { events: 'test/fixtures/quiet.jsonl', anchors: 'test/fixtures/quiet-anchors.jsonl', meta: 'test/fixtures/quiet-meta.json' },
@@ -51,10 +53,8 @@ const VERIFIER_RETRY_MS = 60000;
 const TASKMAP_PATH = 'scripts/seed-backlog/taskmap.yaml';
 const META_MAX_AGE_MS = 60 * 60000;
 const META_RETRY_MS = 5 * 60000;
-// The agent workflow run lists (3 API calls, with ETags), read only when a spend snapshot names
-// a run that isn't in them yet, at most every 10 min, and only with enough API budget left.
-const RUNS_MIN_MS = 10 * 60000;
-const RUNS_RESERVE = 5;
+// build-cost.json and drills.json: same-origin static files (no API cost), read on load and hourly.
+const STATICS_MAX_AGE_MS = 60 * 60000;
 // The task issues (one API call, with an ETag): their open/closed state decides which tasks are
 // done, whatever the audit window holds. Read on load, then at most every 30 min, or sooner (but
 // at most every 2 min) when the audit log shows a new task_done or merged.
@@ -83,6 +83,7 @@ const state = {
   rate: null,
   error: null,
   windowDay: null,
+  partialHistory: false, // true when only the window's day files could be loaded
   lastCheck: null,
   lastOkAt: null, // last successful load or check (Date.now() ms), for "updated … ago"
   nextCheckAt: null,
@@ -102,12 +103,12 @@ const state = {
   verifier: { status: 'pending', text: null, detail: null, attemptedAt: null, branchSeen: false },
   // The task catalog: status 'pending' | 'ok' | 'error'; catalog stays from the last good read.
   meta: { status: 'pending', catalog: null, missing: [], error: null, fetchedAt: null, attemptedAt: null },
-  // Agent workflow runs: status 'idle' (not needed yet) | 'ok' | 'error'; lists: workflow -> { etag, runs }.
-  runs: { status: 'idle', lists: new Map(), error: null, fetchedAt: null, attemptedAt: null, tried: new Set(), waitingForRate: false },
   // Task issues: map (task id -> issue) from the last good read, or null; doneMark is the count of
   // task_done and merged events when it was read, so a new one triggers an early refresh.
   taskIssues: { map: null, etag: null, items: null, error: null, fetchedAt: null, attemptedAt: null, doneMark: null, truncated: false },
   fixtureMeta: null,
+  // build-cost.json and drills.json, deployed with the page: validateBuildCost/validateDrills results.
+  statics: { build: null, drills: null, attemptedAt: null },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -157,6 +158,7 @@ function relText(ms, bare) {
 
 function showTimeline(key) {
   state.subject = key;
+  $('details').open = true;
   $('timeline-fold').open = true;
   safe('timeline', () => renderTimeline(deriveMetrics(state.events, { now: now() })));
   $('timeline-fold').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -306,10 +308,14 @@ async function listAuditFiles(sha) {
   }
 }
 
+// The whole log: every day file in the tree listing (raw downloads don't count against the API
+// limit), so the scoreboard's numbers are lifetime results and the chain is verified from its
+// first event. If the listing can't be read, only the window's days are fetched and the page says
+// the scoreboard covers that window.
 async function fetchDayFiles(sha) {
-  const wanted = dayPaths(now(), DAYS);
   const listing = await listAuditFiles(sha);
-  const paths = listing ? existingDayPaths(listing, wanted) : wanted;
+  const paths = listing ? allDayPaths(listing) : dayPaths(now(), DAYS);
+  state.partialHistory = !listing;
   const texts = await Promise.all(paths.map(async (path) => {
     const res = await fetch(`${RAW}/${REPO}/${sha}/${path}`, { credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (res.status === 404) return '';
@@ -524,7 +530,7 @@ async function maybeRefreshVerifier() {
   }
 }
 
-// The sample's stand-in for the task map, contracts and Actions run lists (read once).
+// The sample's stand-in for the task map, contracts, task issues, build cost and drills (read once).
 function loadFixtureMeta() {
   state.fixtureMeta ??= fetch(META_FIXTURE_URL, { cache: 'no-store' }).then((res) => {
     if (!res.ok) throw new Error(`sample meta: HTTP ${res.status}`);
@@ -576,64 +582,6 @@ async function maybeRefreshMeta() {
   state.dataVersion++;
 }
 
-async function fetchRunList(workflow) {
-  const cached = state.runs.lists.get(workflow);
-  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
-  if (cached?.etag) headers['If-None-Match'] = cached.etag;
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${API}/repos/${REPO}/actions/workflows/${workflow}.lock.yml/runs?per_page=100`, {
-    headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
-  });
-  readRate(res);
-  if (res.status === 304 && cached) return cached;
-  if (!res.ok) throw new Error(`${workflow} runs: HTTP ${res.status}`);
-  const body = await res.json();
-  if (!Array.isArray(body?.workflow_runs)) throw new Error(`${workflow} runs: unexpected response`);
-  const runs = body.workflow_runs.filter((r) => isNum(r?.id)).map((r) => ({
-    id: r.id, created_at: typeof r.created_at === 'string' ? r.created_at : null, display_title: typeof r.display_title === 'string' ? r.display_title : '', workflow,
-  }));
-  return { etag: res.headers.get('etag'), runs };
-}
-
-// The run lists are read only when a spend snapshot names a run they don't list yet (each run id
-// is looked for once), at most every 10 min, and only with API requests to spare. Never throws.
-async function maybeRefreshRuns() {
-  const r = state.runs;
-  if (FIXTURE) {
-    if (r.status === 'ok') return;
-    try {
-      const meta = await loadFixtureMeta();
-      for (const wf of AGENT_WORKFLOWS) r.lists.set(wf, { etag: null, runs: (meta.runs?.[wf] ?? []).map((x) => ({ ...x, workflow: wf })) });
-      Object.assign(r, { status: 'ok', error: null, fetchedAt: Date.now() });
-    } catch (err) {
-      Object.assign(r, { status: 'error', error: err instanceof Error ? err.message : String(err) });
-    }
-    state.dataVersion++;
-    return;
-  }
-  const listed = new Set((agentRuns() ?? []).map((x) => x.id));
-  const missing = [...snapshotRunIds(state.events)].filter((id) => !listed.has(id) && !r.tried.has(id));
-  r.waitingForRate = false;
-  if (!missing.length) return;
-  if (r.attemptedAt != null && Date.now() - r.attemptedAt < RUNS_MIN_MS) return;
-  if (state.rate && state.rate.remaining < AGENT_WORKFLOWS.length + RUNS_RESERVE) {
-    r.waitingForRate = true;
-    return;
-  }
-  r.attemptedAt = Date.now();
-  try {
-    const lists = await Promise.all(AGENT_WORKFLOWS.map(fetchRunList));
-    AGENT_WORKFLOWS.forEach((wf, i) => r.lists.set(wf, lists[i]));
-    Object.assign(r, { status: 'ok', error: null, fetchedAt: Date.now() });
-    for (const id of missing) r.tried.add(id);
-  } catch (err) {
-    r.status = r.lists.size === AGENT_WORKFLOWS.length ? 'ok' : 'error';
-    r.error = err instanceof Error ? err.message : String(err);
-  }
-  state.dataVersion++;
-}
-
 const doneMark = () => state.events.filter((e) => e.type === 'task_done' || e.type === 'merged').length;
 
 // Never throws: on failure the last good map stays (and says so), or the board uses the audit log only.
@@ -679,11 +627,42 @@ async function maybeRefreshTaskIssues() {
   state.dataVersion++;
 }
 
-/** Every listed agent run, or null when the lists haven't been read. */
-function agentRuns() {
-  const r = state.runs;
-  if (r.lists.size < AGENT_WORKFLOWS.length) return null;
-  return [...r.lists.values()].flatMap((l) => l.runs);
+// Reads one same-origin JSON file and validates it; never throws.
+async function readStatic(path, validate) {
+  try {
+    const res = await fetch(path, { cache: 'no-cache', credentials: 'omit' });
+    if (!res.ok) return { ok: false, error: `${path}: HTTP ${res.status}` };
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      return { ok: false, error: `${path}: not valid JSON` };
+    }
+    const r = validate(data);
+    return r.ok ? r : { ok: false, error: `${path}: ${r.error}` };
+  } catch (err) {
+    return { ok: false, error: `${path}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+async function maybeRefreshStatics() {
+  const st = state.statics;
+  if (st.attemptedAt != null && Date.now() - st.attemptedAt < STATICS_MAX_AGE_MS) return;
+  st.attemptedAt = Date.now();
+  if (FIXTURE) {
+    // The sample's stand-ins (a missing one exercises the "unavailable" wording).
+    try {
+      const meta = await loadFixtureMeta();
+      const one = (key, validate) => (key in meta ? (validate(meta[key]).ok ? validate(meta[key]) : { ok: false, error: `${key}: ${validate(meta[key]).error}` }) : { ok: false, error: `${key} missing from the sample` });
+      st.build = one('buildCost', validateBuildCost);
+      st.drills = one('drills', validateDrills);
+    } catch (err) {
+      st.build = st.drills = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  } else {
+    [st.build, st.drills] = await Promise.all([readStatic('build-cost.json', validateBuildCost), readStatic('drills.json', validateDrills)]);
+  }
+  state.dataVersion++;
 }
 
 async function tick() {
@@ -697,7 +676,7 @@ async function tick() {
       await maybeRefreshVerifier();
       await maybeRefreshMeta();
       await maybeRefreshTaskIssues();
-      await maybeRefreshRuns();
+      await maybeRefreshStatics();
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
@@ -709,7 +688,7 @@ async function tick() {
         await maybeRefreshVerifier();
         await maybeRefreshMeta();
         await maybeRefreshTaskIssues();
-        await maybeRefreshRuns();
+        await maybeRefreshStatics();
       }
     }
     state.error = null;
@@ -755,16 +734,25 @@ function buildView(m) {
   const catalog = state.meta.catalog ?? (state.meta.status === 'error' ? fallbackCatalog(state.events) : []);
   const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items, issues: state.taskIssues.map });
   const dispatch = latestDispatchState(state.events);
-  const cost = costJoin(state.events, agentRuns(), { now: t, days: MEDIAN_DAYS });
-  const doneIds = board.tasks.filter((x) => x.state === 'done').map((x) => x.id);
+  // gh-aw Outcomes: the newest snapshot judges the agents' PRs and maps runs to tasks; the full
+  // cost (agent plus threat detection) comes from the spend snapshots, joined by run id.
+  const outcomes = latestOutcomes(state.events);
+  const cost = costJoin(state.events, outcomes?.snapshot.runs ?? null, { now: t, days: MEDIAN_DAYS });
+  const done = board.tasks.filter((x) => x.state === 'done');
+  const doneIds = done.map((x) => x.id);
+  const doneTimes = done.map((x) => x.since).filter(isNum);
   return {
     board,
     dispatch,
     banner: dispatchBanner(state.events, { now: t }),
-    state: stateLine({ loaded: state.loaded, board, dispatch }),
     cost,
     taskCost: medianTaskCost(cost, doneIds),
-    toMerged: issueToMerged(state.events, { now: t, days: MEDIAN_DAYS }),
+    // Speed: every done real task whose start and merge are in the loaded audit log.
+    toMerged: issueToMerged(state.events, { now: t, days: Infinity, tasks: new Set(doneIds) }),
+    doneSpan: doneTimes.length ? [Math.min(...doneTimes), Math.max(...doneTimes)] : null,
+    steps: humanSteps(state.events),
+    outcomes,
+    outcomesSum: outcomes ? outcomesSummary(outcomes.snapshot) : null,
     quality: qualityStats(state.events),
     human: humanTouch(state.events, { now: t, days: HUMAN_DAYS }),
     live: liveness(state.events, { now: t, inFlight: board.counts.running > 0, dispatch }),
@@ -806,17 +794,17 @@ function render({ full = false } = {}) {
     console.error('dashboard: deriving Needs you failed', err);
   }
   try {
-    renderHeader(m, v);
+    renderHeader(m, v, needs);
   } catch (err) {
     setStatus(`Problem showing the header: ${err?.message ?? err}`);
   }
   const loaded = state.loaded;
   const known = FIXTURE || prsKnown();
-  renderIf('numbers', [loaded, v && numbersSig(v)], withMetrics((mm, vv) => renderNumbers(vv)), full);
-  renderIf('needs', [loaded, state.error, known, needs?.rs, needs?.items.map((i) => [i.key, i.since, i.title, i.reason])], withMetrics((mm) => renderNeeds(mm, needs ?? needsView(mm))), full);
+  renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
-  renderIf('cost', [loaded, v && costSig(m, v)], withMetrics((mm, vv) => renderCost(mm, vv)), full);
-  renderIf('quality', [loaded, v?.quality], withMetrics((mm, vv) => renderQuality(vv)), full);
+  renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
+  renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.lastAt, v?.cost.agentCompare], withMetrics((mm, vv) => renderOutcomes(vv)), full);
+  renderIf('about', [loaded, v && scoreSig(v), state.partialHistory, state.records.length], withMetrics((mm, vv) => renderAbout(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
   renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
   renderIf('recent', [loaded, v?.recent.map((r) => [r.text, r.at])], withMetrics((mm, vv) => renderRecent(vv)), full);
@@ -831,7 +819,7 @@ function render({ full = false } = {}) {
   updateClockCells();
   refreshTip();
   // Readiness marker for tests and tools: data (or its error) is shown, and in live mode the
-  // open-PR lists, the task catalog and (when needed) the run lists have been read or have failed.
+  // open-PR lists, the task catalog and the task issues have been read or have failed.
   const settled = state.loaded || state.error || state.noLog;
   const sidesRead = FIXTURE || state.prs.fetchedAt != null || state.prs.error;
   if (settled && sidesRead && state.meta.status !== 'pending') document.documentElement.dataset.ready = '1';
@@ -945,7 +933,6 @@ const HEALTH_RULE = `Healthy: fresh data, verified chain, heartbeat within ${HB_
   + `Degraded: last refresh failed, data over ${STALE_DATA_MIN} min old, heartbeat late (over ${HB_WARN}), chain not verified, verifier late (over ${VF_WARN}) or not set up.\n`
   + `Down: no audit log, broken chain, heartbeat missing or over ${HB_ALERT}, verifier over ${VF_ALERT} or unreadable.\n`
   + 'Paused: dispatch held by a gate (spend, budget, Actions load), nothing else wrong.';
-const STATE_ICON_NAME = { ok: 'ok', warn: 'warn', info: 'play', loading: null };
 
 /** The anchors in the verifier file, or [] if it isn't loaded or isn't valid. */
 function loadedAnchors() {
@@ -957,7 +944,7 @@ function loadedAnchors() {
 /** Tooltip lines with the cadence the scheduled jobs really ran at, from the loaded data. */
 function cadenceLines(anchors = loadedAnchors()) {
   return {
-    heartbeat: cadenceText('Heartbeats', observedCadence(heartbeatTimes(state.events)), DAYS),
+    heartbeat: cadenceText('Check-ins', observedCadence(heartbeatTimes(eventsInWindow(state.events, { now: now(), days: DAYS }))), DAYS),
     verifier: cadenceText('Verifications', observedCadence(anchorTimes(anchors, { now: now(), days: DAYS })), DAYS),
   };
 }
@@ -977,18 +964,7 @@ function setChip(id, { hidden = false, tone = null, iconName = null, text = '', 
   el.setAttribute('aria-describedby', `${id}-tip`);
 }
 
-function stateTip(v) {
-  const c = v.board.counts;
-  const lines = [
-    v.board.total ? `Tasks: ${c.done} done, ${c.running} running, ${c.needs} need you, ${c.waiting} waiting (of ${v.board.total}).` : 'No tasks in the catalog yet.',
-  ];
-  if (v.banner) lines.push('', v.banner.text.replace(/ (since|\(recorded) [^:]*:/, ':'), v.banner.tip);
-  else if (v.dispatch?.state === 'running') lines.push('', 'The controller is dispatching work.');
-  lines.push('', 'Running: work started on a task and not merged yet. Paused: dispatch held by a gate. Waiting: tasks ready for a free slot, or blocked by dependencies. Idle: nothing to do.');
-  return lines.join('\n');
-}
-
-function renderHeader(m, v) {
+function renderHeader(m, v, needs) {
   const chain = state.chain;
   const hb = m?.heartbeat ?? null;
   const dataAgeMin = FIXTURE || state.lastOkAt == null ? null : (Date.now() - state.lastOkAt) / 60000;
@@ -1002,51 +978,44 @@ function renderHeader(m, v) {
     : chain.status === 'verified'
       ? `Chain verified: ${chain.total} event${chain.total === 1 ? '' : 's'}, ${chain.windowStart === 'genesis' ? 'back to the first event of the log' : 'every hash and parent link in the window'}`
       : `Chain broken at event ${chain.brokenAt} (${chain.brokenSource}: ${chain.brokenReason})`;
+  // Tooltips stay at two short sentences; the rule, the chain and the cadence are in Details.
+  state.healthView = { health, detail, chainLine, verifier };
+  const first = health.problems[0];
+  const hbAgo = hb?.at ? relativeTime(parseTime(hb.at), now()) : null;
   setChip('health', {
     tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.level === 'loading' ? `… ${health.label}` : health.label,
-    tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine,
-      ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE,
-      ...(state.loaded ? (({ heartbeat, verifier: vf }) => ['', `Observed: ${heartbeat}`, `Observed: ${vf}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
+    tipText: health.level === 'loading' ? 'Loading the audit log.'
+      : health.level === 'ok' ? `Healthy: the audit log is verified, and the factory checked in ${hbAgo ?? 'recently'}.`
+        : first?.code === 'paused' ? 'Paused: new work waits for a safety gate. The rule is under Details, Liveness.'
+          : `${health.label}: ${segText(plainProblem(first, { heartbeatAt: parseTime(hb?.at) }), now())}. The rule is under Details, Liveness.`,
   });
-  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}${v && state.loaded ? `. ${v.state.text}` : ''}`);
+  setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
   renderVerifierLine(verifier);
 
-  const enabled = m?.killSwitch?.enabled ?? null;
-  setChip('kill-chip', {
-    // Off is the deliberate, safe state: neutral grey, not red (red means Down).
-    hidden: enabled == null, tone: enabled ? 'ok' : 'muted', iconName: 'power', text: enabled ? 'Factory on' : 'Factory off',
-    tipText: `factory_enabled from the latest heartbeat${m?.killSwitch?.at ? ` (${relativeTime(parseTime(m.killSwitch.at), now())}, ${m.killSwitch.at})` : ''}; off means no new dispatches`,
-  });
-  const st = v?.state ?? null;
-  setChip('state-chip', st && state.loaded
-    ? { tone: TONE[st.level] ?? 'info', iconName: STATE_ICON_NAME[st.level] ?? 'dot', text: st.text, tipText: stateTip(v) }
-    : { hidden: true });
+  renderParts(m, v, needs, health);
   const dryRun = m?.dryRun ?? null;
   const version = m?.factoryVersion ?? null;
   // Live is the normal state, so only a dry run gets a chip (the version is in the "updated" tooltip).
   setChip('dry-badge', {
     hidden: dryRun !== true, tone: 'warn', iconName: 'info', text: 'Dry run',
-    tipText: `Decisions are logged, not acted on${version ? `\nFactory version ${version}` : ''}`,
+    tipText: "Dry run: the factory logs its decisions but doesn't act on them.",
   });
-  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${iso(now())}. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data, read offline. Remove ?fixture=${FIXTURE_PARAM} from the address for live data.` });
 
   const meta = [];
   if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
   else {
     if (state.lastCheck) meta.push(`checked ${relativeTime(state.lastCheck, Date.now())}`);
     if (state.nextCheckAt) meta.push(`next ${relativeTime(state.nextCheckAt, Date.now())}`);
-    const r = state.rate;
-    if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${relativeTime(r.reset, Date.now())}` : ''));
+    if (state.rate) meta.push(`API ${state.rate.remaining}/${state.rate.limit} left` + (state.rate.reset ? `, resets ${relativeTime(state.rate.reset, Date.now())}` : ''));
     meta.push(getToken() ? 'your token' : 'no token');
   }
   const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
-  $('updated-text').textContent = age ? `updated ${age} ago` : state.error ? 'not updated' : 'loading…';
-  setTip('updated', [
-    `${REPO}, ${BRANCH} branch, last ${DAYS} UTC days`,
-    meta.join(' · '),
-    version ? `Factory version ${version}` : null,
-    `Checks every ${POLL_S} s at most, about once a minute without a token.`,
-  ].filter(Boolean).join('\n'));
+  // The clock icon and the tooltip say "updated"; the visible text is just the age.
+  $('updated-text').textContent = age ? `${age} ago` : state.error ? 'not updated' : 'loading…';
+  const r = state.rate;
+  setTip('updated', `${age ? `Data updated ${age} ago` : 'Data not loaded yet'}, from the audit log on GitHub.${!FIXTURE && r ? ` ${r.remaining} of ${r.limit} API requests left this hour.` : ''}`);
+  if (version) meta.push(`factory version ${version}`);
   $('meta-settings').textContent = meta.length ? `Now: ${meta.join(' · ')}.` : '';
   $('poll-hint').textContent = `Checks every ${POLL_S} s at most (?poll=N), spread out to stay within the rate limit: about once a minute without a token. Window: ${DAYS} days (?days=N).`;
 }
@@ -1059,81 +1028,11 @@ function renderVerifierLine(v) {
 }
 
 // ---------------------------------------------------------------------------
-// Key numbers: number + short label; the definition and detail are in each tooltip
+// Segments (lib.js builders) to DOM: every number and link is its own inline-block run, so a long
+// sentence still reads as short runs (the glance test's 8-word rule) without changing its words.
 
 const STATE_ICON = { done: 'ok', running: 'play', needs: 'warn', waiting: 'wait' };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-function numTile({ key, label, iconName, value, sub = null, tipText, level = null }) {
-  const el = h('article', { class: `panel ntile${level ? ` ntile--${level}` : ''}`, 'data-row-key': key },
-    h('h3', { class: 'num-l' }, icon(iconName), label),
-    h('p', { class: 'num-v' }, value),
-    sub ? h('p', { class: 'num-s' }, sub) : null);
-  return tip(el, tipText);
-}
-
-function numbersSig(v) {
-  return [state.taskIssues.error, state.taskIssues.map != null, v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.taskCost, v.cost.known, state.runs.status, state.runs.error, state.meta.status];
-}
-
-function tierSplit(byTier) {
-  const order = ['auto', 'auto-strict', ...Object.keys(byTier).filter((k) => k !== 'auto' && k !== 'auto-strict')];
-  return order.filter((k) => byTier[k]).map((k) => `${k} ${byTier[k].done}`);
-}
-
-/** Why a cost needing the run lists is "—", or null when it's known. */
-function runsProblem(v) {
-  if (v.cost.known) return null;
-  const r = state.runs;
-  if (!v.cost.measuredRuns) return 'No measured agent runs in the spend snapshots yet.';
-  if (r.waitingForRate) return 'Waiting for API requests to spare (the GitHub rate limit) before reading the agent run lists.';
-  if (r.error) return `Couldn't read the agent run lists (implement, repair, review): ${r.error}.`;
-  return 'Reading the agent run lists…';
-}
-
-function renderNumbers(v) {
-  if (!state.loaded) {
-    replaceSection('numbers', ['Tasks done', 'Issue → merged', 'Cost per task'].map((label, i) => numTile({ key: `n${i}`, label, iconName: ['grid', 'clock', 'coin'][i], value: '…', tipText: 'Loading the audit log' })));
-    return;
-  }
-  const b = v.board;
-  const c = b.counts;
-  const tiers = Object.entries(b.byTier).map(([k, x]) => `${k}: ${x.done} of ${x.total} done`);
-  const itm = v.toMerged;
-  const sorted = itm.items.slice().sort((a, x) => a.ms - x.ms);
-  const why = runsProblem(v);
-  const tc = v.taskCost;
-  replaceSection('numbers',
-    numTile({
-      key: 'done', label: 'Tasks done', iconName: 'grid', value: b.total ? `${c.done}/${b.total}` : '—',
-      sub: b.total ? tierSplit(b.byTier).join(' · ') : null,
-      level: b.total && c.done === b.total ? 'ok' : null,
-      tipText: [
-        b.total ? `${c.done} of ${b.total} tasks done (merged).` : 'No tasks in the catalog yet.',
-        ...tiers,
-        `Also: ${c.running} running, ${c.needs} need you, ${c.waiting} waiting.`,
-        'Tasks are the task map\'s entries; drill/* tasks were fire drills and are not counted.',
-        taskIssuesLine(),
-      ].join('\n'),
-    }),
-    numTile({
-      key: 'merge', label: 'Issue → merged', iconName: 'clock', value: shortDuration(itm.medianMs), sub: `median, ${MEDIAN_DAYS} days`,
-      tipText: [
-        itm.count ? `Median ${shortDuration(itm.medianMs)} over ${plural(itm.count, 'task')} merged in the last ${MEDIAN_DAYS} days.` : `No task merged in the last ${MEDIAN_DAYS} days.`,
-        itm.count ? `Fastest ${shortDuration(sorted[0].ms)}, slowest ${shortDuration(sorted.at(-1).ms)}.` : null,
-        'From the task\'s first auto_ready (else its first dispatch) to its merge. Drills and plain PRs are left out.',
-        DAYS < MEDIAN_DAYS ? `Only ${DAYS} days are loaded (?days=${DAYS}).` : null,
-      ].filter(Boolean).join('\n'),
-    }),
-    numTile({
-      key: 'cost', label: 'Cost per task', iconName: 'coin', value: why || tc.medianAic == null ? '—' : formatUsd(tc.medianAic), sub: 'median',
-      tipText: [
-        why ?? (tc.count ? `Median ${formatUsd(tc.medianAic)} (${Math.round(tc.medianAic).toLocaleString('en-US')} AIC) over ${plural(tc.count, 'done task')} with attributed cost.` : 'No done task with attributed cost yet.'),
-        'A task\'s cost: the latest measured AIC of each implement, repair and review run attributed to it (1 AIC = $0.01).',
-        'Runs come from the controller\'s spend snapshots, joined with the Actions run lists by title or dispatch time.',
-      ].join('\n'),
-    }));
-}
 
 // ---------------------------------------------------------------------------
 // Needs you: the count, then one line per item
@@ -1150,82 +1049,228 @@ function needsView(m) {
   return { rs, items: combineNeedsYou(m.needsYou.items, reviews, REPO) };
 }
 
-function viewLink(href, text) {
-  const a = link(href, text);
-  a.classList.add('btn', 'btn--small');
-  return a;
+function segNodes(segs) {
+  const out = [];
+  (segs || []).forEach((s, i) => {
+    const text = s.t === 'sep' ? '·' : s.t === 'time' ? null : s.text;
+    const prev = segs[i - 1];
+    const glued = (typeof text === 'string' && /^[,.:;)]/.test(text)) || (prev?.t === 'text' && prev.text.endsWith('('));
+    if (i && !glued) out.push(' ');
+    if (s.t === 'big') out.push(h('b', { class: 'big' }, s.text));
+    else if (s.t === 'num') out.push(h('b', { class: 'run' }, s.text));
+    else if (s.t === 'time') out.push(h('span', { class: 'run' }, timeEl(s.at)));
+    else if (s.t === 'sep') out.push(h('span', { class: 'dot', 'aria-hidden': 'true' }, '·'));
+    else if (s.t === 'link') out.push(s.href ? h('a', { class: 'run', href: s.href, rel: s.href.startsWith('#') ? null : 'noopener noreferrer' }, s.text) : h('span', { class: 'run' }, s.text));
+    else out.push(s.text);
+  });
+  return out;
 }
 
-// At most 3 lines, each a ref, a 2-word title and a "View" button; the rest is in the tooltip.
-const NEEDS_SHOWN = 3;
-const NEEDS_TITLE_WORDS = 2;
+// ---------------------------------------------------------------------------
+// Status line: health chip · state · what needs you
 
-function needsLines(it) {
-  const since = it.since ? parseTime(it.since) : null;
-  const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${iso(since)}`;
-  if (it.kind === 'review') {
-    return { iconName: 'person', kind: 'Review and merge', ref: prRef(it.repo, it.number, REPO), title: it.title || '(no title)', since,
-      lines: [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, it.title || '(no title)', waited], action: viewLink(it.url, 'View PR') };
-  }
-  const kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
-  const title = it.task ? shortTaskName(it.task) : it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`;
-  return {
-    iconName: it.kind === 'needs_human' ? 'warn' : 'clock', kind, ref: it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—', title, since,
-    lines: [`${kind}: ${it.task ?? title}`, it.reason ? `Reason: ${it.reason}` : null, it.effect ? `Effect: ${it.effect}` : null, waited],
-    action: it.issue != null ? viewLink(`${GH}/${REPO}/issues/${it.issue}`, 'View issue') : it.pr != null ? viewLink(`${GH}/${REPO}/pull/${it.pr}`, 'View PR') : null,
-  };
-}
+const PART_ICON = { warn: 'warn', alert: 'fail' };
 
-function needsRow(it) {
-  const x = needsLines(it);
-  return h('li', { 'data-row-key': it.key },
-    h('span', { class: `needs-icon${it.kind === 'needs_human' ? ' needs-icon--alert' : ''}`, role: 'img', 'aria-label': x.kind }, icon(x.iconName)),
-    h('span', { class: 'needs-ref mono' }, x.ref),
-    tip(h('span', { class: 'needs-t' }, shortTitle(x.title, NEEDS_TITLE_WORDS)), x.lines.filter(Boolean).join('\n')),
-    x.action ?? h('span'));
-}
-
-function renderNeeds(m, view = needsView(m)) {
-  const cap = DEFAULTS.humanQueueMax;
-  const { rs, items } = view;
-  const panel = $('needs-panel');
-  if (!state.loaded && !state.error) {
-    panel.classList.remove('needs--clear', 'needs--some');
-    replaceSection('needs', h('p', { class: 'num-v' }, '…'));
+// Rebuilt only when it changes (relative times update in place), and through replaceSection(), so
+// a focused link in the status line keeps focus across the 15-second refresh.
+function setPart(id, part, tipText) {
+  const el = $(id);
+  const sig = JSON.stringify([part, tipText]);
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  if (!part) {
+    el.hidden = true;
     return;
   }
-  const about = [
-    'Needs-human items, stale contracts and human-tier PRs waiting for your review, oldest first.',
-    'Items whose issue or PR is closed now are left out.',
-    `Above ${cap}, the controller stops admitting new human-tier work.`,
-    rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
-    rs === 'unavailable' ? `Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}, so PRs waiting for your review aren't counted.` : null,
-    rs === 'pending' ? 'Still reading the open-PR lists for reviews.' : null,
-  ].filter(Boolean).join('\n');
-  const clear = !items.length && (rs === 'ok' || rs === 'sample');
-  panel.classList.toggle('needs--clear', clear);
-  panel.classList.toggle('needs--some', items.length > 0);
-  const head = tip(h('p', { class: 'num-v needs-n' },
-    clear ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Nothing needs you' }, icon('ok'))
-      : rs === 'unavailable' ? h('span', { class: 'needs-ok', role: 'img', 'aria-label': 'Review list unavailable' }, icon('question')) : null,
-    h('span', {}, String(items.length)),
-    items.length > cap ? h('span', { class: 'needs-cap', role: 'img', 'aria-label': `Over the cap of ${cap}` }, icon('warn')) : null),
-  `${items.length ? `${plural(items.length, 'item')} waiting for you.` : 'Nothing needs you.'}\n${about}`);
-  if (!items.length) {
-    replaceSection('needs', head);
+  el.hidden = false;
+  el.className = `part part--${part.level} has-tip`;
+  replaceSection(id, ...(PART_ICON[part.level] ? [h('span', { class: 'part-i', role: 'img', 'aria-label': part.level === 'alert' ? 'Problem' : 'Warning' }, icon(PART_ICON[part.level]))] : []),
+    h('span', {}, segNodes(part.segs)), h('span', { id: `${id}-tip`, class: 'tip-src', hidden: true }, tipText));
+  el.setAttribute('aria-describedby', `${id}-tip`);
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+}
+
+function renderParts(m, v, needs, health) {
+  if (!state.loaded || !m || !v) {
+    setPart('state-part', null);
+    setPart('needs-part', null);
     return;
   }
-  const shown = items.slice(0, NEEDS_SHOWN);
-  replaceSection('needs', head,
-    h('ul', { class: 'needs-list' }, shown.map((it) => {
-      try {
-        return needsRow(it);
-      } catch (err) {
-        return h('li', { class: 'problem', 'data-row-key': it.key ?? '?' }, `Couldn't show this item: ${err?.message ?? err}`);
-      }
-    })),
-    items.length > NEEDS_SHOWN ? tip(h('p', { class: 'needs-more' }, `+${items.length - NEEDS_SHOWN}`),
-      items.slice(NEEDS_SHOWN).map((it) => { const x = needsLines(it); return `${x.ref} ${x.title}`; }).join('\n')) : null);
+  const p = statusParts({
+    health, heartbeatAt: parseTime(m.heartbeat.at), killSwitch: m.killSwitch.enabled, board: v.board, banner: v.banner,
+    needsItems: needs?.items ?? [], reviews: needs?.rs === 'sample' ? 'ok' : needs?.rs ?? 'pending',
+  });
+  const c = v.board.counts;
+  const running = c.running > 0;
+  const stateTip = health.problems.some((x) => x.code !== 'paused') ? 'The most serious problem right now. The health rule is under Details, Liveness.'
+    : m.killSwitch.enabled === false ? 'The factory switch is off, so no new work starts.'
+      : v.banner?.state === 'paused' && v.banner.reason !== 'kill_switch' ? `Paused ${relativeTime(parseTime(v.banner.since), now())} by a safety gate. Work resumes by itself when it clears.`
+        : running ? 'Tasks with work under way. Select one to view its issue.'
+          : `Nothing is running; ${c.done} of ${v.board.total} tasks are done.`;
+  const items = needs?.items ?? [];
+  const rs = needs?.rs;
+  const needsTip = items.length ? 'Hand-offs and PR reviews waiting for you, oldest first. Select a number to view it on GitHub.'
+    : rs === 'unavailable' ? "The open-PR list couldn't be read, so PR reviews may be missing."
+      : rs === 'pending' ? 'Reading the open-PR list for PR reviews.'
+        : rs === 'sample' ? "No hand-offs are waiting. Sample data doesn't read live PR reviews."
+          : 'No hand-offs or PR reviews are waiting for you. Closed issues and PRs are left out.';
+  setPart('state-part', p.state, stateTip);
+  setPart('needs-part', p.needs, needsTip);
+}
+
+// ---------------------------------------------------------------------------
+// Scoreboard: five sentences, each with one big number; definitions in the tooltips
+
+function scoreSig(v) {
+  return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known, v.cost.spend,
+    v.taskCost, v.quality, v.steps.total, state.statics.build, state.statics.drills, state.taskIssues.error, state.taskIssues.map != null,
+    v.outcomesSum, v.outcomes && outcomesStale(v.outcomes, now())];
+}
+
+function scoreItem(item, tipText) {
+  return tip(h('li', { class: `score-item score--${item.key}`, 'data-row-key': item.key },
+    h('p', { class: 'score-main' }, segNodes(item.main)),
+    item.subs.map((sub) => h('p', { class: 'score-sub' }, segNodes(sub)))), tipText);
+}
+
+function renderScore(v) {
+  if (!state.loaded) {
+    replaceSection('score', h('li', { class: 'score-item' }, h('p', { class: 'score-main' }, h('b', { class: 'big' }, '…'))));
+    return;
+  }
+  const st = state.statics;
+  const b = v.board;
+  const doneReal = b.counts.done;
+  const itm = v.toMerged;
+  const c = v.cost;
+  const since = earliestSpendDay(state.events);
+  const build = st.build?.ok ? st.build.value : null;
+  const steps = v.steps;
+  const drills = st.drills;
+  const partial = state.partialHistory ? `Only the last ${DAYS} days of the audit log could be loaded.` : null;
+  const os = v.outcomesSum;
+  const stale = v.outcomes && outcomesStale(v.outcomes, now()) ? `gh-aw Outcomes last evaluated ${relativeTime(v.outcomes.lastAt, now())}, so they may be out of date.` : null;
+  replaceSection('score',
+    scoreItem(shippedItem(b, os), `${state.taskIssues.map && !state.taskIssues.error ? 'Tasks ported from JavaScript to Rust whose issue is closed as completed.' : "Tasks merged per the audit log; the task-issue list couldn't be read."} ${stale ?? (os ? 'gh-aw Outcomes judges each agent PR; real work only, drills separate.' : 'gh-aw Outcomes, which judges each agent PR, has no snapshot yet.')}`),
+    scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1], done: doneReal }),
+      itm.count ? `Median time from a task's start to its merge, over ${itm.count} of ${doneReal} done tasks. ${partial ?? 'Dates are the first and last finishes.'}`
+        : `Start and merge times for these tasks aren't in the audit log. ${partial ?? 'Details explains how speed is measured.'}`),
+    scoreItem(costItem({ build: st.build, cost: c, acceptedPrs: os?.real.prs.accepted ?? null }), [
+      build ? `Build: one-time sessions to make the factory, as of ${shortDate(build.asOf)}.` : `Build cost unavailable: ${shortError(st.build?.error ?? 'not read yet')}.`,
+      c.spend === 'missing' ? 'Run: the agent runs have no cost measurement yet.' : partial ?? (c.known ? `Run: the factory's full agent runs${since ? ` since ${shortDate(since)}` : ''}, at $0.01 per AI credit.` : 'Run: the real and drill split needs gh-aw Outcomes, not available yet.'),
+    ].join(' ')),
+    scoreItem(handsOffItem(os, steps), os
+      ? `gh-aw counts a PR as zero-touch if no person edited it. ${stale ?? partial ?? 'Manual steps outside the PR are counted separately below.'}`
+      : 'gh-aw Outcomes, which marks PRs no person edited, has no snapshot yet. Manual steps outside the PR are counted below.'),
+    scoreItem(qualityItem(v.quality, drills), `Reverts and changes the reviewer blocked before merge count real work only. ${drills?.ok ? `Drill results are from the build journal, as of ${shortDate(drills.value.asOf)}.` : `Drill record unavailable: ${shortError(drills?.error ?? 'not read yet')}.`}`));
+}
+
+/** The first problem of an error message, at most 10 words, for a short tooltip. */
+function shortError(text) {
+  const words = String(text).split('; ')[0].replace(/\.$/, '').split(/\s+/);
+  return words.length > 10 ? `${words.slice(0, 10).join(' ')}…` : words.join(' ');
+}
+
+// The definitions behind the scoreboard, as visible text inside Details (tooltips stay short).
+function renderAbout(v) {
+  if (!state.loaded) {
+    replaceSection('about', empty('…'));
+    return;
+  }
+  const st = state.statics;
+  const b = v.board;
+  const c = v.cost;
+  const itm = v.toMerged;
+  const build = st.build?.ok ? st.build.value : null;
+  const since = earliestSpendDay(state.events);
+  const names = { implement: 'coder', repair: 'repair', review: 'reviewer' };
+  const steps = v.steps;
+  const drills = st.drills;
+  const entry = (term, ...lines) => [h('dt', {}, term), h('dd', {}, lines.filter(Boolean).join(' '))];
+  replaceSection('about', h('dl', { class: 'about' },
+    state.partialHistory ? entry('Scope', `The audit tree couldn't be listed, so only the last ${DAYS} days were loaded: every number here covers that window, not the whole log.`)
+      : entry('Scope', `Every number on the scoreboard covers the whole audit log (${state.records.length.toLocaleString('en-US')} events, all verified), not a window. Details lists the last ${DAYS} days.`),
+    entry('Shipped', 'A task is done when its issue is closed as completed; while its issue is open, when the controller closes it after the merge; without the issue list, when the audit log shows the merge.',
+      `Routine tasks (tier auto) merge by themselves once their checks pass; core tasks (tier auto-strict) also need the reviewer agent and the strict gates.`,
+      `Now: ${Object.entries(b.byTier).map(([k, x]) => `${k} ${x.done} of ${x.total}`).join(', ')}.`, 'Safety drills (drill/*) are not tasks.', 'The tasks port chrono\'s JavaScript parsers and refiners to Rust.', taskIssuesLine(),
+      v.outcomesSum ? `gh-aw Outcomes: how gh-aw judged each real coder PR (${OUTCOME_STATUSES.slice(0, 3).join(', ')}); drills are counted apart, in Outcomes (gh-aw).` : 'gh-aw Outcomes: no snapshot in the audit log yet.'),
+    entry('Speed', `The median time from a task's start (its first auto_ready, else its first agent run) to its merge, over ${itm.count} of ${b.counts.done} done tasks whose start and merge are in the log.`,
+      v.doneSpan ? `First finish ${iso(v.doneSpan[0])}, last ${iso(v.doneSpan[1])}.` : null, 'Minutes up to 90, then hours.'),
+    entry('Total cost', build ? `Build: ${Math.round(build.aiUnits).toLocaleString('en-US')} AI credits (${formatUsd(build.usd * 100)}), research, design, coordination and build sessions, from ${build.source}, as of ${build.asOf}.` : `Build cost unavailable: ${st.build?.error ?? 'not read yet'}.`,
+      `Run: the latest measured AI credits of each of the factory's agent runs${since ? ` since ${since}` : ''}, from the controller's spend snapshots; 1 AI credit = $0.01.`,
+      c.known && c.measuredRuns ? `By agent: ${Object.entries(names).map(([k, n]) => `${n} ${formatUsd(c.byWorkflow[k].aic)} over ${plural(c.byWorkflow[k].measured, 'run')}`).join(', ')}.` : null,
+      c.known && c.measuredRuns ? `Safety drills ${formatUsd(c.drillAic)}; runs not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}, mostly reviewer runs) count as real tasks. Runs are matched to tasks and drills by the gh-aw Outcomes snapshot.` : 'Without a gh-aw Outcomes snapshot the run cost has no real and drill split.',
+      v.taskCost.medianAic != null ? `Median full cost per done task: ${formatUsd(v.taskCost.medianAic)} over ${plural(v.taskCost.count, 'task')} (coder and repair runs; reviewer runs aren't tied to tasks yet).` : null,
+      "gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost."),
+    entry('Hands-off', 'gh-aw Outcomes marks an accepted PR zero-touch when no person edited it. Manual steps outside the PR are ours, from the audit log:'),
+    entry('Human effort', steps.goLive ? `Go-live: ${iso(steps.goLive)}, the first real agent run of a real task.` : 'Not live yet.',
+      'Counted: a person putting an agent PR in the merge queue, and label changes, pushes or hand-started runs on agent PRs or factory tasks when the log records them.',
+      "Not counted: plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared account).",
+      steps.total ? `By kind: ${Object.entries(steps.byKind).map(([k, n]) => `${k} ${n}`).join(', ')}.` : null),
+    entry('Repairs', repairSentence(v.quality.repairs), repairSentence(v.quality.drillRepairs, 'Safety drills: '),
+      'A repair fixed the PR when the PR merged next; it was handed to a person when a hand-off came first.'),
+    entry('Quality', 'Reverts: merges the factory undid automatically after main broke. Changes blocked: hand-offs because the reviewer agent objected before the merge. Both leave out safety drills.',
+      drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}; ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${drills.value.asOf}.` : `Drill record unavailable: ${drills?.error ?? 'not read yet'}.`),
+    entry('Data', 'Everything comes from GitHub, read-only: the audit log, the task map and contracts, the task issues and the open PRs. gh-aw Outcomes results arrive in the audit log as outcomes_snapshot events. The build cost and drill record are files published with this page. Every event is re-hashed and its chain checked in your browser.')));
+}
+
+const WORKFLOW_WORD = Object.freeze({ implement: 'coder', repair: 'repair', review: 'reviewer' });
+
+// Details: the gh-aw Outcomes snapshot, as a per-status table (real work vs safety drills).
+function renderOutcomes(v) {
+  const L = v.outcomes;
+  if (!state.loaded) {
+    replaceSection('outcomes', empty('…'));
+    return;
+  }
+  if (!L) {
+    replaceSection('outcomes', empty('gh-aw Outcomes not available yet: the audit log has no Outcomes snapshot.'));
+    return;
+  }
+  const s = v.outcomesSum;
+  const statuses = [...new Set([...OUTCOME_STATUSES, ...Object.keys(s.real.items), ...Object.keys(s.drills.items)])];
+  const rows = statuses.map((st) => row(st, h('span', {}, st), String(s.real.prStatus[st] ?? 0), String(s.drills.prStatus[st] ?? 0), String(s.real.items[st] ?? 0), String(s.drills.items[st] ?? 0)));
+  const c = v.cost;
+  const ac = c.agentCompare;
+  const ratio = ac.agent > 0 ? ac.full / ac.agent : null;
+  const runUrl = (id) => `${GH}/${REPO}/actions/runs/${id}`;
+  const runs = L.snapshot.runs;
+  // `gh aw outcomes` takes an agent run id: the newest real coder run that opened a PR, else any.
+  const isPr = (r) => r.items.some((x) => x.type === 'create_pull_request');
+  const real = runs.filter((r) => !(r.drill === true || isDrill(r.task)));
+  const example = [...real].reverse().find((r) => r.workflow === 'implement' && isPr(r)) ?? real.at(-1) ?? runs.at(-1);
+  replaceSection('outcomes',
+    h('p', { class: 'hint' }, `gh-aw Outcomes judges what each agent run produced (PRs, comments, checks): accepted, rejected, pending and so on. Last evaluated `, timeEl(L.snapshot.evaluatedAt),
+      L.checkedAt != null ? ['; last checked unchanged ', timeEl(L.checkedAt)] : null, `. gh-aw ${L.snapshot.ghAwVersion ?? '?'}, ${plural(s.real.runs + s.drills.runs, 'run')}.`),
+    table('gh-aw Outcomes by status', ['Status', 'Real PRs', 'Drill PRs', 'All real outputs', 'All drill outputs'], rows, { numeric: [1, 2, 3, 4] }),
+    h('p', { class: 'hint' }, `Hands-off: ${s.real.zeroTouch} of ${s.real.prs.accepted} accepted real PRs are zero-touch (no person edited them).`),
+    h('p', { class: 'hint' }, "gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost.",
+      ratio ? ` For real runs the full cost is about ${ratio.toFixed(2)}× gh-aw's (${Math.round(ac.full).toLocaleString('en-US')} vs ${Math.round(ac.agent).toLocaleString('en-US')} AI credits, over the ${ac.runs} of ${plural(ac.of, 'measured real run')} that have both figures).` : ''),
+    example ? h('p', { class: 'hint' }, 'Reproduce for one agent run: ', h('code', {}, `gh aw outcomes ${example.runId}`), ', or ', h('a', { href: '#outcome-runs' }, 'any run id below'), '.') : null,
+    h('p', { class: 'hint' }, 'Collected by the ', link(runUrl(L.snapshot.sourceRunId), 'snapshot run'), '.',
+      L.ignored ? ` ${plural(L.ignored, 'malformed snapshot')} ignored.` : '', L.snapshot.dropped ? ` ${plural(L.snapshot.dropped, 'malformed entry')} skipped.` : ''),
+    h('details', { class: 'fold fold--sub', id: 'outcome-runs-fold' }, h('summary', {}, `Agent runs in the snapshot (${runs.length})`),
+      h('ul', { class: 'recent', id: 'outcome-runs', tabindex: '-1' }, [...runs].reverse().map((r) => h('li', { 'data-row-key': `r${r.runId}` },
+        h('span', { class: 'recent-t' }, link(runUrl(r.runId), String(r.runId)), ` · ${WORKFLOW_WORD[r.workflow] ?? r.workflow}${r.task ? ` · ${shortTaskName(r.task)}` : ''}${r.drill === true || isDrill(r.task) ? ' (drill)' : ''}`),
+        h('span', { class: 'recent-at' }, r.items.map((x) => x.status).join(', ') || 'no outputs'))))));
+}
+
+function renderSteps(v) {
+  const s = v.steps;
+  if (!state.loaded) {
+    replaceSection('human-steps', empty('…'));
+    return;
+  }
+  const intro = h('p', { class: 'hint' }, s.goLive
+    ? `Manual steps since go-live (${relativeTime(s.goLive, now())}): a person putting an agent PR in the merge queue, or changing labels, pushing or starting a run on agent PRs and factory tasks. Plain reviews and comments don't count.`
+    : 'Not live yet: no real agent run of a real task in the loaded audit log.');
+  if (!s.steps.length) {
+    replaceSection('human-steps', intro, empty('No manual steps.'));
+    return;
+  }
+  replaceSection('human-steps', intro, h('ol', { class: 'recent' }, s.steps.slice().reverse().map((x, i) => h('li', { 'data-row-key': `${i}` },
+    h('span', { class: 'recent-t' }, `${x.pr != null ? `#${x.pr}` : x.issue != null ? `#${x.issue}` : ''} ${x.task ? shortTaskName(x.task) : ''}`.trim(), ' · ', x.what),
+    h('span', { class: 'recent-at' }, timeEl(x.at))))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,19 +1279,16 @@ function renderNeeds(m, view = needsView(m)) {
 function boardTile(t) {
   const href = t.issue != null ? `${GH}/${REPO}/issues/${t.issue}` : `${GH}/${REPO}/blob/main/${contractPath(t.id)}`;
   const word = TASK_STATE_LABELS[t.state];
-  const lines = [
-    `${t.id}${t.title ? ` · ${t.title}` : ''}`,
-    `Tier: ${t.tier ?? 'unknown'}`,
-    `State: ${word}${t.reason && t.reason !== 'merged' ? ` (${t.reason})` : ''}`,
-    t.issueState ? `Issue: ${t.issueState === 'completed' ? 'closed as completed' : t.issueState === 'closed' ? 'closed, not completed' : 'open'}` : state.taskIssues.map ? 'No task issue found' : null,
-    t.since != null ? `Since ${relativeTime(t.since, now())} (${iso(t.since)})` : null,
-    [t.issue != null ? `Issue #${t.issue}` : null, t.prs.length ? `PR ${t.prs.map((n) => `#${n}`).join(', ')}` : null].filter(Boolean).join(' · ') || null,
-    t.issue != null ? `View issue #${t.issue} on GitHub` : 'View its contract on GitHub (no issue in the loaded events)',
-  ];
+  const stateText = t.state === 'done' ? `done${t.since != null ? ` ${relativeTime(t.since, now())}` : ''}`
+    : t.state === 'running' ? `running${t.reason ? `, ${t.reason}` : ''}`
+      : t.state === 'needs' ? `needs you${t.reason ? `: ${plainReason(t.reason)}` : ''}`
+        : t.reason ?? 'waiting';
+  const tier = t.tier === 'auto' ? 'Routine task' : t.tier === 'auto-strict' ? 'Core task' : 'Task';
+  const tipText = `${t.id}: ${stateText}. ${tier}; select to view ${t.issue != null ? `issue #${t.issue}` : 'its contract'}.`;
   const a = h('a', { class: `tile tile--${t.state}`, href, rel: 'noopener noreferrer', 'aria-label': `${t.short}: ${word}` },
     h('span', { class: 'tile-i' }, icon(STATE_ICON[t.state])),
     h('span', { class: 'tile-n' }, t.short));
-  return h('li', { 'data-row-key': t.id }, tip(a, lines.filter(Boolean).join('\n')));
+  return h('li', { 'data-row-key': t.id }, tip(a, tipText));
 }
 
 /** Where the done states come from, for the tooltips. */
@@ -1266,14 +1308,7 @@ function renderBoard(v) {
   // labels carry the state either way.
   const present = TASK_STATES.filter((st) => b.counts[st]);
   legend.replaceChildren(...(state.loaded && present.length > 1 ? present.map((st) => h('span', { class: `lg lg--${st}` }, icon(STATE_ICON[st]), `${b.counts[st]} ${TASK_STATE_LABELS[st]}`)) : []));
-  setTip('board-info', [
-    'One tile per task of the task map, grouped by its contract area. Select a tile to view its issue on GitHub.',
-    'Done: merged. Running: work started (implement, repair or review agent, checks, merge queue) and not merged, issue open. Needs you: an open needs-human item. Waiting: a dependency not done, or ready for a free slot.',
-    'Drill tasks (drill/*) were fire drills of the factory and are not shown.',
-    taskIssuesLine(),
-    mm.status === 'error' ? `Task map unavailable (${mm.error}): showing the tasks seen in the audit log.` : null,
-    mm.missing.length ? `Contracts not read: ${mm.missing.join(', ')}.` : null,
-  ].filter(Boolean).join('\n'));
+  setTip('board-info', 'One tile per task, grouped by area; colour and icon show its state. Select a tile to view its issue.');
   if (!state.loaded) {
     replaceSection('board', empty('… Loading'));
     return;
@@ -1283,7 +1318,7 @@ function renderBoard(v) {
     return;
   }
   replaceSection('board',
-    mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${mm.error}. Showing the tasks seen in the audit log.`) : null,
+    mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${shortError(mm.error)}. Showing the tasks seen in the audit log.`) : null,
     b.groups.map((g, i) => h('div', { class: 'group', role: 'group', 'aria-labelledby': `group-${i}` },
       h('h3', { class: 'group-h', id: `group-${i}` }, g.label),
       h('ul', { class: 'tiles' }, g.tasks.map(boardTile)))));
@@ -1298,78 +1333,10 @@ function stat({ value, label, tipText, level = null, labelFirst = false, key }) 
   return tip(h('p', { class: 'stat', 'data-row-key': key }, ...(labelFirst ? [l, ' ', v] : [v, ' ', l])), tipText);
 }
 
-const aic = (n) => `${Math.round(n).toLocaleString('en-US')} AIC`;
-
-function costSig(m, v) {
-  return [m.aicToday, v.cost.total, v.cost.perDay, v.taskCost, v.cost.known, v.cost.unattributed, state.chain?.windowStart, state.runs.error, state.runs.waitingForRate];
-}
-
-function renderCost(m, v) {
-  if (!state.loaded) {
-    replaceSection('cost', empty('…'));
-    return;
-  }
-  const a = m.aicToday;
-  const c = v.cost;
-  const why = runsProblem(v);
-  const toDate = state.chain?.windowStart === 'genesis';
-  const wf = AGENT_WORKFLOWS.map((w) => `${w}: ${c.byWorkflow[w].measured} runs, ${aic(c.byWorkflow[w].aic)}`);
-  const days = c.perDay;
-  const spendDays = days.aic.filter((x) => x > 0).length;
-  replaceSection('cost',
-    stat({
-      key: 'today', value: formatUsd(a.total), label: `today, cap ${formatUsd(a.budget)}`, level: a.level === 'ok' ? null : a.level,
-      tipText: [
-        `Today (UTC): ${aic(a.total)} of the ${aic(a.budget)} daily cap (${(a.pct ?? 0).toFixed(1)}%). Amber at ${DEFAULTS.aicAlertPct}%, red at 100%.`,
-        'The cap is policies/budgets.yaml factory_per_day.max_aic, enforced by the controller across all workflows.',
-        a.source === 'spend_snapshot'
-          ? (a.measured == null ? `Measured/reserved split unavailable (the snapshot lists ${a.listed} of ${a.runs ?? '?'} runs).` : `${aic(a.measured)} measured + ${aic(a.reserved)} reserved for runs in flight (${a.runs} runs); snapshot ${relativeTime(parseTime(a.at), now())}.`)
-          : 'No spend snapshot today yet.',
-      ].join('\n'),
-    }),
-    stat({
-      key: 'total', value: c.measuredRuns ? formatUsd(c.total) : '—', label: toDate ? 'to date' : `in ${DAYS} days`,
-      tipText: [
-        c.measuredRuns ? `Total ${toDate ? 'to date' : `in the last ${DAYS} days`}: ${aic(c.total)} over ${plural(c.measuredRuns, 'measured run')} (the latest value per run in the spend snapshots).` : 'No measured runs in the spend snapshots yet.',
-        toDate ? 'The loaded window reaches the start of the audit log.' : `Over the loaded window (the last ${DAYS} days).`,
-        ...(c.known ? [...wf, `Drill tasks: ${aic(c.drillAic)}. Not attributed to a task: ${aic(c.unattributed)} (${plural(c.unattributedRuns, 'run')}).`] : [why]),
-        'The median per task is the "Cost per task" number at the top.',
-        spendDays ? `AIC per UTC day, last ${days.days.length} days: ${days.days.map((d, i) => (days.aic[i] ? `${d.slice(5)} ${Math.round(days.aic[i]).toLocaleString('en-US')}` : null)).filter(Boolean).join(', ')}.` : null,
-      ].filter(Boolean).join('\n'),
-    }),
-  );
-}
-
-function renderQuality(v) {
-  if (!state.loaded) {
-    replaceSection('quality', empty('…'));
-    return;
-  }
-  const q = v.quality;
-  const r = q.repairs;
-  const window = `In the loaded window (last ${DAYS} days); drills (drill/*) left out.`;
-  replaceSection('quality',
-    stat({ key: 'reverts', value: String(q.reverts), label: q.reverts === 1 ? 'revert' : 'reverts', level: q.reverts ? 'warn' : null,
-      tipText: `Merges the factory reverted automatically after main regressed (auto_revert).\n${window}` }),
-    stat({ key: 'escaped', value: String(q.escaped.count), label: q.escaped.count === 1 ? 'escaped defect' : 'escaped defects', level: q.escaped.count ? 'warn' : null,
-      tipText: `Escaped defect: a merge whose post-merge ci on main failed (check_result: push, ci, failure), counted once per commit.${q.escaped.shas.length ? `\nCommits: ${q.escaped.shas.map((s) => s.slice(0, 7)).join(', ')}` : ''}\n${window}` }),
-    stat({ key: 'objections', value: String(q.objections), label: q.objections === 1 ? 'reviewer objection' : 'reviewer objections',
-      tipText: `Hand-offs because the reviewer agent objected (needs_human, reason review_objected).\n${window}` }),
-    stat({ key: 'repairs', labelFirst: true, label: 'Repairs worked:', value: r.rate == null ? '—' : `${Math.round(r.rate * 100)}%`,
-      tipText: `${r.succeeded} of ${r.succeeded + r.failed} repairs worked${r.pending ? `, ${r.pending} pending` : ''}. A repair worked when its task's PR merged afterwards with no needs_human in between.\n${window}` }));
-}
 
 function renderHuman(v) {
-  if (!state.loaded) {
-    replaceSection('human', empty('…'));
-    return;
-  }
   const x = v.human;
-  replaceSection('human',
-    stat({ key: 'actions', value: String(x.total), label: `actions, ${x.days} days`,
-      tipText: `${plural(x.reviews, 'review')}, ${x.enqueues} PR${x.enqueues === 1 ? '' : 's'} queued to merge by hand${x.other ? `, ${x.other} other` : ''}, in the last ${x.days} days.\nhuman_action events, plus queued events by a person (not a [bot]).` }),
-    stat({ key: 'resolve', value: shortDuration(x.medianResolveMs), label: 'to unblock',
-      tipText: `Median time to unblock a hand-off: from needs_human to the next event that moves the task on (re-dispatch, a person's action, merge, or the task closing).\n${x.resolved} resolved, ${x.unresolved} not yet, in the loaded window; drills left out.` }));
+  $('human').textContent = state.loaded ? `${x.total} in the last ${x.days} days (${plural(x.reviews, 'review')}, ${x.enqueues} queued to merge by hand${x.other ? `, ${x.other} other` : ''}).` : '…';
 }
 
 function liveSig(m, v) {
@@ -1384,20 +1351,28 @@ function renderLive(m, v) {
   const L = v.live;
   const hb = m.heartbeat;
   const level = hb.level === 'ok' ? null : hb.level === 'none' ? 'alert' : hb.level;
-  const lastTip = [
-    L.lastAt == null ? `No controller event in the last ${DAYS} days.` : `Last controller poll: ${L.lastType} event, ${iso(L.lastAt)}.`,
-    hb.ageMin == null ? `No heartbeat in the last ${DAYS} days.` : `Last heartbeat ${formatAge(hb.ageMin)} ago (${hb.at}).`,
-    cadenceLines().heartbeat,
-    `Heartbeat: green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}`,
-    CADENCE_NOTE,
-  ].join('\n');
-  const nextTip = L.mode === 'follow-up'
-    ? `Work is in flight or dispatch is paused by a gate, so the controller's follow-up chain polls again about ${FOLLOW_UP_MIN} min after its last poll (${iso(L.nextAt)}).`
-    : [`Next scheduled (hourly) poll: ${L.nextAt == null ? 'unknown' : iso(L.nextAt)}.`, L.followUpMissed ? `The follow-up poll expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
-      'GitHub\'s cron often runs scheduled jobs hours late on Free plans.', cadenceLines().heartbeat].filter(Boolean).join('\n');
+  const lastTip = L.lastAt == null ? `No check-in from the factory in the last ${DAYS} days.` : `The factory's last check-in, ${relativeTime(L.lastAt, now())}. Amber after ${HB_WARN} without one, red after ${HB_ALERT}.`;
+  const nextTip = L.mode === 'follow-up' ? `Expected about ${FOLLOW_UP_MIN} min after the last check-in, while work is in flight.`
+    : 'Expected at the next hourly run. GitHub often runs these hours late.';
+  const cad = cadenceLines();
+  const hv = state.healthView;
   replaceSection('live',
-    stat({ key: 'last', labelFirst: true, label: 'Polled', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
-    stat({ key: 'next', labelFirst: true, label: 'Next', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: `Next controller poll expected ${relativeTime(L.nextAt, now())}.\n${nextTip}` }));
+    stat({ key: 'last', labelFirst: true, label: 'Last check-in', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
+    stat({ key: 'next', labelFirst: true, label: 'Next check-in', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: nextTip }),
+    h('p', { class: 'hint pre' }, [
+      `Observed: ${cad.heartbeat}`,
+      `Observed: ${cad.verifier}`,
+      `Check-in: green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}. ${CADENCE_NOTE}.`,
+      L.followUpMissed ? `The follow-up check-in expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
+    ].filter(Boolean).join('\n')),
+    h('p', { class: 'hint pre' }, [
+      hv ? `Health now: ${hv.health.label}${hv.health.reasons.length ? ` (${hv.health.reasons.join('; ')})` : ''}.` : null,
+      hv ? hv.detail.text : null,
+      hv ? hv.chainLine : null,
+      hv ? verifierReason(hv.verifier) : null,
+      '',
+      HEALTH_RULE,
+    ].filter((x) => x != null).join('\n')));
 }
 
 function renderRecent(v) {
@@ -1411,7 +1386,7 @@ function renderRecent(v) {
   }
   replaceSection('recent', h('ol', { class: 'recent' }, v.recent.map((r, i) => tip(h('li', { 'data-row-key': `${i}:${r.text}` },
     h('span', { class: 'recent-t' }, r.text), h('span', { class: 'recent-at' }, timeEl(r.at, { bare: true }))),
-  [`${r.type}${r.task ? ` · ${r.task}` : ''}${r.issue != null ? ` · issue #${r.issue}` : ''}${r.pr != null ? ` · PR #${r.pr}` : ''}`, r.at != null ? iso(r.at) : null].filter(Boolean).join('\n')))));
+  `Latest step of ${r.task ?? (r.pr != null ? `PR #${r.pr}` : 'this item')}, ${relativeTime(r.at, now())}.`))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,26 +1402,25 @@ function checkRow(ev, i) {
     const prs = Array.isArray(p.prs) ? p.prs.filter(isNum) : [];
     const wf = String(p.workflow ?? 'check');
     const at = p.completed_at ?? ev.timestamp;
-    const lines = [
-      isNum(p.run_id) ? `View run ${p.run_id}${isNum(p.run_attempt) && p.run_attempt > 1 ? ` (attempt ${p.run_attempt})` : ''} on GitHub` : null,
-      `${wf}: ${p.conclusion ?? 'unknown'}${typeof p.event === 'string' ? ` on ${p.event}` : ''}`,
-      typeof p.failure_signature === 'string' ? `Failure signature ${p.failure_signature}` : null,
-      typeof p.heldout_seed === 'string' ? `Held-out seed ${p.heldout_seed}` : null,
-      parseTime(at) != null ? `Completed ${new Date(parseTime(at)).toISOString()}` : null,
-    ].filter(Boolean).join('\n');
+    const what = p.conclusion === 'success' ? 'passed' : p.conclusion === 'failure' ? 'failed' : String(p.conclusion ?? 'unknown');
+    const where = prs.length ? `PR ${prs.map((n) => `#${n}`).join(', ')}` : p.event === 'push' ? 'main' : p.event === 'merge_group' ? 'the merge queue' : 'GitHub';
+    const lines = `${wf} ${what} on ${where}, ${relativeTime(parseTime(at), now())}.${isNum(p.run_id) ? ' Select to view the run on GitHub.' : ''}`;
     const runHref = isNum(p.run_id) ? `${GH}/${REPO}/actions/runs/${p.run_id}${isNum(p.run_attempt) ? `/attempts/${p.run_attempt}` : ''}` : null;
     return h('li', { class: `chk chk--${tone}`, 'data-row-key': key },
       h('span', { class: 'chk-icon', role: 'img', 'aria-label': String(p.conclusion ?? 'unknown') }, icon(tone === 'ok' ? 'ok' : tone === 'fail' ? 'fail' : 'dot')),
       tip(runHref ? link(runHref, wf) : h('b', {}, wf), lines),
       h('span', { class: 'chk-on' }, prs.length ? prs.flatMap((n, j) => [j ? ' ' : '', link(`${GH}/${REPO}/pull/${n}`, `#${n}`)])
-        : typeof p.event === 'string' ? h('span', { class: 'muted' }, p.event) : '—'),
+        : h('span', { class: 'muted' }, p.event === 'push' ? 'main' : p.event === 'merge_group' ? 'merge queue' : '—')),
       h('span', { class: 'muted' }, timeEl(at)));
   } catch (err) {
     return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
   }
 }
 
-function renderChecks(m) {
+function renderChecks(mAll) {
+  // The operations views in Details show the window (the scoreboard uses the whole log).
+  const from = Date.parse(utcDay(now()) + 'T00:00:00Z') - (DAYS - 1) * 86400000;
+  const m = { checks: mAll.checks.filter((ev) => (eventTime(ev) ?? 0) >= from) };
   const passed = m.checks.filter((ev) => ev.payload?.conclusion === 'success').length;
   $('checks-info').textContent = m.checks.length ? `${passed} of ${m.checks.length} passed in ${DAYS} days. Newest first.` : '';
   if (!m.checks.length) {
@@ -1461,7 +1435,7 @@ function renderChecks(m) {
       state.checksExpanded = !state.checksExpanded;
       safe('checks', () => renderChecks(deriveMetrics(state.events, { now: now() }))); // restores focus to this button
     },
-  }, all ? 'Fewer' : 'View all'), all ? `Show the newest ${CHECKS_SHOWN} only` : `Show all ${m.checks.length} checks in the window`) : null;
+  }, all ? 'Fewer' : 'View all'), all ? `Show the newest ${CHECKS_SHOWN} only.` : `Show all ${m.checks.length} checks.`) : null;
   replaceSection('checks',
     h('ul', { class: `checks${all ? ' checks--all' : ''}`, id: 'checks-list' }, m.checks.slice(0, all ? m.checks.length : CHECKS_SHOWN).map(checkRow)),
     toggle);
@@ -1477,9 +1451,10 @@ function stackRow(r, maxMs, isMedian = false) {
   const stack = withWidth(h('div', { class: 'stack', role: 'img', 'aria-label': `${r.label}: ${desc}; total ${formatDuration(r.totalMs)}` },
     r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}` }), (sg.ms / r.totalMs) * 100))),
   (r.totalMs / maxMs) * 100);
-  const lines = `${isMedian ? `Median per stage over the tasks merged in the last ${MEDIAN_DAYS} days` : r.task}\n${r.segments.map((sg) => `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}${isMedian ? ` (${plural(sg.tasks, 'task')})` : ''}`).join('\n')}\n${isMedian ? 'Sum of the medians' : 'Total'} ${formatDuration(r.totalMs)}`;
+  const lines = isMedian ? `Median time per stage over the tasks merged in the last ${MEDIAN_DAYS} days. Bars share one scale.`
+    : `${r.task}: ${formatDuration(r.totalMs)} from ready to merge. Select to see its timeline.`;
   return h('div', { class: `srow${isMedian ? ' srow--avg' : ''}`, 'data-row-key': r.key },
-    h('span', { class: 'srow-label' }, isMedian ? tip(h('b', {}, 'Median'), lines) : subjectButton(r.key, r.label, `Show the timeline\n${lines}`)),
+    h('span', { class: 'srow-label' }, isMedian ? tip(h('b', {}, 'Median'), lines) : subjectButton(r.key, r.label, lines)),
     h('div', { class: 'track' }, stack),
     h('span', { class: 'muted num' }, shortDuration(r.totalMs)));
 }
@@ -1594,7 +1569,7 @@ function renderEvents() {
   select.value = state.typeFilter;
   select.disabled = !types.length;
 
-  $('events-sum').textContent = records.length ? `${records.length.toLocaleString('en-US')} events in the last ${DAYS} days, newest first.` : '';
+  $('events-sum').textContent = records.length ? `${records.length.toLocaleString('en-US')} events in the whole log, newest first.` : '';
   if (!records.length) {
     replaceSection('events', empty(state.noLog ? 'No audit log yet.' : state.loaded ? 'No events in the window.' : 'Loading…'));
     return;
@@ -1740,6 +1715,23 @@ function init() {
   });
   initTheme();
   initTips();
+  // In-page links (the scoreboard's "manual steps") open the folds around their target.
+  const openTo = (id) => {
+    const el = id ? document.getElementById(id) : null;
+    if (!el || !el.closest('details')) return false;
+    for (let d = el.closest('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+    el.focus({ preventScroll: true });
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
+  };
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest?.('a[href^="#"]');
+    if (a && openTo(a.getAttribute('href').slice(1))) {
+      e.preventDefault();
+      history.replaceState(null, '', a.getAttribute('href'));
+    }
+  });
+  if (location.hash) addEventListener('load', () => openTo(location.hash.slice(1)), { once: true });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.nextCheckAt && Date.now() >= state.nextCheckAt - 1000) tick();
   });

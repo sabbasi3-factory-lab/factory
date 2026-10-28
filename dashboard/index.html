@@ -69,9 +69,9 @@
       <p class="glance" aria-label="Factory at a glance">
         <span id="health" class="chip chip--info" tabindex="0">Checking</span>
         <span class="sep" aria-hidden="true">·</span>
-        <span id="kill-chip" class="chip" tabindex="0" hidden></span>
+        <span id="state-part" class="part" hidden></span>
         <span class="sep" aria-hidden="true">·</span>
-        <span id="state-chip" class="chip" tabindex="0" hidden></span>
+        <span id="needs-part" class="part" hidden></span>
         <span class="sep" aria-hidden="true">·</span>
         <span id="dry-badge" class="chip" tabindex="0" hidden></span>
         <span class="sep" aria-hidden="true">·</span>
@@ -82,16 +82,9 @@
   </header>
 
   <main id="main" class="wrap">
-    <section aria-labelledby="numbers-h">
-      <!-- Each number's tooltip has its definition and window, so the heading is for screen readers only. -->
-      <h2 id="numbers-h" class="sr-only">Key numbers</h2>
-      <div class="numbers">
-        <div id="numbers" class="numbers-main" tabindex="-1"></div>
-        <article class="panel ntile needs" id="needs-panel" aria-labelledby="needs-h">
-          <h3 class="num-l" id="needs-h"><svg class="i" aria-hidden="true"><use href="#i-person"></use></svg>Needs you</h3>
-          <div id="needs" tabindex="-1"></div>
-        </article>
-      </div>
+    <section aria-labelledby="score-h" class="panel score-panel">
+      <h2 id="score-h" class="sr-only">Results</h2>
+      <ul id="score" class="score" tabindex="-1"></ul>
     </section>
 
     <section aria-labelledby="board-h">
@@ -103,84 +96,107 @@
       <div id="board" class="panel board" tabindex="-1"></div>
     </section>
 
-    <div class="minis">
-      <section class="panel mini" aria-labelledby="cost-h">
-        <h2 id="cost-h"><svg class="i" aria-hidden="true"><use href="#i-coin"></use></svg>Cost</h2>
-        <div id="cost" tabindex="-1"></div>
-      </section>
-      <section class="panel mini" aria-labelledby="quality-h">
-        <h2 id="quality-h"><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>Quality</h2>
-        <div id="quality" tabindex="-1"></div>
-      </section>
-      <section class="panel mini" aria-labelledby="human-h">
-        <h2 id="human-h"><svg class="i" aria-hidden="true"><use href="#i-person"></use></svg>Human touch</h2>
-        <div id="human" tabindex="-1"></div>
-      </section>
-      <section class="panel mini" aria-labelledby="live-h">
-        <h2 id="live-h"><svg class="i" aria-hidden="true"><use href="#i-pulse"></use></svg>Liveness</h2>
-        <div id="live" tabindex="-1"></div>
-      </section>
-      <section class="panel mini mini--wide" aria-labelledby="recent-h">
-        <h2 id="recent-h"><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg>Recent activity</h2>
-        <div id="recent" tabindex="-1"></div>
-      </section>
-    </div>
-
-    <div class="folds">
-      <section aria-labelledby="checks-h">
-        <details id="checks-fold" class="panel fold">
-          <summary><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg><span id="checks-h">Latest checks</span></summary>
-          <div class="fold-body">
-            <p class="hint" id="checks-info"></p>
-            <div id="checks" tabindex="-1"></div>
-          </div>
-        </details>
-      </section>
-
-      <section aria-labelledby="stages-h">
-        <details id="stages-fold" class="panel fold">
-          <summary><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="stages-h">Where the time goes</span></summary>
-          <div class="fold-body">
-            <p class="hint" id="stages-info"></p>
-            <div id="stages" tabindex="-1" class="chart"></div>
-          </div>
-        </details>
-      </section>
-
-      <section aria-labelledby="timeline-h">
-        <details id="timeline-fold" class="panel fold">
-          <summary><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="timeline-h">Task timeline</span></summary>
-          <div class="fold-body">
-            <div class="field">
-              <label for="subject">Task or PR</label>
-              <select id="subject"></select>
-            </div>
-            <div id="timeline" tabindex="-1"></div>
-          </div>
-        </details>
-      </section>
-
-      <section aria-labelledby="events-h">
-        <details id="events-fold" class="panel fold">
-          <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="events-h">Audit log</span></summary>
-          <div class="fold-body">
-            <p class="hint" id="events-sum"></p>
-            <p class="hint verifier-line" id="verifier-line">Independent verifier: checking…</p>
-            <div class="field">
-              <label for="type-filter">Type</label>
-              <select id="type-filter"></select>
-            </div>
-            <div id="events" tabindex="-1"></div>
-          </div>
-        </details>
-      </section>
-    </div>
+    <section aria-labelledby="details-h" class="folds">
+      <details id="details" class="panel fold">
+        <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="details-h">Details</span></summary>
+        <div class="fold-body fold-stack">
+          <section aria-labelledby="about-h">
+            <details id="about-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="about-h">How these numbers work</span></summary>
+              <div class="fold-body">
+                <div id="about" tabindex="-1"></div>
+                <p class="hint">More in the <a href="https://github.com/sabbasi3-factory-lab/factory/blob/main/dashboard/README.md" rel="noopener noreferrer">dashboard README</a>.</p>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="outcomes-h">
+            <details id="outcomes-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-ok"></use></svg><span id="outcomes-h">Outcomes (gh-aw)</span></summary>
+              <div class="fold-body">
+                <div id="outcomes" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="checks-h">
+            <details id="checks-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg><span id="checks-h">Latest checks</span></summary>
+              <div class="fold-body">
+                <p class="hint" id="checks-info"></p>
+                <div id="checks" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="stages-h">
+            <details id="stages-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="stages-h">Where the time goes</span></summary>
+              <div class="fold-body">
+                <p class="hint" id="stages-info"></p>
+                <div id="stages" tabindex="-1" class="chart"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="timeline-h">
+            <details id="timeline-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="timeline-h">Task timeline</span></summary>
+              <div class="fold-body">
+                <div class="field">
+                  <label for="subject">Task or PR</label>
+                  <select id="subject"></select>
+                </div>
+                <div id="timeline" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="live-h">
+            <details id="live-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-pulse"></use></svg><span id="live-h">Liveness</span></summary>
+              <div class="fold-body">
+                <p class="hint">The controller is the factory's scheduler: each run checks GitHub, starts agents and records a check-in ("heartbeat") in the audit log.</p>
+                <div id="live" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="human-h">
+            <details id="human-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-person"></use></svg><span id="human-h">Human steps</span></summary>
+              <div class="fold-body">
+                <div id="human-steps" tabindex="-1"></div>
+                <p class="hint">All human actions (shared account): <span id="human"></span></p>
+                <p class="hint">Counts every action by the shared sabbasi3 account, including the coordinator's merges; not a measure of the owner's time.</p>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="recent-h">
+            <details id="recent-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="recent-h">Recent activity</span></summary>
+              <div class="fold-body">
+                <div id="recent" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+          <section aria-labelledby="events-h">
+            <details id="events-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="events-h">Audit log</span></summary>
+              <div class="fold-body">
+                <p class="hint" id="events-sum"></p>
+                <p class="hint verifier-line" id="verifier-line">Independent verifier: checking…</p>
+                <div class="field">
+                  <label for="type-filter">Type</label>
+                  <select id="type-filter"></select>
+                </div>
+                <div id="events" tabindex="-1"></div>
+              </div>
+            </details>
+          </section>
+        </div>
+      </details>
+    </section>
   </main>
 
   <footer class="foot wrap">
     <svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>
     <span>Read-only · verified in your browser</span>
-    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub, read-only: the audit branch head, the open issues and PRs and the agent workflow runs from api.github.com; the day files (pinned to the head commit), the task map, the task contracts and the verifier anchors from raw.githubusercontent.com. Every event's SHA-256 and the parent chain are re-checked in your browser, and an independent verifier re-checks the whole log on an hourly schedule, which GitHub runs every few hours (its anchors file is read from raw.githubusercontent.com). Add ?fixture=1 to the address to see sample data.</span></button>
+    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Read-only: data comes only from GitHub and is re-checked in your browser. Details explains how.</span></button>
   </footer>
 
   <div id="tip" class="tip" aria-hidden="true" hidden></div>

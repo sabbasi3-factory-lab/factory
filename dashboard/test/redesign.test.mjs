@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
-  parseContract, parseJsonl, parseRunTitle, parseTaskmap, qualityStats, recentActivity, relativeTime, runSpend, shortDuration, shortTaskName, snapshotRunIds,
-  stageSummary, stageTimes, stateLine, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
+  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, latestOutcomes, outcomesSummary,
+  stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
 
@@ -118,7 +118,7 @@ test('catalog: task map joined with contracts, drills dropped, short names and r
   ]);
   assert.deepEqual(c[0].dependsOn, ['x/y']);
   assert.equal(shortTaskName('en/time-unit-ago-format-parser'), 'time-unit-ago-format-parser');
-  assert.equal(areaLabel('en-month-names'), 'Month names');
+  assert.equal(areaLabel('en-month-names'), 'Months');
   assert.equal(areaLabel('common-refiners'), 'Common refiners');
   assert.equal(areaLabel('en-new-things'), 'New things');
   assert.equal(areaLabel(null), AREA_LABELS.other);
@@ -226,34 +226,9 @@ test('board states: done, running, needs you and waiting (dependency, ready, not
   assert.equal(reopened.tasks[0].state, 'running');
 });
 
-test('status line: paused, running, waiting on you, all done, ready, dependencies, in plain English', () => {
-  const board = (counts, extra = {}) => ({ counts: { done: 0, running: 0, needs: 0, waiting: 0, ...counts }, total: Object.values(counts).reduce((a, b) => a + b, 0), readyWaiting: 0, ...extra });
-  assert.deepEqual(stateLine({ board: board({ done: 26 }) }), { text: 'Idle: all 26 tasks done', level: 'ok' });
-  assert.deepEqual(stateLine({ board: board({ running: 2, done: 3 }) }), { text: 'Running: 2 tasks', level: 'info' });
-  assert.deepEqual(stateLine({ board: board({ running: 1 }) }), { text: 'Running: 1 task', level: 'info' });
-  assert.deepEqual(stateLine({ board: board({ running: 1 }), dispatch: { state: 'paused', reason: 'budget_pause' } }), { text: 'Paused: daily AI budget reached', level: 'warn' });
-  assert.deepEqual(stateLine({ board: board({ done: 1 }), dispatch: { state: 'paused', reason: 'budget_unknown' } }).text, 'Paused: spend unknown');
-  // The kill switch has its own chip, so the state describes the work.
-  assert.deepEqual(stateLine({ board: board({ done: 3 }), dispatch: { state: 'paused', reason: 'kill_switch' } }).text, 'Idle: all 3 tasks done');
-  assert.deepEqual(stateLine({ board: board({ needs: 2, done: 1 }) }), { text: 'Waiting on you: 2 tasks', level: 'warn' });
-  assert.deepEqual(stateLine({ board: board({ waiting: 3, done: 1 }, { readyWaiting: 3 }) }).text, 'Waiting: 3 tasks ready');
-  assert.deepEqual(stateLine({ board: board({ waiting: 4, done: 1 }) }).text, 'Waiting: 4 tasks on dependencies');
-  assert.deepEqual(stateLine({ board: board({}) }).text, 'Idle: no tasks yet');
-  assert.deepEqual(stateLine({ loaded: false }).level, 'loading');
-});
-
 // --- bug 2: the cost join ------------------------------------------------------------------
 
 const snap = (timestamp, runs, dryRun = false) => ev('spend_snapshot', timestamp, { day: timestamp.slice(0, 10), aic_today: runs.reduce((a, r) => a + r.aic, 0), runs, runs_total: runs.length }, dryRun);
-const run = (id, workflow, created_at, display_title) => ({ id, workflow, created_at, display_title });
-
-test('run titles: "Implement|Repair <task> #<issue> attempt <n>", anything else is null', () => {
-  assert.deepEqual(parseRunTitle('Implement common/iso-format-parser #29 attempt 1'), { workflow: 'implement', task: 'common/iso-format-parser', issue: 29, attempt: 1 });
-  assert.deepEqual(parseRunTitle('  Repair common/forward-date-refiner #28 attempt 2 '), { workflow: 'repair', task: 'common/forward-date-refiner', issue: 28, attempt: 2 });
-  for (const bad of ['Implement one factory task', 'Review one factory PR', 'Implement en/a #x attempt 1', 'Implement en/a #3', 'implement en/a #3 attempt 1 extra', '', null]) {
-    assert.equal(parseRunTitle(bad), null, String(bad));
-  }
-});
 
 test('spend: the latest measured value per run id; reserved never replaces a measurement; dry runs ignored', () => {
   const events = [
@@ -265,65 +240,43 @@ test('spend: the latest measured value per run id; reserved never replaces a mea
   const { measured, reservedOnly } = runSpend(events);
   assert.deepEqual([...measured].map(([id, m]) => [id, m.aic, m.status, m.day]), [[2, 12, 'measured', '2026-10-27'], [1, 31.5, 'measured', '2026-10-27'], [4, 0, 'no_inference', '2026-10-27']]);
   assert.deepEqual(reservedOnly, [3]);
-  assert.deepEqual([...snapshotRunIds(events)].sort(), [1, 2, 3, 4]);
 });
 
-test('bug 2: per-task AIC joins snapshots with the run lists: titles, dispatch-time matching, drills, unknown runs', () => {
+test('bug 2, now via gh-aw Outcomes: full cost per task joined by run id; drills, untasked and unlisted runs', () => {
   const now = at('2026-10-28T19:00:00Z');
   const events = [
-    ev('dispatched', '2026-10-22T18:34:30Z', { task: 'en/old', issue: 40, attempt: 1 }),
-    ev('dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', issue: 1, attempt: 1 }),
-    ev('repair_dispatched', '2026-10-27T10:30:00Z', { task: 'en/a', issue: 1, pr: 11, attempt: 2, run_id: 999 }),
-    ev('review_dispatched', '2026-10-27T11:00:00Z', { task: 'en/a', issue: 1, pr: 11, run_id: 998 }),
-    ev('review_dispatched', '2026-10-27T12:00:00Z', { task: 'common/b', issue: 2, pr: 12, run_id: 997 }),
-    ev('review_dispatched', '2026-10-27T14:00:00Z', { task: 'common/c', issue: 3, pr: 13, run_id: 996 }),
-    ev('dispatched', '2026-10-27T15:00:00Z', { task: 'drill/gate-perf', issue: 116, attempt: 1 }),
     snap('2026-10-22T19:00:00Z', [{ run_id: 100, aic: 20, status: 'measured' }]),
-    snap('2026-10-27T16:00:00Z', [101, 102, 103, 104, 105, 106, 107, 108].map((run_id, i) => ({ run_id, aic: (i + 1) * 10, status: 'measured' }))),
+    snap('2026-10-27T16:00:00Z', [101, 102, 103, 104, 105, 106].map((run_id, i) => ({ run_id, aic: (i + 1) * 10, status: 'measured' }))),
   ];
-  const runs = [
-    run(100, 'implement', '2026-10-22T18:34:40Z', 'Implement one factory task'), // untitled: matched to its dispatch by time
-    run(101, 'implement', '2026-10-27T10:00:09Z', 'Implement en/a #1 attempt 1'),
-    run(102, 'repair', '2026-10-27T10:30:08Z', 'Repair en/a #1 attempt 2'),
-    run(103, 'review', '2026-10-27T11:02:00Z', 'Review one factory PR'), // en/a's review
-    run(104, 'review', '2026-10-27T12:05:00Z', 'Review one factory PR'), // nearest to common/b's dispatch
-    run(105, 'review', '2026-10-27T12:20:00Z', 'Review one factory PR'), // a second run for the same event: unattributed
-    run(106, 'review', '2026-10-27T14:31:00Z', 'Review one factory PR'), // 31 min after common/c's dispatch: too late
-    run(107, 'implement', '2026-10-27T15:00:10Z', 'Implement drill/gate-perf #116 attempt 1'),
-    // 108 is in a snapshot but in no list (older than the 100 listed runs): unattributed, unknown workflow.
+  const run = (runId, workflow, task, drill = false, aic = null) => ({ runId, workflow, task, drill, aic, items: [] });
+  const outcomeRuns = [
+    run(100, 'implement', 'en/old', false, 12),
+    run(101, 'implement', 'en/a', false, 6),
+    run(102, 'repair', 'en/a', false, 13),
+    run(103, 'review', null, false, 20), // a reviewer run: no task yet (real work, not tied to a task)
+    run(104, 'implement', 'drill/gate-perf', true, 25),
+    run(105, 'review', 'drill/x', false), // a drill by its task name
+    // 106 is in the spend snapshots but not in the Outcomes snapshot: real work, unknown workflow.
   ];
-  const c = costJoin(events, runs, { now, days: 14 });
+  const c = costJoin(events, outcomeRuns, { now, days: 14 });
   assert.equal(c.known, true);
-  assert.deepEqual(c.perTask.map((r) => [r.task, r.aic, r.runs]), [['en/a', 60, 3], ['common/b', 40, 1], ['en/old', 20, 1]]);
-  assert.equal(c.total, 20 + 360);
-  assert.equal(c.drillAic, 70);
-  assert.equal(c.unattributed, 50 + 60 + 80);
-  assert.equal(c.unattributedRuns, 3);
-  assert.deepEqual(c.unknownRunIds, [108]);
-  assert.equal(c.measuredRuns, 9);
+  assert.deepEqual(c.perTask.map((r) => [r.task, r.aic, r.runs]), [['en/a', 30, 2], ['en/old', 20, 1]]);
+  assert.equal(c.total, 20 + 210);
+  assert.equal(c.drillAic, 40 + 50);
+  assert.deepEqual([c.unattributed, c.unattributedRuns], [30 + 60, 2]);
+  assert.deepEqual(c.unknownRunIds, [106]);
+  // Full vs gh-aw's agent-only cost over the SAME runs: 106 (no Outcomes entry) is left out of both.
+  assert.deepEqual(c.agentCompare, { full: 20 + 10 + 20 + 30, agent: 12 + 6 + 13 + 20, runs: 4, of: 5 });
+  assert.equal(c.spend, 'measured');
   assert.deepEqual(Object.fromEntries(Object.entries(c.byWorkflow).map(([w, x]) => [w, [x.runs, x.measured, x.aic]])), {
-    implement: [3, 3, 20 + 10 + 70], repair: [1, 1, 20], review: [4, 4, 30 + 40 + 50 + 60], unknown: [0, 1, 80],
+    implement: [3, 3, 20 + 10 + 40], repair: [1, 1, 20], review: [2, 2, 30 + 50], unknown: [0, 1, 60],
   });
-  assert.equal(c.perDay.days.length, 14);
-  assert.equal(c.perDay.days.at(-1), '2026-10-28');
-  assert.equal(c.perDay.aic[c.perDay.days.indexOf('2026-10-22')], 20);
-  assert.equal(c.perDay.aic[c.perDay.days.indexOf('2026-10-27')], 360);
-  // A run created before its event never matches.
-  const early = costJoin([ev('review_dispatched', '2026-10-27T11:00:00Z', { task: 'en/a' }), snap('2026-10-27T12:00:00Z', [{ run_id: 1, aic: 5, status: 'measured' }])],
-    [run(1, 'review', '2026-10-27T10:59:00Z', 'Review one factory PR')], { now });
-  assert.deepEqual([early.perTask, early.unattributed], [[], 5]);
-  // A titled run claims its dispatch, so an untitled one can't take it.
-  const claimed = costJoin([ev('dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', attempt: 1 }), snap('2026-10-27T12:00:00Z', [{ run_id: 1, aic: 5, status: 'measured' }, { run_id: 2, aic: 7, status: 'measured' }])],
-    [run(1, 'implement', '2026-10-27T10:00:05Z', 'Implement en/a #1 attempt 1'), run(2, 'implement', '2026-10-27T10:00:06Z', 'Implement one factory task')], { now });
-  assert.deepEqual([claimed.perTask.map((r) => [r.task, r.aic]), claimed.unattributed], [[['en/a', 5]], 7]);
-  // Without the run lists: totals still known, nothing attributed.
-  const unknown = costJoin(events, null, { now });
-  assert.deepEqual([unknown.known, unknown.total, unknown.perTask, unknown.unattributed], [false, 380, [], 380]);
-  // Median over the done tasks with attributed cost.
-  assert.deepEqual(medianTaskCost(c, ['en/a', 'common/b', 'en/none']), { medianAic: 50, count: 2 });
-  assert.deepEqual(medianTaskCost(c, []), { medianAic: null, count: 0 });
+  assert.equal(c.perDay.aic[c.perDay.days.indexOf('2026-10-27')], 210);
+  // Without an Outcomes snapshot: the total still counts, nothing is split.
+  const none = costJoin(events, null, { now });
+  assert.deepEqual([none.known, none.total, none.perTask, none.drillAic, none.unattributed], [false, 230, [], 0, 230]);
+  assert.deepEqual(medianTaskCost(c, ['en/a', 'en/old', 'en/none']), { medianAic: 25, count: 2 });
 });
-
 // --- bug 3 and the 14-day medians -----------------------------------------------------------
 
 test('bug 3: "where the time goes" is the median per stage over tasks merged in the last 14 days, labelled by task', () => {
@@ -384,37 +337,44 @@ test('issue → merged: first auto_ready (else first real dispatch) to the last 
 
 // --- quality and human touch -------------------------------------------------------------------
 
-test('quality: reverts and objections without drills, escaped defects once per main commit, repair success', () => {
-  const sha = (c) => c.repeat(40);
+test('quality: reverts and reviewer objections, safety drills left out', () => {
   const events = [
-    ev('merged', '2026-10-26T17:25:35Z', { pr: 89, task: null, merge_commit_sha: sha('f') }),
-    ev('check_result', '2026-10-26T17:27:19Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('f'), prs: [] }),
-    ev('check_result', '2026-10-26T17:30:00Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('f'), prs: [] }), // a re-run: same defect
-    ev('check_result', '2026-10-26T17:31:00Z', { workflow: 'gates', event: 'push', conclusion: 'failure', head_sha: sha('e'), prs: [] }), // not ci
-    ev('check_result', '2026-10-26T17:32:00Z', { workflow: 'ci', event: 'pull_request', conclusion: 'failure', head_sha: sha('d'), prs: [3] }), // not main
-    ev('merged', '2026-10-27T16:11:41Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: sha('0') }),
-    ev('check_result', '2026-10-27T16:12:00Z', { workflow: 'ci', event: 'push', conclusion: 'failure', head_sha: sha('0'), prs: [] }), // the drill's own failure
-    ev('auto_revert', '2026-10-27T16:14:40Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: sha('0'), revert_pr: 126 }),
-    ev('auto_revert', '2026-10-27T16:20:00Z', { pr: 130, task: 'en/real', merge_commit_sha: sha('1'), revert_pr: 131 }),
+    ev('auto_revert', '2026-10-27T16:14:40Z', { pr: 125, task: 'drill/post-merge', merge_commit_sha: 'a'.repeat(40), revert_pr: 126 }),
+    ev('auto_revert', '2026-10-27T16:20:00Z', { pr: 130, task: 'en/real', merge_commit_sha: 'b'.repeat(40), revert_pr: 131 }),
+    ev('merged', '2026-10-27T17:00:00Z', { pr: 140, task: 'en/viaPr' }),
+    ev('auto_revert', '2026-10-27T17:10:00Z', { pr: 140, revert_pr: 141 }), // task via its PR
     ev('needs_human', '2026-10-27T14:41:38Z', { task: 'drill/reviewer-objects', reason: 'review_objected', issue: 111, pr: 118 }),
     ev('needs_human', '2026-10-27T18:17:44Z', { task: 'common/abbr', reason: 'review_objected', issue: 26, pr: 136 }),
-    // Repairs: slash merged with no hand-off in between (worked); forward got a hand-off first (failed); a drill's doesn't count.
-    ev('repair_dispatched', '2026-10-27T19:26:59Z', { task: 'common/slash', issue: 32, pr: 141, attempt: 2 }),
-    ev('merged', '2026-10-27T19:59:00Z', { task: 'common/slash', pr: 141 }),
-    ev('repair_dispatched', '2026-10-27T20:36:24Z', { task: 'common/forward', issue: 28, pr: 143, attempt: 2 }),
     ev('needs_human', '2026-10-27T20:47:21Z', { task: 'common/forward', reason: 'repeated_signature', issue: 28, pr: 143 }),
-    ev('merged', '2026-10-27T22:15:00Z', { task: 'common/forward', pr: 143 }),
-    ev('repair_dispatched', '2026-10-27T16:24:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, attempt: 2 }),
-    ev('repair_dispatched', '2026-10-27T23:00:00Z', { task: 'common/pending', issue: 40, pr: 150, attempt: 2 }),
+    ev('needs_human', '2026-10-27T21:00:00Z', { task: 'common/plan', reason: 'review_objected', effect: 'label' }, true), // a dry-run plan
   ];
-  const q = qualityStats(events);
-  assert.equal(q.reverts, 1);
-  assert.deepEqual(q.escaped, { count: 1, shas: [sha('f')] });
-  assert.equal(q.objections, 1);
-  assert.deepEqual(q.repairs, { succeeded: 1, failed: 1, pending: 1, rate: 0.5 });
-  assert.deepEqual(qualityStats([]), { reverts: 0, escaped: { count: 0, shas: [] }, objections: 0, repairs: { succeeded: 0, failed: 0, pending: 0, rate: null } });
+  const blank = { total: 0, succeeded: 0, failed: 0, pending: 0, rate: null };
+  assert.deepEqual(qualityStats(events), { reverts: 2, objections: 1, repairs: blank, drillRepairs: blank });
+  assert.deepEqual(qualityStats([]), { reverts: 0, objections: 0, repairs: blank, drillRepairs: blank });
 });
 
+test('repairs: fixed the PR, handed to a person or still running; real work and drills apart', () => {
+  const events = [
+    ev('repair_dispatched', '2026-10-27T10:00:00Z', { task: 'en/a', issue: 1, pr: 11, reason: 'ci_failed', run_id: 1 }),
+    ev('merged', '2026-10-27T10:30:00Z', { pr: 11, task: 'en/a' }), // fixed the PR
+    ev('repair_dispatched', '2026-10-27T11:00:00Z', { task: 'common/b', issue: 2, pr: 12, reason: 'ci_failed', run_id: 2 }),
+    ev('needs_human', '2026-10-27T11:30:00Z', { task: 'common/b', issue: 2, pr: 12, reason: 'repeated_signature' }), // handed over
+    ev('merged', '2026-10-27T12:00:00Z', { pr: 12, task: 'common/b' }),
+    ev('repair_dispatched', '2026-10-27T12:10:00Z', { task: 'en/c', issue: 3, pr: 13, reason: 'ci_failed', run_id: 3 }), // pending
+    ev('repair_dispatched', '2026-10-27T12:20:00Z', { task: 'en/d', issue: 4, pr: 14, reason: 'ci_failed' }, true), // a dry-run plan
+    ev('repair_dispatched', '2026-10-27T13:00:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, reason: 'ci_failed', run_id: 4 }),
+    ev('needs_human', '2026-10-27T13:30:00Z', { task: 'drill/gate-perf', issue: 116, pr: 127, reason: 'repeated_signature' }),
+  ];
+  const r = repairStats(events);
+  assert.deepEqual(r.real, { total: 3, succeeded: 1, failed: 1, pending: 1, rate: 0.5 });
+  assert.deepEqual(r.drills, { total: 1, succeeded: 0, failed: 1, pending: 0, rate: 0 });
+  assert.deepEqual(qualityStats(events).repairs, r.real);
+  assert.equal(repairSentence(r.real), '3 repairs: 1 fixed the PR, 1 was handed to a person, 1 still running. 50% of finished repairs fixed the PR.');
+  assert.equal(repairSentence({ total: 2, succeeded: 1, failed: 1, pending: 0, rate: 0.5 }), '2 repairs: 1 fixed the PR, 1 was handed to a person. 50% of finished repairs fixed the PR.');
+  assert.equal(repairSentence(r.drills, 'Safety drills: '), 'Safety drills: 1 repair: 0 fixed the PR, 1 was handed to a person. 0% of finished repairs fixed the PR.');
+  assert.equal(repairSentence({ total: 0 }, 'Safety drills: '), 'Safety drills: No repairs.');
+  assert.equal(realAgentRuns(events), 4, 'the dry-run plan is not a real run');
+});
 test('human touch: actions in the last 7 days (reviews, enqueues by a person) and the median time to unblock', () => {
   const now = at('2026-10-28T19:00:00Z');
   const events = [
@@ -530,12 +490,17 @@ test('the meta stand-ins are current, and the busy sample shows every board stat
   const m = deriveMetrics(events, { now });
   const board = taskBoard(events, catalog, { needsItems: m.needsYou.items });
   assert.deepEqual(board.counts, { done: 2, running: 2, needs: 2, waiting: 2 });
-  const runs = Object.entries(meta.runs).flatMap(([workflow, list]) => list.map((r) => ({ ...r, workflow })));
-  const cost = costJoin(events, runs, { now });
-  assert.deepEqual(cost.perTask.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 407], ['en/ordinal', 280]]);
-  assert.deepEqual([cost.total, cost.unattributed], [1097, 0]);
-  assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 343.5, count: 2 });
-  assert.equal(qualityStats(events).escaped.count, 1);
+  const outcomes = latestOutcomes(events);
+  assert.equal(outcomes.ignored, 1, 'the malformed snapshot is ignored');
+  const cost = costJoin(events, outcomes.snapshot.runs, { now });
+  // The reviewer run (95) has no task in the snapshot: real work, not tied to a task.
+  assert.deepEqual(cost.perTask.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 312], ['en/ordinal', 280]]);
+  assert.deepEqual([cost.total, cost.unattributed, cost.drillAic], [1097, 95, 0]);
+  assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 296, count: 2 });
+  const s = outcomesSummary(outcomes.snapshot);
+  assert.deepEqual([s.real.prs, s.real.zeroTouch, s.drills.prs], [{ accepted: 2, rejected: 0, pending: 1, other: 0 }, 1, { accepted: 0, rejected: 1, pending: 0, other: 0 }]);
+  const q = qualityStats(events);
+  assert.deepEqual([q.reverts, q.objections, q.repairs.total, q.repairs.pending], [0, 0, 1, 1]);
 });
 
 // --- task issues: done-ness that doesn't depend on the audit window ---------------------------
