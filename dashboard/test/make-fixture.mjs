@@ -201,10 +201,11 @@ const QUIET_PRS = [
 ];
 
 // Tasks done earlier in the quiet week: [task, issue, pr, auto_ready time, minutes to the PR,
-// minutes to the merge]. Their dispatches are dry-run plans; the merges are observed facts.
+// minutes to the merge]. The check lands 4 min and the queue 5 min after the PR, so the merge must
+// come later than that. Their dispatches are dry-run plans; the merges are observed facts.
 const QUIET_TASKS = [
-  ['en/casual-time-parser', 31, 30, '2026-10-15T15:10:00Z', 6, 9],
-  ['en/month-name-parser', 32, 31, '2026-10-16T05:20:00Z', 7, 11],
+  ['en/casual-time-parser', 31, 30, '2026-10-15T15:10:00Z', 6, 14],
+  ['en/month-name-parser', 32, 31, '2026-10-16T05:20:00Z', 7, 15],
   ['common/iso-format-parser', 33, 32, '2026-10-16T14:40:00Z', 8, 21],
 ];
 

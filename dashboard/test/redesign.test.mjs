@@ -9,7 +9,7 @@ import {
   parseContract, parseJsonl, parseRunTitle, parseTaskmap, qualityStats, recentActivity, relativeTime, runSpend, shortDuration, shortTaskName, snapshotRunIds,
   stageSummary, stageTimes, stateLine, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
-import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
+import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
 
 const at = (iso) => Date.parse(iso);
 const MIN = 60000;
@@ -598,4 +598,16 @@ test('the sample task issues: done from the issues, the newest issue numbers on 
   assert.deepEqual(b.tasks.filter((t) => t.state === 'done').map((t) => [t.id, t.reason]), [['en/ordinal', 'issue closed as completed'], ['en/weekday-parser', 'issue closed as completed']]);
   // Without any audit events the done tasks stay done; the rest fall back to "no events".
   assert.deepEqual(taskBoard([], catalog, { issues }).counts, { done: 2, running: 0, needs: 0, waiting: 6 });
+});
+
+test('no sample fixture yields a negative stage duration (stages are reached in order)', () => {
+  for (const path of [FIXTURE_PATH, QUIET_FIXTURE_PATH]) {
+    const events = parseJsonl(readFileSync(path, 'utf8'), path).map((r) => r.event);
+    const rows = stageTimes(events);
+    assert.ok(rows.length > 0, path);
+    for (const r of rows) {
+      for (const [stage, d] of Object.entries(r.durations)) assert.ok(d.ms >= 0, `${path}: ${r.key} ${stage} -> ${d.to} is ${d.ms} ms`);
+      if (r.totalMs != null) assert.ok(r.totalMs >= 0, `${path}: ${r.key} total`);
+    }
+  }
 });

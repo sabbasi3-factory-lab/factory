@@ -123,7 +123,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.deepEqual(r.chips, ['Healthy', 'Factory off', 'Idle: all 3 tasks done', 'Dry run']);
     assert.equal(r.said, 0, 'the ✓ says "Nothing needs you" to screen readers; no visible sentence repeats it');
     assert.deepEqual(r.panel, { heading: 'Needs you', body: '0', clear: true, okLabel: 'Nothing needs you', tip: true, green: true });
-    assert.deepEqual(r.numbers, ['Tasks done 3/3 auto 2 · auto-strict 1', 'Issue → merged 10m median, 14 days', 'Cost per task — median']);
+    assert.deepEqual(r.numbers, ['Tasks done 3/3 auto 2 · auto-strict 1', 'Issue → merged 14m median, 14 days', 'Cost per task — median']);
     assert.deepEqual(r.tiles, [
       ['casual-time-parser: done', '#i-ok'], ['month-name-parser: done', '#i-ok'], ['iso-format-parser: done', '#i-ok'],
     ]);
