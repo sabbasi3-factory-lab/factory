@@ -692,8 +692,6 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
   };
   const tasksOf = (subjects) => [...subjects].filter((s) => s.startsWith('task:')).map((s) => s.slice(5));
   const queue = new Map();
-  const merged = [];
-  const touched = new Set();
   const needs = new Map();
   const checks = [];
 
@@ -747,7 +745,6 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
         break;
       case 'merged':
         if (isNum(p.pr)) queue.delete(p.pr);
-        merged.push(ev);
         for (const t of tasksOf(subjects)) retire(t);
         break;
       case 'needs_human':
@@ -759,9 +756,6 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
           liveTaskDone++;
           for (const t of tasksOf(subjects)) retire(t);
         }
-        break;
-      case 'human_action':
-        if (isNum(p.pr)) touched.add(p.pr);
         break;
       case 'check_result':
         checks.push(ev);
@@ -799,9 +793,6 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
     aic: null,
   }));
 
-  const mergedToday = merged.filter((ev) => utcDay(eventTime(ev)) === today);
-  const factoryMerged = merged.filter((ev) => isStr(ev.payload?.task) || prTask.has(ev.payload?.pr));
-  const untouched = factoryMerged.filter((ev) => !touched.has(ev.payload?.pr));
 
   let finishedToday = 0;
   for (const ev of finished) {
@@ -840,12 +831,6 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
       retired,
     },
     queue: { count: queue.size, items: [...queue.values()] },
-    mergedToday: { count: mergedToday.length, prs: mergedToday.map((ev) => ev.payload?.pr).filter(isNum) },
-    zeroTouch: {
-      merged: factoryMerged.length,
-      untouched: untouched.length,
-      rate: factoryMerged.length ? untouched.length / factoryMerged.length : null,
-    },
     aicToday: {
       total: aicTotal,
       source: snap ? 'spend_snapshot' : finished.length ? 'run_finished' : null,
@@ -1668,17 +1653,9 @@ export function stageSummary(rows, { now = Date.now(), days = MEDIAN_DAYS } = {}
   return { rows: out, median: med, maxMs: Math.max(0, totalMs, ...out.map((r) => r.totalMs)), insight, days };
 }
 
-// --- Cost: spend snapshots joined with the agent workflow runs -----------------------
+// --- Cost: spend snapshots (full cost) joined to tasks through the gh-aw Outcomes snapshot -----
 
 export const AGENT_WORKFLOWS = Object.freeze(['implement', 'repair', 'review']);
-export const REVIEW_MATCH_MS = 30 * 60000;
-const RUN_TITLE = /^(Implement|Repair)\s+(\S+)\s+#(\d+)\s+attempt\s+(\d+)$/;
-
-/** "Implement <task> #<issue> attempt <n>" (or "Repair …") → { workflow, task, issue, attempt }, else null. */
-export function parseRunTitle(title) {
-  const m = RUN_TITLE.exec(String(title ?? '').trim());
-  return m ? { workflow: m[1].toLowerCase(), task: m[2], issue: Number(m[3]), attempt: Number(m[4]) } : null;
-}
 
 /**
  * The latest measured value per run id across the real (`dry_run: false`) spend snapshots, in
@@ -1703,80 +1680,30 @@ export function runSpend(events) {
   return { measured, reservedOnly: [...seen].filter((id) => !measured.has(id)), seen };
 }
 
-/** Run ids listed in any real spend snapshot. */
-export function snapshotRunIds(events) {
-  return runSpend(events).seen;
-}
-
 /**
- * Pairs runs with the controller events that dispatched them, by time: a run belongs to an
- * event of `type` it was created at or after, within 30 min; the nearest pairs are taken first
- * and each event and run is used once. Events in `claimed` ("task#attempt") already have a run.
- * Returns Map run id → event payload.
- */
-function matchByTime(runs, events, type, claimed = new Set()) {
-  const evs = (events || []).filter((e) => e?.type === type && !isPlanOnly(e) && parseTime(e.timestamp) != null
-    && !claimed.has(`${e.payload?.task}#${isNum(e.payload?.attempt) ? e.payload.attempt : 1}`));
-  const pairs = [];
-  for (const r of runs) {
-    const created = parseTime(r.created_at);
-    if (created == null) continue;
-    evs.forEach((e, i) => {
-      const gap = created - parseTime(e.timestamp);
-      if (gap >= 0 && gap <= REVIEW_MATCH_MS) pairs.push({ run: r.id, ev: i, gap });
-    });
-  }
-  pairs.sort((a, b) => a.gap - b.gap || a.ev - b.ev);
-  const usedRuns = new Map();
-  const usedEvents = new Set();
-  for (const pr of pairs) {
-    if (usedRuns.has(pr.run) || usedEvents.has(pr.ev)) continue;
-    usedRuns.set(pr.run, evs[pr.ev].payload || {});
-    usedEvents.add(pr.ev);
-  }
-  return usedRuns;
-}
-
-const DISPATCH_EVENT = { implement: 'dispatched', repair: 'repair_dispatched', review: 'review_dispatched' };
-
-/**
- * AIC per task, from the controller's spend snapshots (the latest measured value per run id)
- * joined with the agent workflow runs (`agentRuns`: [{ id, created_at, workflow, display_title }],
- * or null when the run lists couldn't be read). Implement and repair runs name their task in the
- * title ("Implement <task> #<issue> attempt <n>"); a review run ("Review one factory PR"), or an
- * implement or repair run whose title doesn't parse (older runs read "Implement one factory
- * task"), is matched by time to the `review_dispatched`, `dispatched` or `repair_dispatched`
- * event it followed (matchByTime).
+ * The full cost per task: every run's latest measured AI credits from the spend snapshots (agent
+ * plus threat detection), joined by run id to the runs of the newest gh-aw Outcomes snapshot
+ * (`outcomeRuns`: its normalized `runs`, or null without one). A run is a safety drill when the
+ * snapshot says so (or its task is drill/*); a run the snapshot doesn't list, or that names no
+ * task (review runs today), counts as real work not tied to a task.
  *
- * Returns { known, total, perTask: [{ task, aic, runs }] (non-drill, highest first), drillAic,
- * unattributed, unattributedRuns, perDay: { days, aic }, byWorkflow: { implement, repair, review,
- * unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns }. `total` is every measured run
- * (drills included: they were real spend); `unattributed` is the part no task could be found for.
+ * Returns { known (a snapshot was given), total, perTask: [{ task, aic, runs }] (non-drill, highest
+ * first), drillAic, unattributed, unattributedRuns, perDay: { days, aic }, byWorkflow: { implement,
+ * repair, review, unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns, agentAic: { real,
+ * drills } (gh-aw's agent-only figures of the same runs) }. `total` is every measured run.
  */
-export function costJoin(events, agentRuns, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
+export function costJoin(events, outcomeRuns, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
   const { measured } = runSpend(events);
-  const known = Array.isArray(agentRuns);
-  const runs = known ? agentRuns.filter((r) => isNum(r?.id)) : [];
-  const listed = new Map(runs.map((r) => [r.id, r]));
-  const titled = new Map();
-  for (const r of runs) {
-    const t = parseRunTitle(r.display_title);
-    if (t && t.workflow === r.workflow) titled.set(r.id, t);
-  }
-  const byTime = new Map();
-  for (const wf of AGENT_WORKFLOWS) {
-    const claimed = new Set([...titled.values()].filter((t) => t.workflow === wf).map((t) => `${t.task}#${t.attempt}`));
-    const untitled = runs.filter((r) => r.workflow === wf && !titled.has(r.id));
-    for (const [id, p] of matchByTime(untitled, events, DISPATCH_EVENT[wf], claimed)) byTime.set(id, p);
-  }
+  const known = Array.isArray(outcomeRuns);
+  const byId = new Map((known ? outcomeRuns : []).filter((r) => isNum(r?.runId)).map((r) => [r.runId, r]));
   const byWorkflow = Object.fromEntries([...AGENT_WORKFLOWS, 'unknown'].map((w) => [w, { runs: 0, measured: 0, aic: 0 }]));
-  for (const r of runs) if (byWorkflow[r.workflow]) byWorkflow[r.workflow].runs++;
-
+  for (const r of byId.values()) if (byWorkflow[r.workflow]) byWorkflow[r.workflow].runs++;
   const perTask = new Map();
   let total = 0;
   let drillAic = 0;
   let unattributed = 0;
   let unattributedRuns = 0;
+  const agentAic = { real: 0, drills: 0 };
   const unknownRunIds = [];
   const end = Date.parse(utcDay(now) + 'T00:00:00Z');
   const dayLabels = [];
@@ -1788,20 +1715,21 @@ export function costJoin(events, agentRuns, { now = Date.now(), days = MEDIAN_DA
     total += m.aic;
     const di = dayIndex.get(m.day);
     if (di != null) perDay[di] += m.aic;
-    const run = listed.get(id);
+    const run = byId.get(id);
     const wf = run && byWorkflow[run.workflow] ? run.workflow : 'unknown';
     byWorkflow[wf].measured++;
     byWorkflow[wf].aic += m.aic;
     if (!run) unknownRunIds.push(id);
-    const task = titled.get(id)?.task ?? (isStr(byTime.get(id)?.task) ? byTime.get(id).task : null);
-    if (!task) {
-      unattributed += m.aic;
-      unattributedRuns++;
-    } else if (isDrill(task)) drillAic += m.aic;
-    else {
-      const row = perTask.get(task) ?? perTask.set(task, { task, aic: 0, runs: 0 }).get(task);
+    const drill = !!run && (run.drill === true || isDrill(run.task));
+    if (run && isNum(run.aic)) agentAic[drill ? 'drills' : 'real'] += run.aic;
+    if (drill) drillAic += m.aic;
+    else if (run && isStr(run.task)) {
+      const row = perTask.get(run.task) ?? perTask.set(run.task, { task: run.task, aic: 0, runs: 0 }).get(run.task);
       row.aic += m.aic;
       row.runs++;
+    } else {
+      unattributed += m.aic;
+      unattributedRuns++;
     }
   }
   return {
@@ -1815,6 +1743,7 @@ export function costJoin(events, agentRuns, { now = Date.now(), days = MEDIAN_DA
     byWorkflow,
     unknownRunIds,
     measuredRuns: measured.size,
+    agentAic,
   };
 }
 
@@ -2244,16 +2173,24 @@ export function statusParts({ health = null, heartbeatAt = null, killSwitch = nu
 
 const TIER_WORD = { auto: 'routine', 'auto-strict': 'core' };
 
-/** "Shipped: 26 of 26 tasks" / "18 routine + 8 core, ported from JavaScript to Rust". */
-export function shippedItem(board) {
+/**
+ * "Shipped: 26 of 26 tasks" / "18 routine + 8 core" / "gh-aw
+ * Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (real work; `outcomes` is outcomesSummary(),
+ * or null without a snapshot).
+ */
+export function shippedItem(board, outcomes = null) {
   const done = board?.counts?.done ?? 0;
   const total = board?.total ?? 0;
   const tiers = Object.entries(board?.byTier ?? {}).sort(([a], [b]) => (a === 'auto' ? -1 : b === 'auto' ? 1 : a.localeCompare(b)));
   const parts = tiers.flatMap(([tier, x], i) => [...(i ? [T('+')] : []), NUM(`${x.done} ${TIER_WORD[tier] ?? (tier === 'unknown' ? 'other' : tier)}`)]);
+  const p = outcomes?.real?.prs;
+  const line = p
+    ? [T('gh-aw Outcomes:'), NUM(`${p.accepted} PR${p.accepted === 1 ? '' : 's'} accepted`), T(','), NUM(`${p.rejected} rejected`), T(','), NUM(`${p.pending} pending`)]
+    : [T('gh-aw Outcomes not available yet')];
   return {
     key: 'shipped',
     main: [T('Shipped:'), BIG(`${done} of ${total}`), T(total === 1 ? 'task' : 'tasks')],
-    subs: total ? [[...parts, T(', ported from JavaScript to Rust')]] : [],
+    subs: [...(total ? [parts] : []), line],
   };
 }
 
@@ -2266,47 +2203,168 @@ export function speedItem({ medianMs = null, count = 0, firstAt = null, lastAt =
   return {
     key: 'speed',
     main: [T('Speed: about'), BIG(plainDuration(medianMs)), T('per task')],
-    subs: firstAt != null && lastAt != null ? [[NUM(shortDate(firstAt)), T('→'), NUM(shortDate(lastAt))]] : [],
+    subs: firstAt != null && lastAt != null ? [dateSpan(firstAt, lastAt)] : [],
+  };
+}
+
+/** "Oct 22 → Nov 2", "Oct 22 → 27" within one month, or "Oct 22" for one day. */
+function dateSpan(a, b) {
+  const [x, y] = [shortDate(a), shortDate(b)];
+  if (x === y) return [NUM(x)];
+  const [mx, my] = [x.split(' ')[0], y.split(' ')[0]];
+  return [NUM(x), T('→'), NUM(mx === my ? y.slice(my.length + 1) : y)];
+}
+
+/**
+ * "Total cost: about $1,126" / "= $1,110 one-time build + $16.32 running" /
+ * "$11.42 tasks + $4.89 drills · about $0.44 per accepted PR". Without drill cost the per-PR
+ * clause joins the second line (real tasks are then the whole run cost). `build` is a
+ * validateBuildCost() result; `cost` a costJoin() result: the run total always counts (it's the
+ * spend snapshots); the real/drill split and the per-PR cost need the Outcomes snapshot
+ * (`cost.known`) and `acceptedPrs`, the real PRs it accepted. Run cost not tied to a task counts
+ * as real tasks.
+ */
+export function costItem({ build = null, cost = null, acceptedPrs = null } = {}) {
+  const b = build?.ok ? build.value : null;
+  const run = cost ? cost.total : null;
+  const drills = cost?.drillAic ?? 0;
+  const real = cost ? cost.total - drills : null;
+  const perPr = cost?.known && acceptedPrs ? real / acceptedPrs : null;
+  const known = cost?.known && cost.measuredRuns;
+  const per = perPr != null ? [SEP, T('about'), NUM(formatUsd(perPr)), T('per accepted PR')] : [];
+  const split = known && (drills > 0 || !b)
+    ? [NUM(formatUsd(real)), T('tasks'), ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('drills')] : []), ...per]
+    : null;
+  if (b && run != null) {
+    return {
+      key: 'cost',
+      main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100 + run))],
+      subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build +'), NUM(formatUsd(run)), T('running'), ...(known && !split ? per : [])], ...(split ? [split] : [])],
+      perPr,
+    };
+  }
+  if (b) return { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build'), SEP, T('running cost not available right now')]], perPr };
+  if (run != null) return { key: 'cost', main: [T('Running cost: about'), BIG(formatUsd(run))], subs: split ? [split] : [], perPr };
+  return { key: 'cost', main: [T('Total cost:'), BIG('—'), T('not available right now')], subs: [], perPr };
+}
+
+/**
+ * "Hands-off: 25 of 26 PRs merged with no human edits (gh-aw zero-touch)" / "2 manual steps after
+ * go-live" (ours, linked to the list; the human effort outside the PR). `outcomes` is outcomesSummary() or null.
+ */
+export function handsOffItem(outcomes, steps, href = '#human-steps') {
+  const p = outcomes?.real?.prs;
+  const main = p
+    ? [T('Hands-off:'), BIG(`${outcomes.real.zeroTouch} of ${p.accepted}`), T(`PR${p.accepted === 1 ? '' : 's'} merged with no human edits`), NUM('(gh-aw zero-touch)')]
+    : [T('Hands-off:'), BIG('—'), T('gh-aw Outcomes not available yet')];
+  const sub = steps?.goLive
+    ? [NUM(String(steps.total)), { t: 'link', text: steps.total === 1 ? 'manual step' : 'manual steps', href }, T('after go-live')]
+    : [NUM('0'), T('manual steps; not live yet')];
+  return { key: 'hands', main, subs: [sub] };
+}
+
+// --- gh-aw Outcomes: the newest outcomes_snapshot -------------------------------------------
+
+export const OUTCOME_STATUSES = Object.freeze(['accepted', 'rejected', 'pending', 'ignored', 'unknown']);
+export const OUTCOMES_STALE_MS = 48 * HOUR_MS;
+
+/**
+ * One outcomes_snapshot payload, normalized, or null when it isn't usable (no `runs` list, no
+ * source run id, no evaluation time). Runs without a numeric run_id, a workflow, a boolean
+ * `drill` or an `items` list, and items without a type or status, are dropped and counted in
+ * `dropped`. An optional `diagnosis` is kept; review runs may name a task.
+ */
+export function parseOutcomesSnapshot(payload) {
+  if (!plainObject(payload) || !Array.isArray(payload.runs) || !(Number.isSafeInteger(payload.source_run_id) && payload.source_run_id > 0)) return null;
+  const evaluatedAt = parseTime(payload.evaluated_at);
+  if (evaluatedAt == null) return null;
+  let dropped = 0;
+  const runs = [];
+  for (const r of payload.runs) {
+    if (!plainObject(r) || !isNum(r.run_id) || !isStr(r.workflow) || typeof r.drill !== 'boolean' || !Array.isArray(r.items)) {
+      dropped++;
+      continue;
+    }
+    const items = [];
+    for (const it of r.items) {
+      if (!plainObject(it) || !isStr(it.type) || !isStr(it.outcome_status) || !(it.zero_touch === true || it.zero_touch === false || it.zero_touch == null)) {
+        dropped++;
+        continue;
+      }
+      items.push({ type: it.type, url: isStr(it.object_url) ? it.object_url : null, status: it.outcome_status, evidence: isStr(it.evidence_strength) ? it.evidence_strength : null, zeroTouch: it.zero_touch ?? null });
+    }
+    runs.push({
+      runId: r.run_id, workflow: r.workflow, task: isStr(r.task) ? r.task : null, drill: r.drill, createdAt: parseTime(r.created_at),
+      aic: isNum(r.aic) ? r.aic : null, conclusion: isStr(r.conclusion) ? r.conclusion : null, eval: isStr(r.eval) ? r.eval : null,
+      evaluatedAt: parseTime(r.evaluated_at), items, diagnosis: r.diagnosis ?? null,
+    });
+  }
+  return {
+    sourceRunId: payload.source_run_id, sourceRunAttempt: isNum(payload.source_run_attempt) ? payload.source_run_attempt : null,
+    ghAwVersion: isStr(payload.gh_aw_version) ? payload.gh_aw_version : null, mode: isStr(payload.mode) ? payload.mode : null,
+    evaluatedAt, runs, dropped, summary: plainObject(payload.summary) ? payload.summary : null,
   };
 }
 
 /**
- * "Total cost: about $1,126" / "= $1,110 to build the factory (one-time) + $16.32 to run it" /
- * "$11.43 real tasks (median $0.33 each) + $4.89 safety drills" (the split of the run cost). `build` is a
- * validateBuildCost() result; `cost` a costJoin() result (its `known` false = the run lists
- * couldn't be read). Run cost not tied to a task counts as real tasks.
+ * The newest usable outcomes_snapshot in the log (each is complete, so only it is read) and when
+ * it was last re-checked: the newest `outcomes_checked` marker after it whose `same_as_run_id` is
+ * its source run. Returns { snapshot, at, checkedAt, lastAt, ignored } or null without one.
  */
-export function costItem({ build = null, cost = null, medianAic = null } = {}) {
-  const b = build?.ok ? build.value : null;
-  const runKnown = !!cost && (cost.known || cost.measuredRuns === 0);
-  const run = runKnown ? cost.total : null;
-  const drills = runKnown ? cost.drillAic : 0;
-  const real = runKnown ? cost.total - drills : null;
-  const split = runKnown && cost.measuredRuns
-    ? [NUM(formatUsd(real)), T('real tasks'), ...(medianAic != null ? [T('(median'), NUM(formatUsd(medianAic)), T('each)')] : []),
-      ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('safety drills')] : [])]
-    : null;
-  if (b && runKnown) {
-    return {
-      key: 'cost',
-      main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100 + run))],
-      subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('to build the factory (one-time) +'), NUM(formatUsd(run)), T('to run it')], ...(split ? [split] : [])],
-    };
+export function latestOutcomes(events) {
+  let found = null;
+  let ignored = 0;
+  for (const ev of events || []) {
+    if (ev?.type !== 'outcomes_snapshot') continue;
+    const snap = parseOutcomesSnapshot(ev.payload);
+    const at = parseTime(ev.timestamp);
+    if (!snap || at == null) {
+      ignored++;
+      continue;
+    }
+    if (!found || at >= found.at) found = { snapshot: snap, at };
   }
-  if (b) return { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('to build the factory (one-time)'), SEP, T('running cost not available right now')]] };
-  if (runKnown) return { key: 'cost', main: [T('Running cost: about'), BIG(formatUsd(run))], subs: split ? [split] : [] };
-  return { key: 'cost', main: [T('Total cost:'), BIG('—'), T('not available right now')], subs: [] };
+  if (!found) return null;
+  let checkedAt = null;
+  for (const ev of events || []) {
+    const t = parseTime(ev?.timestamp);
+    if (ev?.type === 'outcomes_checked' && t != null && t >= found.at && ev.payload?.same_as_run_id === found.snapshot.sourceRunId && (checkedAt == null || t > checkedAt)) checkedAt = t;
+  }
+  return { ...found, checkedAt, lastAt: Math.max(found.snapshot.evaluatedAt, checkedAt ?? -Infinity), ignored };
 }
 
-/** "Human effort after go-live: 2 manual steps" (the words link to the list). */
-export function humanItem(h, href = '#human-steps') {
-  if (!h?.goLive) return { key: 'human', main: [T('Human effort:'), BIG('0'), T('manual steps; not live yet')], subs: [] };
-  return { key: 'human', main: [T('Human effort after go-live:'), BIG(String(h.total)), { t: 'link', text: h.total === 1 ? 'manual step' : 'manual steps', href }], subs: [] };
+/** Whether the newest Outcomes snapshot (latestOutcomes()) is over 48 h old with no check since. */
+export function outcomesStale(latest, now = Date.now()) {
+  return !!latest && now - latest.lastAt > OUTCOMES_STALE_MS;
 }
 
 /**
- * "Quality: 0 reverts of real work · reviewer blocked 1 bad change before merge · 12 safety drills
- * passed (6 defects found and fixed)". The drills clause needs a valid drills.json (`drills`, a
+ * Counts from a parsed snapshot, real work and safety drills apart (a run is a drill when the
+ * snapshot says so, or its task is drill/*): `prs` counts `create_pull_request` items by status
+ * (accepted, rejected, pending, other) and by raw status (`prStatus`), `items` every item by status, `zeroTouch` the accepted PRs
+ * gh-aw marked zero-touch.
+ */
+export function outcomesSummary(snapshot) {
+  const blank = () => ({ prs: { accepted: 0, rejected: 0, pending: 0, other: 0 }, prStatus: {}, items: {}, zeroTouch: 0, runs: 0 });
+  const out = { real: blank(), drills: blank() };
+  for (const r of snapshot?.runs ?? []) {
+    const side = r.drill || isDrill(r.task) ? out.drills : out.real;
+    side.runs++;
+    for (const it of r.items) {
+      side.items[it.status] = (side.items[it.status] ?? 0) + 1;
+      if (it.type !== 'create_pull_request') continue;
+      side.prStatus[it.status] = (side.prStatus[it.status] ?? 0) + 1;
+      if (it.status in side.prs && it.status !== 'other') side.prs[it.status]++;
+      else side.prs.other++;
+      if (it.status === 'accepted' && it.zeroTouch === true) side.zeroTouch++;
+    }
+  }
+  return out;
+}
+
+/**
+ * "Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects fixed)",
+ * real work only (drills are left out of the reverts and blocks; the tooltip says so). The drills clause needs a valid drills.json (`drills`, a
  * validateDrills() result); without it the clause is left out.
  */
 export function qualityItem(q, drills = null) {
@@ -2315,10 +2373,10 @@ export function qualityItem(q, drills = null) {
   return {
     key: 'quality',
     main: [
-      T('Quality:'), BIG(String(r)), T(`revert${r === 1 ? '' : 's'} of real work`), SEP,
-      T('reviewer blocked'), NUM(`${k} bad change${k === 1 ? '' : 's'}`), T('before merge'),
+      T('Quality:'), BIG(String(r)), T(`revert${r === 1 ? '' : 's'}`), SEP,
+      T('reviewer blocked'), NUM(`${k} change${k === 1 ? '' : 's'}`),
       ...(drills?.ok ? [SEP, { t: 'link', text: `${drills.passed} safety drill${drills.passed === 1 ? '' : 's'} passed`, href: JOURNAL_URL },
-        NUM(`(${drills.value.defects} defect${drills.value.defects === 1 ? '' : 's'} found and fixed)`)] : []),
+        NUM(`(${drills.value.defects} defect${drills.value.defects === 1 ? '' : 's'} fixed)`)] : []),
     ],
     subs: [],
   };

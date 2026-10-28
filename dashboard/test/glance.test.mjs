@@ -115,14 +115,14 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     })()`);
     assert.equal(r.status, 'Healthy · switched off · nothing needs you · Dry run · Sample');
     assert.deepEqual(r.score, [
-      'Shipped: 3 of 3 tasks / 2 routine + 1 core, ported from JavaScript to Rust',
-      'Speed: about 15 min per task / Oct 15 → Oct 16',
+      'Shipped: 3 of 3 tasks / 2 routine + 1 core / gh-aw Outcomes not available yet',
+      'Speed: about 15 min per task / Oct 15 → 16',
       'Running cost: about $0.00',
-      'Human effort: 0 manual steps; not live yet',
-      'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge · 1 safety drill passed (0 defects found and fixed)',
+      'Hands-off: — gh-aw Outcomes not available yet / 0 manual steps; not live yet',
+      'Quality: 0 reverts · reviewer blocked 0 changes · 1 safety drill passed (0 defects fixed)',
     ]);
     assert.deepEqual(r.bigs, [1, 1, 1, 1, 1], 'one big number per sentence');
-    assert.equal(r.costTip, "Build cost unavailable: buildCost missing from the sample. Run: the factory's own agent runs, at $0.01 per AI credit.");
+    assert.equal(r.costTip, "Build cost unavailable: buildCost missing from the sample. Run: the real and drill split needs gh-aw Outcomes, not available yet.");
     assert.equal(r.drillsHref, 'https://github.com/sabbasi3-factory-lab/factory/blob/main/docs/JOURNAL.md');
     assert.deepEqual(r.tiles, [
       ['casual-time-parser: done', '#i-ok'], ['month-name-parser: done', '#i-ok'], ['iso-format-parser: done', '#i-ok'],
@@ -313,26 +313,42 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
         status: flat(document.querySelector('.glance')),
         score: [...document.querySelectorAll('#score .score-item')].map((li) => [...li.querySelectorAll('p')].map(flat).join(' / ')),
         running: [...document.querySelectorAll('#state-part a')].map((a) => a.getAttribute('href')),
-        stepsLink: document.querySelector('.score--human a').getAttribute('href'),
+        stepsLink: document.querySelector('.score--hands a').getAttribute('href'),
       };
     })()`);
     assert.equal(r.status, 'Healthy · working on 2 tasks: casual-date, month-parser · 2 tasks need you: #45, #46 · Sample');
     assert.deepEqual(r.running, ['https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/44', 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/43']);
     assert.deepEqual(r.score, [
-      'Shipped: 2 of 8 tasks / 2 routine + 0 core, ported from JavaScript to Rust',
-      'Speed: about 77 min per task / Oct 15 → Oct 16',
-      'Total cost: about $1,121 / = $1,110 to build the factory (one-time) + $10.97 to run it / $10.97 real tasks (median $3.44 each)',
-      'Human effort after go-live: 1 manual step',
-      'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge · 2 safety drills passed (1 defect found and fixed)',
+      'Shipped: 2 of 8 tasks / 2 routine + 0 core / gh-aw Outcomes: 2 PRs accepted, 0 rejected, 1 pending',
+      'Speed: about 77 min per task / Oct 15 → 16',
+      'Total cost: about $1,121 / = $1,110 one-time build + $10.97 running · about $5.49 per accepted PR',
+      'Hands-off: 1 of 2 PRs merged with no human edits (gh-aw zero-touch) / 1 manual step after go-live',
+      'Quality: 0 reverts · reviewer blocked 0 changes · 2 safety drills passed (1 defect fixed)',
     ]);
     // The link opens Details at the list of steps.
     assert.equal(r.stepsLink, '#human-steps');
-    await page.evaluate("document.querySelector('.score--human a').click()");
+    await page.evaluate("document.querySelector('.score--hands a').click()");
     await page.waitFor("document.getElementById('details').open && document.getElementById('human-fold').open", { what: 'Details to open at the steps' });
     assert.equal(await page.evaluate('document.activeElement.id'), 'human-steps', 'focus moves to the list');
     assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#human-steps li')].map((li) => li.innerText.replace(/\\s+/g, ' ').replace(/ \\d+[mhd] ago$/, '').trim())"),
       ['#6 ordinal · put an agent PR in the merge queue']);
     await page.evaluate("document.getElementById('human-fold').open = false; document.getElementById('details').open = false");
+    // Details › Outcomes (gh-aw): the per-status table, freshness, the cost note and how to reproduce.
+    const o = await page.evaluate(`(() => {
+      document.getElementById('details').open = true; document.getElementById('outcomes-fold').open = true;
+      const el = document.getElementById('outcomes');
+      const out = { text: el.innerText.replace(/\\s+/g, ' '), rows: [...el.querySelectorAll('tbody tr')].map((tr) => [...tr.cells].map((c) => c.innerText.trim())) };
+      document.getElementById('outcomes-fold').open = false; document.getElementById('details').open = false;
+      return out;
+    })()`);
+    assert.deepEqual(o.rows.slice(0, 3), [['accepted', '2', '0', '2', '0'], ['rejected', '0', '1', '0', '1'], ['pending', '1', '0', '3', '0']]);
+    assert.match(o.text, /Last evaluated \d+[smhd] ago; last checked unchanged \d+[smhd] ago\./);
+    assert.match(o.text, /gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost\./);
+    assert.match(o.text, /Reproduce: gh aw outcomes 9001 /);
+    assert.match(o.text, /1 malformed snapshot ignored\. 1 malformed entry skipped\./);
+    // The run-to-task join is the Outcomes snapshot now: no Actions API request at all.
+    const urls = await page.evaluate("performance.getEntriesByType('resource').map((e) => e.name)");
+    assert.deepEqual(urls.filter((u) => /\/actions\//.test(u)), []);
   });
 
   test('tooltips are reachable by Tab, show on focus and hide on Escape', async () => {
@@ -353,7 +369,10 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(await page.evaluate("document.getElementById('tip').hidden"), true);
     // A scoreboard sentence is focusable and its tooltip has the definitions.
     const tileTip = await page.evaluate("(() => { const k = document.querySelector('#score .score-item'); k.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
-    assert.equal(tileTip, "Tasks whose issue is closed as completed, out of all tasks in the task map. Safety drills aren't counted.");
+    assert.equal(tileTip, 'Tasks ported from JavaScript to Rust whose issue is closed as completed. gh-aw Outcomes judges each agent PR; real work only, drills separate.');
+    // The hands-off sentence: gh-aw's zero-touch, in the owner's words.
+    const handsTip = await page.evaluate("(() => { document.querySelector('.score--hands').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
+    assert.equal(handsTip, 'gh-aw counts a PR as zero-touch if no person edited it. Manual steps outside the PR are counted separately below.');
   });
 
   test('"View all" expands the checks with Enter and collapses with Space, keeping focus', async () => {
@@ -461,10 +480,10 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       return { cost: [...item('cost').querySelectorAll('p')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim()), costTip: tipOf(item('cost')),
         quality: item('quality').querySelector('p').innerText.replace(/\\s+/g, ' ').trim(), qualityTip: tipOf(item('quality')) };
     })()`);
-    assert.deepEqual(r.cost, ['Running cost: about $10.97', '$10.97 real tasks (median $3.44 each)']);
+    assert.deepEqual(r.cost, ['Running cost: about $10.97', '$10.97 tasks · about $5.49 per accepted PR']);
     assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\. Run: /);
-    assert.equal(r.quality, 'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge');
-    assert.equal(r.qualityTip, 'Reverts and reviewer blocks leave out safety drills. Drill record unavailable: drills: unexpected extra.');
+    assert.equal(r.quality, 'Quality: 0 reverts · reviewer blocked 0 changes');
+    assert.equal(r.qualityTip, 'Reverts and changes the reviewer blocked before merge count real work only. Drill record unavailable: drills: unexpected extra.');
     await open('1', { force: true });
   });
 

@@ -16,7 +16,7 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `build-cost.json` | What it cost to build the factory (research, design, coordination and build sessions), from the build journal: `{ "ai_units", "usd", "as_of", "source" }`. Deployed with the page and read same-origin |
 | `drills.json` | The safety-drill record from the build journal: `{ "as_of", "source", "defects_found_and_fixed", "runs": [{ "id", "result": "pass" or "fail", "note"? }] }`. Deployed with the page and read same-origin |
 | `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five sentences, the two JSON files and the human-steps rule) |
-| `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts and Actions run lists each sample uses instead of GitHub |
+| `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts, task issues, build cost and drill record each sample uses instead of GitHub. The busy sample also has a gh-aw Outcomes snapshot (plus a malformed one and a checked marker); the quiet one has none, to show the fallback |
 | `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
 | `test/glance.test.mjs` | The 5-second glance test: word budgets, layout, tooltips and keyboard behaviour, measured on the rendered `?fixture=1` and `?fixture=quiet` pages in headless Chrome |
@@ -44,19 +44,26 @@ Top to bottom:
   #33" (linked, after the closed rule), "checking reviews…" or "review list unavailable".
   "Dry run" and "Sample" chips show when they apply.
 - **Scoreboard:** five sentences, each with one big number:
-  1. "Shipped: 26 of 26 tasks", under it "18 routine + 8 core, ported from JavaScript to Rust";
-  2. "Speed: about 10 min per task", under it the first and last finish dates ("Oct 22 → Oct 27");
-  3. "Total cost: about $1,126", under it "= $1,110 to build the factory (one-time) + $16.32 to
-     run it" and the run split "$11.42 real tasks (median $0.33 each) + $4.89 safety drills";
-  4. "Human effort after go-live: 2 manual steps", linked to the list in Details;
-  5. "Quality: 0 reverts of real work · reviewer blocked 1 bad change before merge · 12 safety
-     drills passed (6 defects found and fixed)", the drills linked to the build journal.
+  1. "Shipped: 26 of 26 tasks", under it "18 routine + 8 core" and the gh-aw Outcomes result for
+     real work, "gh-aw Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (else "gh-aw Outcomes
+     not available yet");
+  2. "Speed: about 10 min per task", under it the first and last finish dates ("Oct 22 → 27");
+  3. "Total cost: about $1,126", under it "= $1,110 one-time build + $16.32 running" and the run
+     split "$11.84 tasks + $4.47 drills · about $0.46 per accepted PR";
+  4. "Hands-off: 25 of 26 PRs merged with no human edits (gh-aw zero-touch)", under it "2 manual
+     steps after go-live" (ours: steps outside the PR), linked to the list in Details;
+  5. "Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects
+     fixed)", real work only, the drills linked to the build journal.
+
+  The wording is tight because of the 120-word fold budget; the tooltips and Details carry the
+  qualifiers (real work only, before merge, ported from JavaScript to Rust).
 - **Task board:** one tile per task of the task map, grouped by its contract area, with a state
   colour and icon (✓ done, ▶ running, ⚠ needs you, ⧗ waiting); a legend shows when more than one
   state is present. A tile links to its issue; its tooltip has the task id, tier, state and since
   when.
 - **Details** (one fold, closed): how these numbers work (the definitions and the data scope),
-  latest checks, where the time goes, task timeline, liveness (last and next check-in, the
+  Outcomes (gh-aw: the per-status table for real work and drills, last evaluated and last
+  checked, the agent-only vs full-cost note and `gh aw outcomes <run-id>` to reproduce), latest checks, where the time goes, task timeline, liveness (last and next check-in, the
   observed cadence and the health rule), human steps (the list behind sentence 4, plus all human actions of the
   shared account with its caveat), recent activity, and the audit log with the verifier line.
 - **Footer:** "Read-only · verified in your browser".
@@ -208,19 +215,22 @@ After changing `make-fixture.mjs`, regenerate the fixtures with
    new `task_done` or `merged`; only with at least 6 API requests left. If it can't be read, the
    board falls back to the audit log (the last good list is kept if there is one) and its
    tooltips say so.
-9. It reads the **agent workflow run lists** for the cost join, three API calls with ETags:
-   `GET /repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/{implement,repair,review}.lock.yml/runs?per_page=100`.
-   Only when a spend snapshot names a run id the lists don't have yet (each id is looked for
-   once), at most every 10 minutes, and only with at least 8 API requests left in the hour.
-   If they can't be read, the cost per task shows "—" and its tooltip says why; the totals,
-   which need only the snapshots, still show.
+9. **gh-aw Outcomes** come from the audit log itself, no extra call: the newest usable
+   `outcomes_snapshot` (`latestOutcomes()`; malformed snapshots, runs and items are skipped and
+   counted in Details), and the newest `outcomes_checked` marker whose `same_as_run_id` is that
+   snapshot (re-evaluated, unchanged) for "last checked". The snapshot's `runs[]` map each agent
+   run to its workflow, task and drill flag; that replaces the old cost join over the Actions
+   run lists, so the page makes no Actions API calls for it. An optional `diagnosis`, and review
+   runs with a task, are accepted. Without a snapshot the Outcomes lines say "gh-aw Outcomes not
+   available yet" and the rest still works; a snapshot over 48 h old with no checked marker
+   since gives its age in the tooltip.
 
 **Rate limits.** Without a token, GitHub allows 60 API requests an hour per IP, and
 conditional requests that return 304 still count against it (they're only free when
-authenticated). A first load takes about ten (branch, tree, two PR lists, open issues, the
-anchors probe, task issues, three run lists). In steady state the side reads take about 14 an
-hour (the PR lists and open issues every 15 min, the task issues every 30 min, the run lists
-only for new runs, a few more after merges), and the branch polls are spread over the rest. The
+authenticated). A first load takes about seven (branch, tree, two PR lists, open issues, the
+anchors probe, task issues). In steady state the side reads take about 14 an hour (the PR lists
+and open issues every 15 min, the task issues every 30 min, a few more after merges), and the
+branch polls are spread over the rest. The
 dashboard spreads the remaining requests over the time left in the rate-limit window: without a
 token that's about one check a minute; with a token it checks every 30 s. The "updated" tooltip and Settings show the requests left and the
 reset time. Hidden tabs don't poll. Raw file downloads don't use the API limit.
@@ -280,10 +290,11 @@ Drill tasks (`drill/*`, the factory's own fire drills) are left out of every tas
 |---|---|
 | Status line | `healthSummary()` (the chip) and `statusParts()` (the state and what needs you, above) |
 | Task board | `taskBoard()`: per task of the catalog, **done** when its task issue is closed as "completed" (no audit events needed); while the issue is open, only after the controller's `task_done`; an issue closed otherwise is never done. Without a known issue (or when the issue list can't be read): after a `merged` or `task_done` not followed by a reopening `ready`, `auto_ready`, `dispatched` or `repair_dispatched`. The tile links to the task issue; **needs you** with an open Needs-you item for the task; **running** once real work started (`dispatched`, `repair_dispatched` or `review_dispatched`) and not done, unless its issue or current PR is closed (the closed rule); **waiting** otherwise. "Since" is when it entered that state |
-| Shipped | `shippedItem()`: done tiles of all tiles; "routine" = tier `auto`, "core" = tier `auto-strict`, from the contracts |
+| Shipped | `shippedItem()`: done tiles of all tiles; "routine" = tier `auto`, "core" = tier `auto-strict`, from the contracts. The Outcomes line: `outcomesSummary()` of the newest snapshot, `create_pull_request` items of real runs by `outcome_status` (a run is a drill when its `drill` flag is set or its task is `drill/*`; drills are counted apart, in Details) |
 | Speed | `issueToMerged()` over every done real task whose start and merge are in the whole audit log (the tooltip says how many of the done tasks that is): from the task's first real `auto_ready` (else its first real `dispatched`) to its last `merged`; the median, in minutes up to 90, then hours. The dates are the first and last done times of real tasks |
-| Total cost | `costItem()`: build (`build-cost.json`, `usd`) + run. Run = each agent run's latest measured AI credits across every real `spend_snapshot` in the whole log (a "reserved" entry never replaces a measurement), $ = credits ÷ 100, split by `costJoin()` into safety drills (`drill/*`) and real tasks (everything else, including runs not tied to a task). Runs are matched to tasks by title ("Implement <task> #<issue> attempt <n>") or, for review runs and older untitled runs, by the dispatch event they followed within 30 min. The median is over done real tasks with a known cost. Without the run lists: the build cost and "running cost not available right now"; without the build cost: the running cost only |
-| Human effort | `humanSteps()`, after go-live (the first real `dispatched` of a non-drill task): `queued` by an actor that isn't a `[bot]` on an agent PR (one whose `pr_opened` author is a `[bot]`, or that a task event names), and `human_action` with an action other than a review or comment on an agent PR or a factory task. Plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared account), don't count. Manual dispatches, label fixes and pushes count when the log records them as `human_action` |
+| Total cost | `costItem()`: build (`build-cost.json`, `usd`) + run. Run = each agent run's latest measured AI credits across every real `spend_snapshot` in the whole log (a "reserved" entry never replaces a measurement): the full cost, agent plus the threat-detection job. $ = credits ÷ 100. `costJoin()` joins runs to tasks by run id through the Outcomes snapshot's `runs[]`: drills (flag or `drill/*`) apart, real tasks everything else, including runs without a task (reviewer runs, for now) and runs the snapshot doesn't list. Per accepted PR = real run cost ÷ real accepted PRs. gh-aw's own `aic` is agent-only; for real runs the full cost is about 1.56× it, and Details shows both. The median per done task is in Details only. Without a snapshot: the run total, no split; without spend snapshots: the build cost and "running cost not available right now"; without the build cost: the running cost only |
+| Hands-off | gh-aw zero-touch: accepted real `create_pull_request` items with `zero_touch: true`, of all accepted real PRs |
+| Manual steps (under Hands-off) | `humanSteps()`, after go-live (the first real `dispatched` of a non-drill task): `queued` by an actor that isn't a `[bot]` on an agent PR (one whose `pr_opened` author is a `[bot]`, or that a task event names), and `human_action` with an action other than a review or comment on an agent PR or a factory task. Plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared account), don't count. Manual dispatches, label fixes and pushes count when the log records them as `human_action` |
 | Quality | `qualityStats()`: real `auto_revert` events, and real `needs_human` with reason `review_objected`, both without drills; plus `drills.json`: runs with result "pass", and `defects_found_and_fixed` |
 | Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue), plus owner reviews (open, non-draft PRs with a human or owner `Tier:` line or label). An item closes when a later real event for the same task, PR or issue shows it moved on, or when its issue or PR is closed (the closed rule) |
 | Liveness (Details) | Last check-in: the newest controller event. Next: `liveness()`, ~10 min after the last poll with work in flight or a pause, else the next full hour (GitHub's cron often runs hours late; the tooltip shows the observed cadence) |

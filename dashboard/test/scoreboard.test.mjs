@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  JOURNAL_URL, costItem, costJoin, earliestSpendDay, healthSummary, humanItem, humanSteps, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
+  JOURNAL_URL, OUTCOMES_STALE_MS, costItem, costJoin, earliestSpendDay, handsOffItem, healthSummary, humanSteps, latestOutcomes, outcomesStale, outcomesSummary, parseOutcomesSnapshot, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
   shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
 } from '../lib.js';
 
@@ -192,18 +192,21 @@ test('status line: what needs you, linked, after the closed rule; reviews; unkno
 
 // --- the five sentences ---------------------------------------------------------------------------
 
-test('shipped: done of total, split into routine and core by tier', () => {
+test('shipped: done of total, routine and core by tier, and the gh-aw Outcomes line (or its fallback)', () => {
   const b = { counts: { done: 26 }, total: 26, byTier: { 'auto-strict': { done: 8, total: 8 }, auto: { done: 18, total: 18 } } };
-  assert.deepEqual(text(shippedItem(b)), ['Shipped: 26 of 26 tasks', '18 routine + 8 core, ported from JavaScript to Rust']);
-  assert.equal(bigs(shippedItem(b)), 1);
-  assert.deepEqual(text(shippedItem({ counts: { done: 1 }, total: 3, byTier: { auto: { done: 1, total: 2 }, unknown: { done: 0, total: 1 } } })),
-    ['Shipped: 1 of 3 tasks', '1 routine + 0 other, ported from JavaScript to Rust']);
-  assert.deepEqual(text(shippedItem({ counts: { done: 0 }, total: 0, byTier: {} })), ['Shipped: 0 of 0 tasks']);
+  const os = { real: { prs: { accepted: 26, rejected: 1, pending: 0, other: 0 }, zeroTouch: 25 } };
+  assert.deepEqual(text(shippedItem(b, os)), ['Shipped: 26 of 26 tasks', '18 routine + 8 core', 'gh-aw Outcomes: 26 PRs accepted, 1 rejected, 0 pending']);
+  assert.equal(bigs(shippedItem(b, os)), 1);
+  assert.deepEqual(text(shippedItem(b, null)).at(-1), 'gh-aw Outcomes not available yet');
+  assert.equal(text(shippedItem(b, { real: { prs: { accepted: 1, rejected: 0, pending: 2, other: 0 } } })).at(-1), 'gh-aw Outcomes: 1 PR accepted, 0 rejected, 2 pending');
+  assert.deepEqual(text(shippedItem({ counts: { done: 1 }, total: 3, byTier: { auto: { done: 1, total: 2 }, unknown: { done: 0, total: 1 } } })).slice(0, 2),
+    ['Shipped: 1 of 3 tasks', '1 routine + 0 other']);
+  assert.deepEqual(text(shippedItem({ counts: { done: 0 }, total: 0, byTier: {} })), ['Shipped: 0 of 0 tasks', 'gh-aw Outcomes not available yet']);
 });
-
 test('speed: about M min (or hours past 90 min) per task, with the first and last finish dates', () => {
-  assert.deepEqual(text(speedItem({ medianMs: 9.6 * MIN, count: 26, firstAt: at('2026-10-22T18:44:00Z'), lastAt: at('2026-10-27T23:49:06Z') })), ['Speed: about 10 min per task', 'Oct 22 → Oct 27']);
-  assert.deepEqual(text(speedItem({ medianMs: 3 * 60 * MIN, count: 2, firstAt: at('2026-10-22T00:00:00Z'), lastAt: at('2026-10-22T05:00:00Z') })), ['Speed: about 3 hours per task', 'Oct 22 → Oct 22']);
+  assert.deepEqual(text(speedItem({ medianMs: 9.6 * MIN, count: 26, firstAt: at('2026-10-22T18:44:00Z'), lastAt: at('2026-10-27T23:49:06Z') })), ['Speed: about 10 min per task', 'Oct 22 → 27']);
+  assert.deepEqual(text(speedItem({ medianMs: 9.6 * MIN, count: 2, firstAt: at('2026-10-30T18:44:00Z'), lastAt: at('2026-11-02T10:00:00Z') }))[1], 'Oct 30 → Nov 2');
+  assert.deepEqual(text(speedItem({ medianMs: 3 * 60 * MIN, count: 2, firstAt: at('2026-10-22T00:00:00Z'), lastAt: at('2026-10-22T05:00:00Z') })), ['Speed: about 3 hours per task', 'Oct 22']);
   assert.deepEqual(text(speedItem({})), ['Speed: — no task merged yet']);
   // Done tasks whose start and merge aren't in the log: the timing is unavailable, not "no merge".
   assert.deepEqual(text(speedItem({ count: 0, done: 26 })), ['Speed: — timing unavailable']);
@@ -225,43 +228,126 @@ test('speed: about M min (or hours past 90 min) per task, with the first and las
 const cost = (patch = {}) => ({ known: true, total: 1632, drillAic: 489, measuredRuns: 60, unattributed: 0, ...patch });
 const build = validateBuildCost({ ai_units: 111000, usd: 1110, as_of: '2026-10-27', source: 'journal' });
 
-test('cost: build (one-time) + run, the run split into real tasks and safety drills', () => {
-  const item = costItem({ build, cost: cost(), medianAic: 32.78 });
+test('cost: build (one-time) + full run cost, split into real tasks and drills, and the cost per accepted PR', () => {
+  const item = costItem({ build, cost: cost(), acceptedPrs: 26 });
   assert.deepEqual(text(item), [
     'Total cost: about $1,126',
-    '= $1,110 to build the factory (one-time) + $16.32 to run it',
-    '$11.43 real tasks (median $0.33 each) + $4.89 safety drills',
+    '= $1,110 one-time build + $16.32 running',
+    '$11.43 tasks + $4.89 drills · about $0.44 per accepted PR',
   ]);
   assert.equal(bigs(item), 1);
-  // Unattributed run cost is part of "real tasks" (total minus drills); no drills, no drill clause.
-  assert.equal(text(costItem({ build, cost: cost({ drillAic: 0, unattributed: 100 }), medianAic: null }))[2], '$16.32 real tasks');
-  // The run lists couldn't be read: the build cost, and say the run cost is unavailable.
-  assert.deepEqual(text(costItem({ build, cost: cost({ known: false }) })), ['Total cost: about $1,110', '= $1,110 to build the factory (one-time) · running cost not available right now']);
+  // Per accepted PR = full real-task run cost ÷ real accepted PRs (unattributed counts as real).
+  assert.equal(item.perPr, (1632 - 489) / 26);
+  assert.equal(costItem({ build, cost: cost({ total: 1631.6, drillAic: 447.4 }), acceptedPrs: 26 }).perPr.toFixed(1), '45.5');
+  // No drill cost: the run is all tasks, so the per-PR clause joins the second line; no accepted PRs, no per-PR clause.
+  assert.deepEqual(text(costItem({ build, cost: cost({ drillAic: 0, unattributed: 100 }), acceptedPrs: 0 })), ['Total cost: about $1,126', '= $1,110 one-time build + $16.32 running']);
+  assert.equal(text(costItem({ build, cost: cost({ drillAic: 0 }), acceptedPrs: 16 }))[1], '= $1,110 one-time build + $16.32 running · about $1.02 per accepted PR');
+  // No gh-aw Outcomes snapshot: the run total still counts; no split and no per-PR cost.
+  const noOutcomes = costItem({ build, cost: cost({ known: false }), acceptedPrs: null });
+  assert.deepEqual(text(noOutcomes), ['Total cost: about $1,126', '= $1,110 one-time build + $16.32 running']);
+  assert.equal(noOutcomes.perPr, null);
   // No build cost: the run cost only.
   const noBuild = { ok: false, error: 'build-cost.json: HTTP 404' };
-  assert.deepEqual(text(costItem({ build: noBuild, cost: cost(), medianAic: 32.78 })), ['Running cost: about $16.32', '$11.43 real tasks (median $0.33 each) + $4.89 safety drills']);
-  assert.deepEqual(text(costItem({ build: noBuild, cost: cost({ known: false }) })), ['Total cost: — not available right now']);
-  // No measured runs at all (a dry run): the run cost is $0, known without the run lists.
-  assert.deepEqual(text(costItem({ build, cost: cost({ known: false, total: 0, drillAic: 0, measuredRuns: 0 }) })), ['Total cost: about $1,110', '= $1,110 to build the factory (one-time) + $0.00 to run it']);
+  assert.deepEqual(text(costItem({ build: noBuild, cost: cost(), acceptedPrs: 26 })), ['Running cost: about $16.32', '$11.43 tasks + $4.89 drills · about $0.44 per accepted PR']);
+  assert.deepEqual(text(costItem({ build, cost: null })), ['Total cost: about $1,110', '= $1,110 one-time build · running cost not available right now']);
+  assert.deepEqual(text(costItem({ build: noBuild, cost: null })), ['Total cost: — not available right now']);
+  // No measured runs at all (a dry run): the run cost is $0.
+  assert.deepEqual(text(costItem({ build, cost: cost({ known: false, total: 0, drillAic: 0, measuredRuns: 0 }) })), ['Total cost: about $1,110', '= $1,110 one-time build + $0.00 running']);
+});
+test('hands-off: N of M PRs merged with no human edits (gh-aw zero-touch), and our manual steps below', () => {
+  const os = { real: { prs: { accepted: 26, rejected: 1, pending: 0, other: 0 }, zeroTouch: 25 } };
+  const item = handsOffItem(os, { goLive: 1, total: 2 });
+  assert.deepEqual(text(item), ['Hands-off: 25 of 26 PRs merged with no human edits (gh-aw zero-touch)', '2 manual steps after go-live']);
+  assert.equal(bigs(item), 1);
+  assert.deepEqual(item.subs[0].find((s) => s.t === 'link'), { t: 'link', text: 'manual steps', href: '#human-steps' });
+  assert.equal(text(handsOffItem(os, { goLive: 1, total: 1 }))[1], '1 manual step after go-live');
+  assert.equal(text(handsOffItem({ real: { prs: { accepted: 1 }, zeroTouch: 1 } }, { goLive: 1, total: 0 }))[0], 'Hands-off: 1 of 1 PR merged with no human edits (gh-aw zero-touch)');
+  // Fallbacks: no Outcomes snapshot; not live yet.
+  assert.deepEqual(text(handsOffItem(null, { goLive: null, total: 0 })), ['Hands-off: — gh-aw Outcomes not available yet', '0 manual steps; not live yet']);
 });
 
-test('human effort: N manual steps after go-live, linked to the list', () => {
-  const item = humanItem({ goLive: 1, total: 2 });
-  assert.deepEqual(text(item), ['Human effort after go-live: 2 manual steps']);
-  assert.deepEqual(item.main.find((s) => s.t === 'link'), { t: 'link', text: 'manual steps', href: '#human-steps' });
-  assert.equal(text(humanItem({ goLive: 1, total: 1 }))[0], 'Human effort after go-live: 1 manual step');
-  assert.equal(text(humanItem({ goLive: null, total: 0 }))[0], 'Human effort: 0 manual steps; not live yet');
+// --- gh-aw Outcomes ----------------------------------------------------------------------------
+
+const PRURL = (n) => `https://github.com/sabbasi3-factory-lab/chrono-node-rs/pull/${n}`;
+const oitem = (type, status, zeroTouch = null, n = null) => ({ type, object_url: n ? PRURL(n) : null, outcome_status: status, evidence_strength: 'strong', zero_touch: zeroTouch });
+const orun = (run_id, workflow, task, drill, items, extra = {}) => ({ run_id, workflow, task, drill, created_at: '2026-10-27T10:00:00Z', aic: 10, conclusion: 'success', eval: 'ok', evaluated_at: '2026-10-28T21:26:38Z', items, ...extra });
+const opayload = (source_run_id, runs, evaluated_at = '2026-10-28T21:26:38Z') => ({ source_run_id, source_run_attempt: 1, gh_aw_version: 'v0.92.0', evaluated_at, mode: 'full', runs, summary: {} });
+
+test('outcomes: parse and validate a snapshot; malformed runs and items are skipped; diagnosis and tasked reviews are accepted', () => {
+  const p = parseOutcomesSnapshot(opayload(40771939035, [
+    orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'accepted', true, 54), { type: 'add_comment' }, oitem('add_comment', 'pending')]),
+    orun(2, 'review', 'en/a', false, [oitem('create_check_run', 'unknown')], { diagnosis: { cause: 'x' } }),
+    { run_id: 'x', workflow: 'implement', drill: false, items: [] },
+    orun(3, 'implement', null, 'yes', []),
+  ]));
+  assert.equal(p.sourceRunId, 40771939035);
+  assert.equal(p.ghAwVersion, 'v0.92.0');
+  assert.deepEqual(p.runs.map((r) => [r.runId, r.workflow, r.task, r.items.length]), [[1, 'implement', 'en/a', 2], [2, 'review', 'en/a', 1]]);
+  assert.deepEqual(p.runs[1].diagnosis, { cause: 'x' });
+  assert.equal(p.dropped, 3, 'two bad runs and one bad item');
+  assert.deepEqual(p.runs[0].items[0], { type: 'create_pull_request', url: PRURL(54), status: 'accepted', evidence: 'strong', zeroTouch: true });
+  for (const bad of [null, [], {}, { ...opayload(1, []), runs: 'x' }, { ...opayload(1, []), source_run_id: 0 }, { ...opayload(1, []), evaluated_at: 'soon' }]) assert.equal(parseOutcomesSnapshot(bad), null);
 });
 
+test('outcomes: the newest usable snapshot wins, malformed ones are ignored, and the checked marker sets freshness', () => {
+  const events = [
+    ev('outcomes_snapshot', '2026-10-28T20:00:00Z', opayload(1, [orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'pending', null, 1)])], '2026-10-28T19:59:00Z')),
+    ev('outcomes_snapshot', '2026-10-28T21:28:20Z', opayload(2, [orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'accepted', true, 1)])], '2026-10-28T21:26:38Z')),
+    ev('outcomes_snapshot', '2026-10-28T22:00:00Z', { source_run_id: 3, evaluated_at: '2026-10-28T22:00:00Z' }), // no runs: ignored
+    ev('outcomes_checked', '2026-10-28T21:31:19Z', { same_as_run_id: 2, source_run_id: 4 }),
+    ev('outcomes_checked', '2026-10-28T23:00:00Z', { same_as_run_id: 1, source_run_id: 5 }), // about an older snapshot
+  ];
+  const L = latestOutcomes(events);
+  assert.equal(L.snapshot.sourceRunId, 2);
+  assert.equal(L.ignored, 1);
+  assert.equal(L.checkedAt, at('2026-10-28T21:31:19Z'));
+  assert.equal(L.lastAt, at('2026-10-28T21:31:19Z'));
+  assert.equal(latestOutcomes([]), null);
+  assert.equal(latestOutcomes(events.slice(2, 3)), null);
+  // Stale: over 48 h since the evaluation and no checked marker since.
+  assert.equal(outcomesStale(L, L.lastAt + OUTCOMES_STALE_MS), false);
+  assert.equal(outcomesStale(L, L.lastAt + OUTCOMES_STALE_MS + 1), true);
+  const checkedLater = latestOutcomes([...events, ev('outcomes_checked', '2026-10-30T21:00:00Z', { same_as_run_id: 2 })]);
+  assert.equal(outcomesStale(checkedLater, at('2026-10-31T00:00:00Z')), false);
+  assert.equal(outcomesStale(null, Date.now()), false);
+});
+
+test('outcomes: real work and safety drills apart; PRs by status; zero-touch only for accepted PRs (live shape)', () => {
+  const runs = [];
+  for (let i = 0; i < 26; i++) runs.push(orun(100 + i, 'implement', `en/t${i}`, false, [oitem('create_pull_request', 'accepted', i === 0 ? null : true, 200 + i), oitem('add_comment', 'pending')]));
+  runs.push(orun(130, 'implement', 'common/abbr', false, [oitem('create_pull_request', 'rejected', null, 136)]));
+  runs.push(orun(131, 'repair', 'common/x', false, [oitem('push_to_pull_request_branch', 'rejected')]));
+  runs.push(orun(132, 'review', null, false, [oitem('create_check_run', 'unknown')]));
+  for (let i = 0; i < 12; i++) runs.push(orun(300 + i, 'implement', `drill/d${i}`, true, [oitem('create_pull_request', i < 3 ? 'accepted' : 'rejected', i < 2 ? true : null, 400 + i)]));
+  runs.push(orun(320, 'review', 'drill/d0', false, [oitem('create_check_run', 'unknown')])); // a drill by its task name
+  runs.push(orun(321, 'implement', 'en/odd', false, [oitem('create_pull_request', 'ignored', null, 500)]));
+  const s = outcomesSummary(parseOutcomesSnapshot(opayload(9, runs)));
+  assert.deepEqual(s.real.prs, { accepted: 26, rejected: 1, pending: 0, other: 1 });
+  assert.equal(s.real.zeroTouch, 25);
+  assert.deepEqual(s.drills.prs, { accepted: 3, rejected: 9, pending: 0, other: 0 });
+  assert.equal(s.drills.zeroTouch, 2);
+  assert.deepEqual(s.real.prStatus, { accepted: 26, rejected: 1, ignored: 1 });
+  assert.deepEqual(s.real.items, { accepted: 26, pending: 26, rejected: 2, unknown: 1, ignored: 1 });
+  assert.deepEqual([s.real.runs, s.drills.runs], [30, 13]);
+});
+
+test('the Actions run-list path is gone: no workflow-run API calls in the page', () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const lib = readFileSync(new URL('../lib.js', import.meta.url), 'utf8');
+  for (const src of [app, lib]) {
+    assert.doesNotMatch(src, /actions\/workflows|lock\.yml\/runs|display_title|parseRunTitle|matchByTime/);
+  }
+  assert.doesNotMatch(app, /\/actions\/runs\?|workflow_runs/);
+});
 test('quality: reverts of real work · reviewer blocks · safety drills passed from drills.json (left out when invalid)', () => {
   const drills = validateDrills(read('drills.json'));
   const item = qualityItem({ reverts: 0, objections: 1 }, drills);
-  assert.equal(segText(item.main), 'Quality: 0 reverts of real work · reviewer blocked 1 bad change before merge · 12 safety drills passed (6 defects found and fixed)');
+  assert.equal(segText(item.main), 'Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects fixed)');
   assert.equal(bigs(item), 1);
   assert.equal(item.main.find((s) => s.t === 'link').href, JOURNAL_URL);
-  assert.equal(segText(qualityItem({ reverts: 1, objections: 2 }, { ok: false, error: 'drills.json: HTTP 404' }).main), 'Quality: 1 revert of real work · reviewer blocked 2 bad changes before merge');
+  assert.equal(segText(qualityItem({ reverts: 1, objections: 2 }, { ok: false, error: 'drills.json: HTTP 404' }).main), 'Quality: 1 revert · reviewer blocked 2 changes');
   const one = validateDrills({ as_of: '2026-10-27', source: 'x', defects_found_and_fixed: 1, runs: [{ id: 'D1', result: 'pass' }, { id: 'D2', result: 'fail' }] });
-  assert.match(segText(qualityItem({ reverts: 0, objections: 0 }, one).main), /· 1 safety drill passed \(1 defect found and fixed\)$/);
+  assert.match(segText(qualityItem({ reverts: 0, objections: 0 }, one).main), /· 1 safety drill passed \(1 defect fixed\)$/);
 });
 
 // --- lifetime numbers: the whole log, not the 14-day window -------------------------------------
@@ -276,16 +362,16 @@ test('lifetime: after an idle fortnight the run cost, speed, go-live and human s
     ev('spend_snapshot', '2026-10-21T23:00:00Z', { day: '2026-10-21', aic_today: 31.4, runs: [{ run_id: 7, aic: 31.4, status: 'measured' }], runs_total: 1 }),
     ev('heartbeat', '2026-11-20T11:00:00Z', { factory_enabled: true }), // only check-ins since
   ];
-  const c = costJoin(events, [{ id: 7, workflow: 'implement', created_at: '2026-10-21T22:12:09Z', display_title: 'Implement en/a #31 attempt 1' }], { now });
+  const c = costJoin(events, [{ runId: 7, workflow: 'implement', task: 'en/a', drill: false, aic: 20, items: [] }], { now });
   assert.equal(c.total, 31.4, 'the run cost is lifetime');
   assert.deepEqual(c.perTask, [{ task: 'en/a', aic: 31.4, runs: 1 }]);
   assert.equal(c.perDay.aic.reduce((x, y) => x + y, 0), 0, 'only the per-day list is windowed');
-  assert.deepEqual(text(costItem({ build, cost: c, medianAic: 31.4 }))[1], '= $1,110 to build the factory (one-time) + $0.31 to run it');
+  assert.deepEqual(text(costItem({ build, cost: c, acceptedPrs: 1 }))[1], '= $1,110 one-time build + $0.31 running · about $0.31 per accepted PR');
   const speed = issueToMerged(events, { now, days: Infinity, tasks: new Set(['en/a']) });
   assert.deepEqual([speed.count, speed.medianMs], [1, 18 * MIN + 59000]);
   assert.equal(issueToMerged(events, { now }).count, 0, 'the 14-day window would have lost it');
   const h = humanSteps(events);
   assert.equal(h.goLive, at('2026-10-21T22:12:01Z'), 'go-live stays put outside the window');
   assert.equal(h.total, 1);
-  assert.equal(text(humanItem(h))[0], 'Human effort after go-live: 1 manual step');
+  assert.equal(text(handsOffItem(null, h))[1], '1 manual step after go-live');
 });
