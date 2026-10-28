@@ -328,7 +328,8 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.match(r.live[0], /^Polled 1[12]m ago$/);
     // Two tasks running, but the follow-up poll due 10 min after the last one hasn't come: the next hourly run.
     assert.match(r.live[1], /^Next ~in 4[78]m$/);
-    assert.deepEqual(r.recent.map((x) => x.replace(/ \d+m$/, '')), ['#47 iso-date ready', '#9 queued by hand', '#9 PR opened', '#46 relative contract changed', '#44 casual-date started']);
+    // One line per task or PR (its latest event): #9 shows once.
+    assert.deepEqual(r.recent.map((x) => x.replace(/ \d+[mh]$/, '')), ['#47 iso-date ready', '#9 queued by hand', '#46 relative contract changed', '#44 casual-date started', '#43 month-parser repairing']);
   });
 
   test('tooltips are reachable by Tab, show on focus and hide on Escape', async () => {

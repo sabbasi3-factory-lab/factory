@@ -464,7 +464,7 @@ test('liveness: last poll from controller events; next poll ~10 min later with w
   assert.deepEqual(liveness([], { now }), { lastAt: null, lastType: null, nextAt: null, mode: null, followUpMissed: false });
 });
 
-test('recent activity: the last 5 meaningful events as short sentences, noise and duplicates skipped', () => {
+test('recent activity: one line per task (its latest event), noise skipped', () => {
   const events = [
     ev('dispatched', '2026-10-27T23:24:00Z', { task: 'common/iso-format-parser', issue: 29, attempt: 1 }),
     ev('dispatched', '2026-10-27T23:24:30Z', { task: 'en/x', issue: 37, attempt: 1 }, true), // a plan
@@ -482,15 +482,27 @@ test('recent activity: the last 5 meaningful events as short sentences, noise an
     ev('dispatch_state', '2026-10-28T00:23:58Z', { state: 'idle' }),
   ];
   const r = recentActivity(events);
-  assert.deepEqual(r.map((x) => x.text), [
-    '#29 iso-format-parser merged',
-    '#29 iso-format-parser queued',
-    '#29 iso-format-parser in review',
-    '#29 iso-format-parser ci failed',
-    '#29 iso-format-parser PR opened',
-  ]);
+  // All of #29's steps collapse to its latest one; the plan for en/x doesn't count.
+  assert.deepEqual(r.map((x) => x.text), ['#29 iso-format-parser merged']);
   assert.equal(r[0].at, at('2026-10-27T23:46:39Z'));
-  assert.deepEqual(recentActivity(events, { limit: 7 }).slice(5).map((x) => x.text), ['#29 iso-format-parser started']);
+  // Five tasks with several steps each give five lines, one per task, newest first.
+  const many = [];
+  ['a', 'b', 'c', 'd', 'e', 'f'].forEach((t, i) => {
+    const task = `en/${t}-parser`;
+    const base = Date.parse('2026-10-27T10:00:00Z') + i * 3600e3;
+    const iso = (m) => new Date(base + m * 60e3).toISOString().replace('.000', '');
+    many.push(ev('dispatched', iso(0), { task, issue: 30 + i, attempt: 1 }));
+    many.push(ev('review_dispatched', iso(10), { task, issue: 30 + i, pr: 60 + i }));
+    many.push(ev('merged', iso(20), { task, pr: 60 + i, merged_at: iso(20) }));
+  });
+  many.push(ev('repair_dispatched', '2026-10-27T16:30:00Z', { task: 'en/c-parser', issue: 32, pr: 62, attempt: 2 }));
+  assert.deepEqual(recentActivity(many).map((x) => x.text), [
+    '#32 c-parser repairing',
+    '#35 f-parser merged',
+    '#34 e-parser merged',
+    '#33 d-parser merged',
+    '#31 b-parser merged',
+  ]);
   const plain = recentActivity([
     ev('human_action', '2026-10-27T19:17:10Z', { action: 'review', pr: 139, reviewer: 'owner' }),
     ev('human_action', '2026-10-27T19:17:10Z', { action: 'review', pr: 139, reviewer: 'owner' }),
@@ -498,7 +510,9 @@ test('recent activity: the last 5 meaningful events as short sentences, noise an
     ev('check_result', '2026-10-27T19:30:00Z', { workflow: 'ci', event: 'push', conclusion: 'failure', prs: [] }),
     ev('auto_revert', '2026-10-27T19:40:00Z', { pr: 139, revert_pr: 140 }),
   ]);
-  assert.deepEqual(plain.map((x) => x.text), ['#139 reverted', 'ci failed on main', '#139 queued by hand', '#139 reviewed']);
+  // A PR without a task is its own subject: its latest line only. Lines without a task or PR
+  // (a failed ci on main) stand alone.
+  assert.deepEqual(plain.map((x) => x.text), ['#139 reverted', 'ci failed on main']);
 });
 
 // --- the sample fixtures exercise the new panels offline ------------------------------------------
