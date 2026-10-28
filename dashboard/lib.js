@@ -2017,11 +2017,12 @@ const RECENT_VERB = {
 };
 
 /**
- * The newest `limit` meaningful events as short sentences, newest first:
- * [{ text, at, type, task, issue, pr }], e.g. "#29 iso-format-parser merged". The reference is
- * the task's issue (else the PR). Skips heartbeats, spend snapshots, dispatch states, dequeues,
- * dry-run plans, passing checks and duplicates (task_done, handoff_done, auto_merge, and a line
- * identical to the previous one).
+ * The newest `limit` meaningful events as short sentences, newest first, ONE line per subject
+ * (its latest event), so the lines cover different tasks: [{ text, at, type, task, issue, pr }],
+ * e.g. "#29 iso-format-parser merged". The subject is the task, else the PR, else the sentence
+ * itself (e.g. "ci failed on main"). The reference is the task's issue (else the PR). Skips
+ * heartbeats, spend snapshots, dispatch states, dequeues, dry-run plans, passing checks and
+ * bookkeeping duplicates (task_done, handoff_done, auto_merge).
  */
 export function recentActivity(events, { limit = 5 } = {}) {
   const list = (events || []).filter((e) => e && typeof e === 'object');
@@ -2029,6 +2030,7 @@ export function recentActivity(events, { limit = 5 } = {}) {
   const issueOf = new Map();
   for (const ev of list) if (isStr(ev.payload?.task) && isNum(ev.payload?.issue)) issueOf.set(ev.payload.task, ev.payload.issue);
   const out = [];
+  const seen = new Set();
   for (let i = list.length - 1; i >= 0 && out.length < limit; i--) {
     const ev = list[i];
     const p = ev.payload || {};
@@ -2040,7 +2042,9 @@ export function recentActivity(events, { limit = 5 } = {}) {
     const issue = isNum(p.issue) ? p.issue : task ? issueOf.get(task) ?? null : null;
     const ref = issue ?? pr;
     const text = [ref != null ? `#${ref}` : null, task ? shortTaskName(task) : null, verb(p)].filter(Boolean).join(' ');
-    if (out.length && out.at(-1).text === text) continue;
+    const subject = task ? `task:${task}` : pr != null ? `pr:${pr}` : `text:${text}`;
+    if (seen.has(subject)) continue;
+    seen.add(subject);
     out.push({ text, at: eventTime(ev), type: ev.type, task, issue, pr });
   }
   return out;

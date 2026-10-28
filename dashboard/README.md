@@ -59,7 +59,7 @@ Top to bottom:
   **Cost** (today against the daily cap, total to date), **Quality** (reverts, escaped defects,
   reviewer objections, "Repairs worked: 50%"), **Human touch** (actions in the last 7 days, median
   time to unblock a hand-off), **Liveness** (when the controller last polled and when the next
-  poll is expected) and **Recent activity** (the last 5 meaningful events, for example
+  poll is expected) and **Recent activity** (the latest event of each of the last 5 tasks or PRs, for example
   "#29 iso-format-parser merged 19h").
 - **Folded details** (closed by default): **Latest checks** (newest 5, then "View all"),
   **Where the time goes** (bug-fixed: medians, see below), **Task timeline** (clicking a task
@@ -295,7 +295,7 @@ Drill tasks (`drill/*`, the factory's own fire drills) are left out of every tas
 | To unblock | `humanTouch()`: per real `needs_human`, the time to the next real event for the same task, PR or issue that resolves a Needs-you item (above) or closes the task (`task_done`); the median |
 | Polled | The newest controller event (`heartbeat`, `spend_snapshot`, `dispatch_state`, dispatches, `auto_ready`, `auto_merge`, `needs_human`, `task_done`, …), coloured by the heartbeat's age (amber after 8 h, red after 12 h) |
 | Next | `liveness()`: with work in flight or dispatch paused by a gate, the controller's follow-up chain polls again ~10 min after its last poll; otherwise, or once that time has passed, the next full hour (the schedule; GitHub's cron often runs hours late, so the tooltip shows the observed cadence) |
-| Recent activity | `recentActivity()`: the newest 5 real events as "#<issue or PR> <task> <verb>", skipping heartbeats, spend snapshots, dispatch states, dequeues, passing checks and duplicates (`task_done`, `handoff_done`, `auto_merge`) |
+| Recent activity | `recentActivity()`: one line per task (else per PR) with its latest real event, newest 5, as "#<issue or PR> <task> <verb>", skipping heartbeats, spend snapshots, dispatch states, dequeues, passing checks and duplicates (`task_done`, `handoff_done`, `auto_merge`) |
 | Where the time goes | `stageSummary()`: per non-drill task merged in the last 14 days (plain PRs without a task are left out), the time from each stage it reached (ready, picked, running, PR open, checks, queued, merged) to the next, labelled with the short task name; the top bar is the **median** per stage over those tasks, and the insight names the stage with the largest median |
 | Time per stage | First time each stage was reached (`auto_ready` and `ready` count as ready). Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp |
 
