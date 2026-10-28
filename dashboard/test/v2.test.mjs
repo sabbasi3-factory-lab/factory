@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  HEALTH_LABELS, canonicalize, combineNeedsYou, compactAge, verifierReason, verifierStatus, dayPaths, deriveMetrics, existingDayPaths,
-  healthSummary as healthSummaryFull, isHumanTierPr, parseContract, parseJsonl, parseTaskmap, prRef, reviewItems, segText, statusParts, summarizePr, shortSha,
+  HEALTH_LABELS, canonicalize, combineNeedsYou, compactAge, verifierReason, verifierStatus, allDayPaths, dayPaths, deriveMetrics, eventsInWindow,
+  healthSummary as healthSummaryFull, isHumanTierPr, parseContract, parseJsonl, parseTaskmap, reviewItems, segText, statusParts, summarizePr, shortSha,
   taskBoard, taskCatalog,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildQuietAnchorLines } from './make-fixture.mjs';
@@ -22,21 +22,26 @@ test('shortSha shows 7 characters of a full SHA and leaves other values alone', 
   assert.equal(shortSha(null), null);
 });
 
-test('only day files listed in the audit tree are fetched, so missing days cause no 404s', () => {
-  const wanted = dayPaths(at(FIXTURE_NOW), 7);
+test('every day file in the audit tree is loaded (oldest first), so lifetime numbers see days beyond the window', () => {
   const tree = [
     { path: '2026', type: 'tree' },
     { path: '2026/10', type: 'tree' },
-    { path: '2026/10/09.jsonl', type: 'blob' }, // outside the window
-    { path: '2026/10/15.jsonl', type: 'blob' },
     { path: '2026/10/16.jsonl', type: 'blob' },
+    { path: '2026/09/01.jsonl', type: 'blob' }, // weeks before the 14-day window: still loaded
+    { path: '2026/10/09.jsonl', type: 'blob' },
     { path: '2026/10/14.jsonl', type: 'tree' }, // not a file
+    { path: '2026/10/README.md', type: 'blob' }, // not a day file
   ];
-  assert.deepEqual(existingDayPaths(tree, wanted), ['audit/2026/10/15.jsonl', 'audit/2026/10/16.jsonl']);
-  assert.deepEqual(existingDayPaths([], wanted), []);
-  assert.deepEqual(existingDayPaths(null, wanted), []);
+  assert.deepEqual(allDayPaths(tree), ['audit/2026/09/01.jsonl', 'audit/2026/10/09.jsonl', 'audit/2026/10/16.jsonl']);
+  assert.deepEqual(allDayPaths([]), []);
+  assert.deepEqual(allDayPaths(null), []);
+  // Without a listing the page falls back to the window's days.
+  assert.equal(dayPaths(at(FIXTURE_NOW), 14).length, 14);
+  // The window helper keeps the last N UTC days for the operations views.
+  const ev = (timestamp) => ({ type: 'heartbeat', timestamp, payload: {} });
+  assert.deepEqual(eventsInWindow([ev('2026-09-01T00:00:00Z'), ev('2026-10-03T00:00:00Z'), ev('2026-10-16T10:00:00Z')], { now: at('2026-10-16T12:00:00Z'), days: 14 }).map((e) => e.timestamp),
+    ['2026-10-03T00:00:00Z', '2026-10-16T10:00:00Z']);
 });
-
 // --- closed PRs and owner reviews (factory#4 data fixes) ----------------------------
 
 test('tier matcher: bold or plain "Tier:" with human or owner, labels, drafts excluded', () => {
@@ -148,7 +153,7 @@ test('health chip: Healthy only with fresh data, a verified chain and a heartbea
   assert.deepEqual(Object.values(HEALTH_LABELS), ['Healthy', 'Degraded', 'Down', 'Loading', 'Paused']);
 });
 
-test('compact ages are one token; refs are repo-prefixed off the home repo', () => {
+test('compact ages are one token', () => {
   assert.equal(compactAge(12000), '12s');
   assert.equal(compactAge(59999), '59s');
   assert.equal(compactAge(60000), '1m');
@@ -158,11 +163,6 @@ test('compact ages are one token; refs are repo-prefixed off the home repo', () 
   assert.equal(compactAge(50 * 3600000), '2d');
   for (const v of [null, undefined, -5, NaN]) assert.equal(compactAge(v), '—');
 
-
-  const home = 'sabbasi3-factory-lab/chrono-node-rs';
-  assert.equal(prRef(home, 22, home), '#22');
-  assert.equal(prRef('sabbasi3-factory-lab/factory', 3, home), 'factory#3');
-  assert.equal(prRef(home, null, home), '—');
 });
 
 test('not loaded yet is neutral: the health chip and the state say Loading, never red', () => {

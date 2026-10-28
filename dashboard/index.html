@@ -100,6 +100,15 @@
       <details id="details" class="panel fold">
         <summary><svg class="i" aria-hidden="true"><use href="#i-list"></use></svg><span id="details-h">Details</span></summary>
         <div class="fold-body fold-stack">
+          <section aria-labelledby="about-h">
+            <details id="about-fold" class="fold fold--sub">
+              <summary><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="about-h">How these numbers work</span></summary>
+              <div class="fold-body">
+                <div id="about" tabindex="-1"></div>
+                <p class="hint">More in the <a href="https://github.com/sabbasi3-factory-lab/factory/blob/main/dashboard/README.md" rel="noopener noreferrer">dashboard README</a>.</p>
+              </div>
+            </details>
+          </section>
           <section aria-labelledby="checks-h">
             <details id="checks-fold" class="fold fold--sub">
               <summary><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg><span id="checks-h">Latest checks</span></summary>
@@ -179,7 +188,7 @@
   <footer class="foot wrap">
     <svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg>
     <span>Read-only · verified in your browser</span>
-    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Data comes only from GitHub, read-only: the audit branch head, the open issues and PRs and the agent workflow runs from api.github.com; the day files (pinned to the head commit), the task map, the task contracts and the verifier anchors from raw.githubusercontent.com; the build cost and the safety-drill record from this site (build-cost.json, drills.json). Every event's SHA-256 and the parent chain are re-checked in your browser, and an independent verifier re-checks the whole log on an hourly schedule, which GitHub runs every few hours (its anchors file is read from raw.githubusercontent.com). Add ?fixture=1 to the address to see sample data.</span></button>
+    <button type="button" class="info has-tip" aria-label="About the data" aria-describedby="foot-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="foot-info-tip" class="tip-src" hidden>Read-only: data comes only from GitHub and is re-checked in your browser. Details explains how.</span></button>
   </footer>
 
   <div id="tip" class="tip" aria-hidden="true" hidden></div>

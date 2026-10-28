@@ -180,13 +180,24 @@ export function dayPaths(now, days = DEFAULTS.windowDays) {
   return out;
 }
 
+const DAY_FILE = /^\d{4}\/\d{2}\/\d{2}\.jsonl$/;
+
 /**
- * Keeps only the wanted day-file paths that exist, given the entries of a recursive
- * git tree listing of `audit/` (paths relative to it, like "2026/10/16.jsonl").
+ * Every day file in a recursive git tree listing of `audit/` (entries like "2026/10/16.jsonl"),
+ * oldest first, as "audit/2026/10/16.jsonl": the whole log, for lifetime numbers.
  */
-export function existingDayPaths(treeEntries, wanted) {
-  const have = new Set((treeEntries || []).filter((t) => t && t.type === 'blob' && typeof t.path === 'string').map((t) => `audit/${t.path}`));
-  return wanted.filter((p) => have.has(p));
+export function allDayPaths(treeEntries) {
+  return (treeEntries || []).filter((t) => t && t.type === 'blob' && typeof t.path === 'string' && DAY_FILE.test(t.path))
+    .map((t) => `audit/${t.path}`).sort();
+}
+
+/** The events of the last `days` UTC days before `now` (for the windowed operations views). */
+export function eventsInWindow(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
+  const from = Date.parse(utcDay(now) + 'T00:00:00Z') - (days - 1) * 86400000;
+  return (events || []).filter((ev) => {
+    const t = parseTime(ev?.timestamp);
+    return t != null && t >= from;
+  });
 }
 
 export function parseTime(value) {
@@ -312,7 +323,7 @@ export const STALE_DATA_MIN = 10; // live data older than this is not fresh
  * has the same as { level, code, text }, so the status line can say it in plain words.
  */
 export function healthSummary({ loaded = false, noLog = false, error = null, chain = null, heartbeat = null, dataAgeMin = null, verifier = null, dispatch = null } = {}) {
-  if (!loaded && !error) return { level: 'loading', label: HEALTH_LABELS.loading, reasons: ['Loading the audit log'] };
+  if (!loaded && !error) return { level: 'loading', label: HEALTH_LABELS.loading, reasons: ['Loading the audit log'], problems: [] };
   const found = [];
   const add = (level, text, code) => found.push({ level, text, code });
   if (noLog) add('alert', 'No audit log yet', 'no-log');
@@ -348,12 +359,6 @@ export function compactAge(ms) {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
-}
-
-/** "#22" for a PR in the home repo, "factory#3" for one elsewhere. */
-export function prRef(repo, number, homeRepo) {
-  if (!isNum(number)) return '—';
-  return repo && repo !== homeRepo ? `${String(repo).split('/').pop()}#${number}` : `#${number}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2152,6 +2157,24 @@ export function humanSteps(events) {
   return { goLive, steps, byKind, total: steps.length };
 }
 
+/** A controller reason code in plain words: "review_objected" → "the reviewer objected". */
+export function plainReason(reason) {
+  const known = {
+    review_objected: 'the reviewer objected',
+    repeated_signature: 'the same failure repeated',
+    'same-failure-signature': 'the same failure repeated',
+    implement_no_pr: 'the agent opened no PR',
+    implement_failed: 'the agent run failed',
+    repair_no_push: 'the repair changed nothing',
+    repair_failed: 'the repair failed',
+    gates_failed: 'the strict gates failed',
+    main_regressed: 'main broke after the merge',
+    'contract-changed': 'its contract changed',
+  };
+  if (!isStr(reason)) return null;
+  return known[reason] ?? reason.replace(/[_-]+/g, ' ');
+}
+
 // --- Status line --------------------------------------------------------------------------------
 
 const PAUSE_PLAIN = {
@@ -2234,9 +2257,12 @@ export function shippedItem(board) {
   };
 }
 
-/** "Speed: about 9 min per task" / "Oct 22 → Oct 27". */
-export function speedItem({ medianMs = null, count = 0, firstAt = null, lastAt = null } = {}) {
-  if (!count || medianMs == null) return { key: 'speed', main: [T('Speed:'), BIG('—'), T('no task merged yet')], subs: [] };
+/**
+ * "Speed: about 9 min per task" / "Oct 22 → Oct 27". With done tasks but no start-to-merge times
+ * in the log, the timing is "unavailable" (never "no task merged yet").
+ */
+export function speedItem({ medianMs = null, count = 0, firstAt = null, lastAt = null, done = 0 } = {}) {
+  if (!count || medianMs == null) return { key: 'speed', main: [T('Speed:'), BIG('—'), T(done ? 'timing unavailable' : 'no task merged yet')], subs: [] };
   return {
     key: 'speed',
     main: [T('Speed: about'), BIG(plainDuration(medianMs)), T('per task')],

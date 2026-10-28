@@ -4,11 +4,11 @@
 // and widths go through the CSSOM, so the strict CSP holds. Every request is a GET.
 import {
   AGENT_WORKFLOWS, CADENCE_NOTE, DEFAULTS, FOLLOW_UP_MIN, HUMAN_DAYS, MEDIAN_DAYS, STAGES, STAGE_LABELS, STALE_DATA_MIN, TASK_STATES, TASK_STATE_LABELS,
-  anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, existingDayPaths,
-  fallbackCatalog, formatAge, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
-  liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, prRef, qualityStats, recentActivity,
+  anchorTimes, cadenceText, canonicalize, combineNeedsYou, compactAge, costJoin, dayPaths, deriveMetrics, dispatchBanner, dropClosed, eventTime,
+  fallbackCatalog, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
+  liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, snapshotRunIds, stageSummary, stageTimes, statusSummary,
-  costItem, earliestSpendDay, humanItem, humanSteps, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
+  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, humanItem, humanSteps, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
   subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
@@ -86,6 +86,7 @@ const state = {
   rate: null,
   error: null,
   windowDay: null,
+  partialHistory: false, // true when only the window's day files could be loaded
   lastCheck: null,
   lastOkAt: null, // last successful load or check (Date.now() ms), for "updated … ago"
   nextCheckAt: null,
@@ -312,10 +313,14 @@ async function listAuditFiles(sha) {
   }
 }
 
+// The whole log: every day file in the tree listing (raw downloads don't count against the API
+// limit), so the scoreboard's numbers are lifetime results and the chain is verified from its
+// first event. If the listing can't be read, only the window's days are fetched and the page says
+// the scoreboard covers that window.
 async function fetchDayFiles(sha) {
-  const wanted = dayPaths(now(), DAYS);
   const listing = await listAuditFiles(sha);
-  const paths = listing ? existingDayPaths(listing, wanted) : wanted;
+  const paths = listing ? allDayPaths(listing) : dayPaths(now(), DAYS);
+  state.partialHistory = !listing;
   const texts = await Promise.all(paths.map(async (path) => {
     const res = await fetch(`${RAW}/${REPO}/${sha}/${path}`, { credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (res.status === 404) return '';
@@ -865,6 +870,7 @@ function render({ full = false } = {}) {
   renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
   renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
+  renderIf('about', [loaded, v && scoreSig(v), state.partialHistory, state.records.length], withMetrics((mm, vv) => renderAbout(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
   renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
   renderIf('recent', [loaded, v?.recent.map((r) => [r.text, r.at])], withMetrics((mm, vv) => renderRecent(vv)), full);
@@ -1004,7 +1010,7 @@ function loadedAnchors() {
 /** Tooltip lines with the cadence the scheduled jobs really ran at, from the loaded data. */
 function cadenceLines(anchors = loadedAnchors()) {
   return {
-    heartbeat: cadenceText('Heartbeats', observedCadence(heartbeatTimes(state.events)), DAYS),
+    heartbeat: cadenceText('Check-ins', observedCadence(heartbeatTimes(eventsInWindow(state.events, { now: now(), days: DAYS }))), DAYS),
     verifier: cadenceText('Verifications', observedCadence(anchorTimes(anchors, { now: now(), days: DAYS })), DAYS),
   };
 }
@@ -1038,11 +1044,16 @@ function renderHeader(m, v, needs) {
     : chain.status === 'verified'
       ? `Chain verified: ${chain.total} event${chain.total === 1 ? '' : 's'}, ${chain.windowStart === 'genesis' ? 'back to the first event of the log' : 'every hash and parent link in the window'}`
       : `Chain broken at event ${chain.brokenAt} (${chain.brokenSource}: ${chain.brokenReason})`;
+  // Tooltips stay at two short sentences; the rule, the chain and the cadence are in Details.
+  state.healthView = { health, detail, chainLine, verifier };
+  const first = health.problems[0];
+  const hbAgo = hb?.at ? relativeTime(parseTime(hb.at), now()) : null;
   setChip('health', {
     tone: TONE[health.level], iconName: LEVEL_ICON[health.level], text: health.level === 'loading' ? `… ${health.label}` : health.label,
-    tipText: [...(health.level === 'ok' ? [] : health.reasons), detail.text, chainLine,
-      ...(health.reasons.includes(verifierReason(verifier)) ? [] : [verifierReason(verifier)]), '', HEALTH_RULE,
-      ...(state.loaded ? (({ heartbeat, verifier: vf }) => ['', `Observed: ${heartbeat}`, `Observed: ${vf}`, CADENCE_NOTE])(cadenceLines()) : [])].join('\n'),
+    tipText: health.level === 'loading' ? 'Loading the audit log.'
+      : health.level === 'ok' ? `Healthy: the audit log is verified, and the factory checked in ${hbAgo ?? 'recently'}.`
+        : first?.code === 'paused' ? 'Paused: new work waits for a safety gate. The rule is under Details, Liveness.'
+          : `${health.label}: ${segText(plainProblem(first, { heartbeatAt: parseTime(hb?.at) }), now())}. The rule is under Details, Liveness.`,
   });
   setStatus(`Factory ${health.label}${health.level !== 'ok' && health.reasons.length ? `: ${health.reasons[0]}` : ''}`);
   renderVerifierLine(verifier);
@@ -1053,29 +1064,24 @@ function renderHeader(m, v, needs) {
   // Live is the normal state, so only a dry run gets a chip (the version is in the "updated" tooltip).
   setChip('dry-badge', {
     hidden: dryRun !== true, tone: 'warn', iconName: 'info', text: 'Dry run',
-    tipText: `Decisions are logged, not acted on${version ? `\nFactory version ${version}` : ''}`,
+    tipText: "Dry run: the factory logs its decisions but doesn't act on them.",
   });
-  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data from ${FIXTURE_URL}, clock pinned at ${iso(now())}. Remove ?fixture=${FIXTURE_PARAM} for live data.` });
+  setChip('mode-badge', { hidden: !FIXTURE, tone: 'info', iconName: 'info', text: 'Sample', tipText: `Sample data, read offline. Remove ?fixture=${FIXTURE_PARAM} from the address for live data.` });
 
   const meta = [];
   if (FIXTURE) meta.push(`sample data from ${FIXTURE_URL}`);
   else {
     if (state.lastCheck) meta.push(`checked ${relativeTime(state.lastCheck, Date.now())}`);
     if (state.nextCheckAt) meta.push(`next ${relativeTime(state.nextCheckAt, Date.now())}`);
-    const r = state.rate;
-    if (r) meta.push(`API ${r.remaining}/${r.limit} left` + (r.reset ? `, resets ${relativeTime(r.reset, Date.now())}` : ''));
+    if (state.rate) meta.push(`API ${state.rate.remaining}/${state.rate.limit} left` + (state.rate.reset ? `, resets ${relativeTime(state.rate.reset, Date.now())}` : ''));
     meta.push(getToken() ? 'your token' : 'no token');
   }
   const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
   // The clock icon and the tooltip say "updated"; the visible text is just the age.
   $('updated-text').textContent = age ? `${age} ago` : state.error ? 'not updated' : 'loading…';
-  setTip('updated', [
-    age ? `Data updated ${age} ago` : null,
-    `${REPO}, ${BRANCH} branch, last ${DAYS} UTC days`,
-    meta.join(' · '),
-    version ? `Factory version ${version}` : null,
-    `Checks every ${POLL_S} s at most, about once a minute without a token.`,
-  ].filter(Boolean).join('\n'));
+  const r = state.rate;
+  setTip('updated', `${age ? `Data updated ${age} ago` : 'Data not loaded yet'}, from the audit log on GitHub.${!FIXTURE && r ? ` ${r.remaining} of ${r.limit} API requests left this hour.` : ''}`);
+  if (version) meta.push(`factory version ${version}`);
   $('meta-settings').textContent = meta.length ? `Now: ${meta.join(' · ')}.` : '';
   $('poll-hint').textContent = `Checks every ${POLL_S} s at most (?poll=N), spread out to stay within the rate limit: about once a minute without a token. Window: ${DAYS} days (?days=N).`;
 }
@@ -1119,21 +1125,6 @@ function needsView(m) {
   return { rs, items: combineNeedsYou(m.needsYou.items, reviews, REPO) };
 }
 
-function needsLines(it) {
-  const since = it.since ? parseTime(it.since) : null;
-  const waited = since == null ? null : `Waiting ${formatDuration(now() - since)}, since ${iso(since)}`;
-  if (it.kind === 'review') {
-    return { iconName: 'person', kind: 'Review and merge', ref: prRef(it.repo, it.number, REPO), title: it.title || '(no title)', since,
-      lines: [`Review and merge ${it.repo.split('/')[1]}#${it.number}`, it.title || '(no title)', waited] };
-  }
-  const kind = it.kind === 'needs_human' ? 'Needs human' : 'Stale contract';
-  const title = it.task ? shortTaskName(it.task) : it.pr != null ? `PR #${it.pr}` : `issue #${it.issue ?? '?'}`;
-  return {
-    iconName: it.kind === 'needs_human' ? 'warn' : 'clock', kind, ref: it.issue != null ? `#${it.issue}` : it.pr != null ? `#${it.pr}` : '—', title, since,
-    lines: [`${kind}: ${it.task ?? title}`, it.reason ? `Reason: ${it.reason}` : null, waited],
-  };
-}
-
 function segNodes(segs) {
   const out = [];
   (segs || []).forEach((s, i) => {
@@ -1156,15 +1147,20 @@ function segNodes(segs) {
 
 const PART_ICON = { warn: 'warn', alert: 'fail' };
 
+// Rebuilt only when it changes (relative times update in place), and through replaceSection(), so
+// a focused link in the status line keeps focus across the 15-second refresh.
 function setPart(id, part, tipText) {
   const el = $(id);
+  const sig = JSON.stringify([part, tipText]);
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
   if (!part) {
     el.hidden = true;
     return;
   }
   el.hidden = false;
   el.className = `part part--${part.level} has-tip`;
-  el.replaceChildren(...(PART_ICON[part.level] ? [h('span', { class: 'part-i', role: 'img', 'aria-label': part.level === 'alert' ? 'Problem' : 'Warning' }, icon(PART_ICON[part.level]))] : []),
+  replaceSection(id, ...(PART_ICON[part.level] ? [h('span', { class: 'part-i', role: 'img', 'aria-label': part.level === 'alert' ? 'Problem' : 'Warning' }, icon(PART_ICON[part.level]))] : []),
     h('span', {}, segNodes(part.segs)), h('span', { id: `${id}-tip`, class: 'tip-src', hidden: true }, tipText));
   el.setAttribute('aria-describedby', `${id}-tip`);
   if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
@@ -1181,19 +1177,19 @@ function renderParts(m, v, needs, health) {
     needsItems: needs?.items ?? [], reviews: needs?.rs === 'sample' ? 'ok' : needs?.rs ?? 'pending',
   });
   const c = v.board.counts;
-  const stateTip = [
-    v.board.total ? `Tasks: ${c.done} done, ${c.running} running, ${c.needs} need you, ${c.waiting} waiting (of ${v.board.total}).` : 'No tasks in the catalog yet.',
-    m.killSwitch.enabled == null ? null : `Factory switch: ${m.killSwitch.enabled ? 'on' : 'off (no new work starts)'}, from the last check-in.`,
-    v.banner ? `${v.banner.state === 'paused' ? 'Paused' : v.banner.state === 'waiting' ? 'Waiting' : 'Idle'}: the controller's last scheduling decision, since ${relativeTime(parseTime(v.banner.since), now())} (${v.banner.since}).` : null,
-    health.problems.length ? `Problems: ${health.problems.map((x) => x.text).join('; ')}.` : null,
-  ].filter(Boolean).join('\n');
+  const running = c.running > 0;
+  const stateTip = health.problems.some((x) => x.code !== 'paused') ? 'The most serious problem right now. The health rule is under Details, Liveness.'
+    : m.killSwitch.enabled === false ? 'The factory switch is off, so no new work starts.'
+      : v.banner?.state === 'paused' && v.banner.reason !== 'kill_switch' ? `Paused ${relativeTime(parseTime(v.banner.since), now())} by a safety gate. Work resumes by itself when it clears.`
+        : running ? 'Tasks with work under way. Select one to view its issue.'
+          : `Nothing is running; ${c.done} of ${v.board.total} tasks are done.`;
   const items = needs?.items ?? [];
-  const needsTip = [
-    items.length ? items.map((it) => needsLines(it).lines.filter(Boolean).join(' · ')).join('\n') : 'No needs-human items, contract changes or PRs waiting for your review.',
-    needs?.rs === 'unavailable' ? `Review list unavailable: ${state.prs.error ?? 'the PR lists are out of date'}.` : null,
-    needs?.rs === 'sample' ? 'Sample data: review items are read live from GitHub, so none are shown here.' : null,
-    'Items whose issue or PR is closed now are left out.',
-  ].filter(Boolean).join('\n');
+  const rs = needs?.rs;
+  const needsTip = items.length ? 'Hand-offs and PR reviews waiting for you, oldest first. Select a number to view it on GitHub.'
+    : rs === 'unavailable' ? "The open-PR list couldn't be read, so PR reviews may be missing."
+      : rs === 'pending' ? 'Reading the open-PR list for PR reviews.'
+        : rs === 'sample' ? "No hand-offs are waiting. Sample data doesn't read live PR reviews."
+          : 'No hand-offs or PR reviews are waiting for you. Closed issues and PRs are left out.';
   setPart('state-part', p.state, stateTip);
   setPart('needs-part', p.needs, needsTip);
 }
@@ -1225,41 +1221,70 @@ function renderScore(v) {
   const c = v.cost;
   const since = earliestSpendDay(state.events);
   const build = st.build?.ok ? st.build.value : null;
-  const tierLines = Object.entries(b.byTier).map(([k, x]) => `${k === 'auto' ? 'Routine (tier auto: merges by itself once its checks pass)' : k === 'auto-strict' ? 'Core (tier auto-strict: also needs the reviewer agent and the strict gates)' : k}: ${x.done} of ${x.total} done.`);
-  const wf = { implement: 'coder', repair: 'repair', review: 'reviewer' };
   const steps = v.steps;
   const drills = st.drills;
+  const partial = state.partialHistory ? `Only the last ${DAYS} days of the audit log could be loaded.` : null;
+  const runWhy = why ? (state.runs.waitingForRate ? 'waiting for API requests to spare' : state.runs.error ? "the agent run lists couldn't be read" : 'reading the agent run lists') : null;
   replaceSection('score',
-    scoreItem(shippedItem(b), [
-      'Done: the task\'s issue is closed as completed; without the issue list, a merge (or task_done) in the audit log.',
-      ...tierLines,
-      'Safety drills (drill/*) are not tasks and aren\'t counted.',
-      taskIssuesLine(),
-    ].join('\n')),
-    scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1] }), [
-      itm.count ? `Median ${formatDuration(itm.medianMs)} from start to merge over ${itm.count} of ${doneReal} done tasks: every done real task whose start and merge are in the loaded audit log (the last ${DAYS} days).` : 'No done task has its start and merge in the loaded audit log.',
-      'Start: the task\'s first auto_ready (made ready by the controller), else its first agent run. End: its merge.',
-      v.doneSpan ? `First and last task finished: ${iso(v.doneSpan[0])} and ${iso(v.doneSpan[1])}.` : null,
-    ].filter(Boolean).join('\n')),
+    scoreItem(shippedItem(b), state.taskIssues.map && !state.taskIssues.error
+      ? "Tasks whose issue is closed as completed, out of all tasks in the task map. Safety drills aren't counted."
+      : "Tasks merged per the audit log, out of all tasks in the task map. The task-issue list couldn't be read."),
+    scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1], done: doneReal }),
+      itm.count ? `Median time from a task's start to its merge, over ${itm.count} of ${doneReal} done tasks. ${partial ?? 'Dates are the first and last finishes.'}`
+        : `Start and merge times for these tasks aren't in the audit log. ${partial ?? 'Details explains how speed is measured.'}`),
     scoreItem(costItem({ build: st.build, cost: c, medianAic: v.taskCost.medianAic }), [
-      `Build = research, design, coordination and build sessions${build ? ` (as of ${shortDate(build.asOf)}: ${Math.round(build.aiUnits).toLocaleString('en-US')} AI credits, ${build.source})` : ''}. Run = the factory's own agent runs (coder, repair, reviewer)${since ? ` since ${shortDate(since)}` : ''}. 1 AI credit = $0.01.`,
-      st.build && !st.build.ok ? `Build cost unavailable: ${st.build.error}.` : null,
-      why ? `Running cost: ${why}` : null,
-      c.known && c.measuredRuns ? `Run cost by agent: ${Object.entries(wf).map(([k, name]) => `${name} ${formatUsd(c.byWorkflow[k].aic)} (${c.byWorkflow[k].measured} runs)`).join(', ')}.` : null,
-      c.known && c.measuredRuns ? `Run cost not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}) counts as real tasks. Median per task: over ${plural(v.taskCost.count, 'done task')} with a known cost.` : null,
-    ].filter(Boolean).join('\n')),
-    scoreItem(humanItem(steps), [
-      steps.goLive ? `Hands-on steps by a person since go-live (${relativeTime(steps.goLive, now())}, ${iso(steps.goLive)}: the first real agent run of a real task).` : 'Not live yet: no real agent run of a real task in the loaded audit log.',
-      'Counted: a person putting an agent PR in the merge queue; label changes, pushes or hand-started runs on agent PRs or factory tasks when the log records them.',
-      'Not counted: plain reviews and comments, and anything on other PRs (the coordinator\'s own, under the shared account).',
-      steps.total ? `By kind: ${Object.entries(steps.byKind).map(([k, n]) => `${k} ${n}`).join(', ')}.` : null,
-    ].filter(Boolean).join('\n')),
-    scoreItem(qualityItem(v.quality, drills), [
-      'Reverts: merges the factory undid automatically after main broke (auto_revert), safety drills left out.',
-      'Bad changes blocked: hand-offs because the reviewer agent objected before merge (needs_human, review_objected), safety drills left out.',
-      drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}. ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${shortDate(drills.value.asOf)}.` : `Safety drills: ${drills?.error ?? 'reading drills.json…'}`,
-      `In the loaded window (last ${DAYS} days).`,
-    ].join('\n')));
+      build ? `Build: one-time sessions to make the factory, as of ${shortDate(build.asOf)}.` : `Build cost unavailable: ${shortError(st.build?.error ?? 'not read yet')}.`,
+      partial ?? (runWhy ? `Running cost unavailable: ${runWhy}.` : `Run: the factory's own agent runs${since ? ` since ${shortDate(since)}` : ''}, at $0.01 per AI credit.`),
+    ].join(' ')),
+    scoreItem(humanItem(steps), steps.goLive
+      ? `Steps a person took on agent PRs or factory tasks since go-live, ${shortDate(steps.goLive)}. ${partial ?? "Reviews and comments don't count."}`
+      : 'Not live yet: no real agent run of a real task in the audit log.'),
+    scoreItem(qualityItem(v.quality, drills), `Reverts and reviewer blocks leave out safety drills. ${drills?.ok ? `Drill results are from the build journal, as of ${shortDate(drills.value.asOf)}.` : `Drill record unavailable: ${shortError(drills?.error ?? 'not read yet')}.`}`));
+}
+
+/** The first problem of an error message, at most 10 words, for a short tooltip. */
+function shortError(text) {
+  const words = String(text).split('; ')[0].replace(/\.$/, '').split(/\s+/);
+  return words.length > 10 ? `${words.slice(0, 10).join(' ')}…` : words.join(' ');
+}
+
+// The definitions behind the scoreboard, as visible text inside Details (tooltips stay short).
+function renderAbout(v) {
+  if (!state.loaded) {
+    replaceSection('about', empty('…'));
+    return;
+  }
+  const st = state.statics;
+  const b = v.board;
+  const c = v.cost;
+  const itm = v.toMerged;
+  const build = st.build?.ok ? st.build.value : null;
+  const since = earliestSpendDay(state.events);
+  const names = { implement: 'coder', repair: 'repair', review: 'reviewer' };
+  const steps = v.steps;
+  const drills = st.drills;
+  const why = runsProblem(v);
+  const entry = (term, ...lines) => [h('dt', {}, term), h('dd', {}, lines.filter(Boolean).join(' '))];
+  replaceSection('about', h('dl', { class: 'about' },
+    state.partialHistory ? entry('Scope', `The audit tree couldn't be listed, so only the last ${DAYS} days were loaded: every number here covers that window, not the whole log.`)
+      : entry('Scope', `Every number on the scoreboard covers the whole audit log (${state.records.length.toLocaleString('en-US')} events, all verified), not a window. Details lists the last ${DAYS} days.`),
+    entry('Shipped', 'A task is done when its issue is closed as completed; while its issue is open, when the controller closes it after the merge; without the issue list, when the audit log shows the merge.',
+      `Routine tasks (tier auto) merge by themselves once their checks pass; core tasks (tier auto-strict) also need the reviewer agent and the strict gates.`,
+      `Now: ${Object.entries(b.byTier).map(([k, x]) => `${k} ${x.done} of ${x.total}`).join(', ')}.`, 'Safety drills (drill/*) are not tasks.', taskIssuesLine()),
+    entry('Speed', `The median time from a task's start (its first auto_ready, else its first agent run) to its merge, over ${itm.count} of ${b.counts.done} done tasks whose start and merge are in the log.`,
+      v.doneSpan ? `First finish ${iso(v.doneSpan[0])}, last ${iso(v.doneSpan[1])}.` : null, 'Minutes up to 90, then hours.'),
+    entry('Total cost', build ? `Build: ${Math.round(build.aiUnits).toLocaleString('en-US')} AI credits (${formatUsd(build.usd * 100)}), research, design, coordination and build sessions, from ${build.source}, as of ${build.asOf}.` : `Build cost unavailable: ${st.build?.error ?? 'not read yet'}.`,
+      `Run: the latest measured AI credits of each of the factory's agent runs${since ? ` since ${since}` : ''}, from the controller's spend snapshots; 1 AI credit = $0.01.`,
+      c.known && c.measuredRuns ? `By agent: ${Object.entries(names).map(([k, n]) => `${n} ${formatUsd(c.byWorkflow[k].aic)} over ${plural(c.byWorkflow[k].measured, 'run')}`).join(', ')}.` : null,
+      c.known && c.measuredRuns ? `Safety drills ${formatUsd(c.drillAic)}; runs not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}) count as real tasks. The median per task is over ${plural(v.taskCost.count, 'done task')} with a known cost.` : null,
+      why ? `Running cost: ${why}` : null),
+    entry('Human effort', steps.goLive ? `Go-live: ${iso(steps.goLive)}, the first real agent run of a real task.` : 'Not live yet.',
+      'Counted: a person putting an agent PR in the merge queue, and label changes, pushes or hand-started runs on agent PRs or factory tasks when the log records them.',
+      "Not counted: plain reviews and comments, and anything on other PRs (the coordinator's own, under the shared account).",
+      steps.total ? `By kind: ${Object.entries(steps.byKind).map(([k, n]) => `${k} ${n}`).join(', ')}.` : null),
+    entry('Quality', 'Reverts: merges the factory undid automatically after main broke. Bad changes blocked: hand-offs because the reviewer agent objected before the merge. Both leave out safety drills.',
+      drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}; ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${drills.value.asOf}.` : `Drill record unavailable: ${drills?.error ?? 'not read yet'}.`),
+    entry('Data', 'Everything comes from GitHub, read-only: the audit log, the task map and contracts, the task issues, the open PRs and the agent run lists. The build cost and drill record are files published with this page. Every event is re-hashed and its chain checked in your browser.')));
 }
 
 function renderSteps(v) {
@@ -1286,19 +1311,16 @@ function renderSteps(v) {
 function boardTile(t) {
   const href = t.issue != null ? `${GH}/${REPO}/issues/${t.issue}` : `${GH}/${REPO}/blob/main/${contractPath(t.id)}`;
   const word = TASK_STATE_LABELS[t.state];
-  const lines = [
-    `${t.id}${t.title ? ` · ${t.title}` : ''}`,
-    `Tier: ${t.tier === 'auto' ? 'routine (auto: merges by itself once its checks pass)' : t.tier === 'auto-strict' ? 'core (auto-strict: also needs the reviewer agent and the strict gates)' : t.tier ?? 'unknown'}`,
-    `State: ${word}${t.reason && t.reason !== 'merged' ? ` (${t.reason})` : ''}`,
-    t.issueState ? `Issue: ${t.issueState === 'completed' ? 'closed as completed' : t.issueState === 'closed' ? 'closed, not completed' : 'open'}` : state.taskIssues.map ? 'No task issue found' : null,
-    t.since != null ? `Since ${relativeTime(t.since, now())} (${iso(t.since)})` : null,
-    [t.issue != null ? `Issue #${t.issue}` : null, t.prs.length ? `PR ${t.prs.map((n) => `#${n}`).join(', ')}` : null].filter(Boolean).join(' · ') || null,
-    t.issue != null ? `View issue #${t.issue} on GitHub` : 'View its contract on GitHub (no issue in the loaded events)',
-  ];
+  const stateText = t.state === 'done' ? `done${t.since != null ? ` ${relativeTime(t.since, now())}` : ''}`
+    : t.state === 'running' ? `running${t.reason ? `, ${t.reason}` : ''}`
+      : t.state === 'needs' ? `needs you${t.reason ? `: ${plainReason(t.reason)}` : ''}`
+        : t.reason ?? 'waiting';
+  const tier = t.tier === 'auto' ? 'Routine task' : t.tier === 'auto-strict' ? 'Core task' : 'Task';
+  const tipText = `${t.id}: ${stateText}. ${tier}; select to view ${t.issue != null ? `issue #${t.issue}` : 'its contract'}.`;
   const a = h('a', { class: `tile tile--${t.state}`, href, rel: 'noopener noreferrer', 'aria-label': `${t.short}: ${word}` },
     h('span', { class: 'tile-i' }, icon(STATE_ICON[t.state])),
     h('span', { class: 'tile-n' }, t.short));
-  return h('li', { 'data-row-key': t.id }, tip(a, lines.filter(Boolean).join('\n')));
+  return h('li', { 'data-row-key': t.id }, tip(a, tipText));
 }
 
 /** Where the done states come from, for the tooltips. */
@@ -1318,14 +1340,7 @@ function renderBoard(v) {
   // labels carry the state either way.
   const present = TASK_STATES.filter((st) => b.counts[st]);
   legend.replaceChildren(...(state.loaded && present.length > 1 ? present.map((st) => h('span', { class: `lg lg--${st}` }, icon(STATE_ICON[st]), `${b.counts[st]} ${TASK_STATE_LABELS[st]}`)) : []));
-  setTip('board-info', [
-    'One tile per task of the task map, grouped by its contract area. Select a tile to view its issue on GitHub.',
-    'Done: merged. Running: work started (implement, repair or review agent, checks, merge queue) and not merged, issue open. Needs you: an open needs-human item. Waiting: a dependency not done, or ready for a free slot.',
-    'Drill tasks (drill/*) were fire drills of the factory and are not shown.',
-    taskIssuesLine(),
-    mm.status === 'error' ? `Task map unavailable (${mm.error}): showing the tasks seen in the audit log.` : null,
-    mm.missing.length ? `Contracts not read: ${mm.missing.join(', ')}.` : null,
-  ].filter(Boolean).join('\n'));
+  setTip('board-info', 'One tile per task, grouped by area; colour and icon show its state. Select a tile to view its issue.');
   if (!state.loaded) {
     replaceSection('board', empty('… Loading'));
     return;
@@ -1335,7 +1350,7 @@ function renderBoard(v) {
     return;
   }
   replaceSection('board',
-    mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${mm.error}. Showing the tasks seen in the audit log.`) : null,
+    mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${shortError(mm.error)}. Showing the tasks seen in the audit log.`) : null,
     b.groups.map((g, i) => h('div', { class: 'group', role: 'group', 'aria-labelledby': `group-${i}` },
       h('h3', { class: 'group-h', id: `group-${i}` }, g.label),
       h('ul', { class: 'tiles' }, g.tasks.map(boardTile)))));
@@ -1368,20 +1383,28 @@ function renderLive(m, v) {
   const L = v.live;
   const hb = m.heartbeat;
   const level = hb.level === 'ok' ? null : hb.level === 'none' ? 'alert' : hb.level;
-  const lastTip = [
-    L.lastAt == null ? `No controller event in the last ${DAYS} days.` : `Last controller poll: ${L.lastType} event, ${iso(L.lastAt)}.`,
-    hb.ageMin == null ? `No heartbeat in the last ${DAYS} days.` : `Last heartbeat ${formatAge(hb.ageMin)} ago (${hb.at}).`,
-    cadenceLines().heartbeat,
-    `Heartbeat: green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}`,
-    CADENCE_NOTE,
-  ].join('\n');
-  const nextTip = L.mode === 'follow-up'
-    ? `Work is in flight or dispatch is paused by a gate, so the controller's follow-up chain polls again about ${FOLLOW_UP_MIN} min after its last poll (${iso(L.nextAt)}).`
-    : [`Next scheduled (hourly) poll: ${L.nextAt == null ? 'unknown' : iso(L.nextAt)}.`, L.followUpMissed ? `The follow-up poll expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
-      'GitHub\'s cron often runs scheduled jobs hours late on Free plans.', cadenceLines().heartbeat].filter(Boolean).join('\n');
+  const lastTip = L.lastAt == null ? `No check-in from the factory in the last ${DAYS} days.` : `The factory's last check-in, ${relativeTime(L.lastAt, now())}. Amber after ${HB_WARN} without one, red after ${HB_ALERT}.`;
+  const nextTip = L.mode === 'follow-up' ? `Expected about ${FOLLOW_UP_MIN} min after the last check-in, while work is in flight.`
+    : 'Expected at the next hourly run. GitHub often runs these hours late.';
+  const cad = cadenceLines();
+  const hv = state.healthView;
   replaceSection('live',
     stat({ key: 'last', labelFirst: true, label: 'Last check-in', value: L.lastAt == null ? '—' : timeEl(L.lastAt), level, tipText: lastTip }),
-    stat({ key: 'next', labelFirst: true, label: 'Next check-in', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: `Next controller poll expected ${relativeTime(L.nextAt, now())}.\n${nextTip}` }));
+    stat({ key: 'next', labelFirst: true, label: 'Next check-in', value: L.nextAt == null ? '—' : h('span', {}, '~', timeEl(L.nextAt)), tipText: nextTip }),
+    h('p', { class: 'hint pre' }, [
+      `Observed: ${cad.heartbeat}`,
+      `Observed: ${cad.verifier}`,
+      `Check-in: green up to ${HB_WARN}, ${limitsText(DEFAULTS.heartbeatWarnMin, DEFAULTS.heartbeatAlertMin)}. ${CADENCE_NOTE}.`,
+      L.followUpMissed ? `The follow-up check-in expected ${FOLLOW_UP_MIN} min after the last one hasn't arrived.` : null,
+    ].filter(Boolean).join('\n')),
+    h('p', { class: 'hint pre' }, [
+      hv ? `Health now: ${hv.health.label}${hv.health.reasons.length ? ` (${hv.health.reasons.join('; ')})` : ''}.` : null,
+      hv ? hv.detail.text : null,
+      hv ? hv.chainLine : null,
+      hv ? verifierReason(hv.verifier) : null,
+      '',
+      HEALTH_RULE,
+    ].filter((x) => x != null).join('\n')));
 }
 
 function renderRecent(v) {
@@ -1395,7 +1418,7 @@ function renderRecent(v) {
   }
   replaceSection('recent', h('ol', { class: 'recent' }, v.recent.map((r, i) => tip(h('li', { 'data-row-key': `${i}:${r.text}` },
     h('span', { class: 'recent-t' }, r.text), h('span', { class: 'recent-at' }, timeEl(r.at, { bare: true }))),
-  [`${r.type}${r.task ? ` · ${r.task}` : ''}${r.issue != null ? ` · issue #${r.issue}` : ''}${r.pr != null ? ` · PR #${r.pr}` : ''}`, r.at != null ? iso(r.at) : null].filter(Boolean).join('\n')))));
+  `Latest step of ${r.task ?? (r.pr != null ? `PR #${r.pr}` : 'this item')}, ${relativeTime(r.at, now())}.`))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,26 +1434,25 @@ function checkRow(ev, i) {
     const prs = Array.isArray(p.prs) ? p.prs.filter(isNum) : [];
     const wf = String(p.workflow ?? 'check');
     const at = p.completed_at ?? ev.timestamp;
-    const lines = [
-      isNum(p.run_id) ? `View run ${p.run_id}${isNum(p.run_attempt) && p.run_attempt > 1 ? ` (attempt ${p.run_attempt})` : ''} on GitHub` : null,
-      `${wf}: ${p.conclusion ?? 'unknown'}${typeof p.event === 'string' ? ` on ${p.event}` : ''}`,
-      typeof p.failure_signature === 'string' ? `Failure signature ${p.failure_signature}` : null,
-      typeof p.heldout_seed === 'string' ? `Held-out seed ${p.heldout_seed}` : null,
-      parseTime(at) != null ? `Completed ${new Date(parseTime(at)).toISOString()}` : null,
-    ].filter(Boolean).join('\n');
+    const what = p.conclusion === 'success' ? 'passed' : p.conclusion === 'failure' ? 'failed' : String(p.conclusion ?? 'unknown');
+    const where = prs.length ? `PR ${prs.map((n) => `#${n}`).join(', ')}` : p.event === 'push' ? 'main' : p.event === 'merge_group' ? 'the merge queue' : 'GitHub';
+    const lines = `${wf} ${what} on ${where}, ${relativeTime(parseTime(at), now())}.${isNum(p.run_id) ? ' Select to view the run on GitHub.' : ''}`;
     const runHref = isNum(p.run_id) ? `${GH}/${REPO}/actions/runs/${p.run_id}${isNum(p.run_attempt) ? `/attempts/${p.run_attempt}` : ''}` : null;
     return h('li', { class: `chk chk--${tone}`, 'data-row-key': key },
       h('span', { class: 'chk-icon', role: 'img', 'aria-label': String(p.conclusion ?? 'unknown') }, icon(tone === 'ok' ? 'ok' : tone === 'fail' ? 'fail' : 'dot')),
       tip(runHref ? link(runHref, wf) : h('b', {}, wf), lines),
       h('span', { class: 'chk-on' }, prs.length ? prs.flatMap((n, j) => [j ? ' ' : '', link(`${GH}/${REPO}/pull/${n}`, `#${n}`)])
-        : typeof p.event === 'string' ? h('span', { class: 'muted' }, p.event) : '—'),
+        : h('span', { class: 'muted' }, p.event === 'push' ? 'main' : p.event === 'merge_group' ? 'merge queue' : '—')),
       h('span', { class: 'muted' }, timeEl(at)));
   } catch (err) {
     return h('li', { class: 'chk problem', 'data-row-key': key }, `Couldn't show this check: ${err?.message ?? err}`);
   }
 }
 
-function renderChecks(m) {
+function renderChecks(mAll) {
+  // The operations views in Details show the window (the scoreboard uses the whole log).
+  const from = Date.parse(utcDay(now()) + 'T00:00:00Z') - (DAYS - 1) * 86400000;
+  const m = { checks: mAll.checks.filter((ev) => (eventTime(ev) ?? 0) >= from) };
   const passed = m.checks.filter((ev) => ev.payload?.conclusion === 'success').length;
   $('checks-info').textContent = m.checks.length ? `${passed} of ${m.checks.length} passed in ${DAYS} days. Newest first.` : '';
   if (!m.checks.length) {
@@ -1445,7 +1467,7 @@ function renderChecks(m) {
       state.checksExpanded = !state.checksExpanded;
       safe('checks', () => renderChecks(deriveMetrics(state.events, { now: now() }))); // restores focus to this button
     },
-  }, all ? 'Fewer' : 'View all'), all ? `Show the newest ${CHECKS_SHOWN} only` : `Show all ${m.checks.length} checks in the window`) : null;
+  }, all ? 'Fewer' : 'View all'), all ? `Show the newest ${CHECKS_SHOWN} only.` : `Show all ${m.checks.length} checks.`) : null;
   replaceSection('checks',
     h('ul', { class: `checks${all ? ' checks--all' : ''}`, id: 'checks-list' }, m.checks.slice(0, all ? m.checks.length : CHECKS_SHOWN).map(checkRow)),
     toggle);
@@ -1461,9 +1483,10 @@ function stackRow(r, maxMs, isMedian = false) {
   const stack = withWidth(h('div', { class: 'stack', role: 'img', 'aria-label': `${r.label}: ${desc}; total ${formatDuration(r.totalMs)}` },
     r.segments.map((sg) => withWidth(h('i', { class: `seg st-${sg.stage}` }), (sg.ms / r.totalMs) * 100))),
   (r.totalMs / maxMs) * 100);
-  const lines = `${isMedian ? `Median per stage over the tasks merged in the last ${MEDIAN_DAYS} days` : r.task}\n${r.segments.map((sg) => `${STAGE_LABELS[sg.stage]}: ${formatDuration(sg.ms)}${isMedian ? ` (${plural(sg.tasks, 'task')})` : ''}`).join('\n')}\n${isMedian ? 'Sum of the medians' : 'Total'} ${formatDuration(r.totalMs)}`;
+  const lines = isMedian ? `Median time per stage over the tasks merged in the last ${MEDIAN_DAYS} days. Bars share one scale.`
+    : `${r.task}: ${formatDuration(r.totalMs)} from ready to merge. Select to see its timeline.`;
   return h('div', { class: `srow${isMedian ? ' srow--avg' : ''}`, 'data-row-key': r.key },
-    h('span', { class: 'srow-label' }, isMedian ? tip(h('b', {}, 'Median'), lines) : subjectButton(r.key, r.label, `Show the timeline\n${lines}`)),
+    h('span', { class: 'srow-label' }, isMedian ? tip(h('b', {}, 'Median'), lines) : subjectButton(r.key, r.label, lines)),
     h('div', { class: 'track' }, stack),
     h('span', { class: 'muted num' }, shortDuration(r.totalMs)));
 }
@@ -1578,7 +1601,7 @@ function renderEvents() {
   select.value = state.typeFilter;
   select.disabled = !types.length;
 
-  $('events-sum').textContent = records.length ? `${records.length.toLocaleString('en-US')} events in the last ${DAYS} days, newest first.` : '';
+  $('events-sum').textContent = records.length ? `${records.length.toLocaleString('en-US')} events in the whole log, newest first.` : '';
   if (!records.length) {
     replaceSection('events', empty(state.noLog ? 'No audit log yet.' : state.loaded ? 'No events in the window.' : 'Loading…'));
     return;
@@ -1729,6 +1752,7 @@ function init() {
     const el = id ? document.getElementById(id) : null;
     if (!el || !el.closest('details')) return false;
     for (let d = el.closest('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+    el.focus({ preventScroll: true });
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     return true;
   };

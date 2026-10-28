@@ -122,7 +122,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge · 1 safety drill passed (0 defects found and fixed)',
     ]);
     assert.deepEqual(r.bigs, [1, 1, 1, 1, 1], 'one big number per sentence');
-    assert.match(r.costTip, /^Build cost unavailable: buildCost missing from the sample\.$/m);
+    assert.equal(r.costTip, "Build cost unavailable: buildCost missing from the sample. Run: the factory's own agent runs, at $0.01 per AI credit.");
     assert.equal(r.drillsHref, 'https://github.com/sabbasi3-factory-lab/factory/blob/main/docs/JOURNAL.md');
     assert.deepEqual(r.tiles, [
       ['casual-time-parser: done', '#i-ok'], ['month-name-parser: done', '#i-ok'], ['iso-format-parser: done', '#i-ok'],
@@ -136,37 +136,35 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.notEqual(colour[0], colour[2]);
   });
 
-  test('quiet: the liveness and health tooltips show the observed cadence and the limits', async () => {
+  test('quiet: Details shows the observed cadence and the health rule; the tooltips stay short', async () => {
     await open('quiet');
     await page.setViewport(1440, 900);
     const events = parseJsonl(readFileSync(QUIET_FIXTURE_PATH, 'utf8'), 'quiet.jsonl').map((rec) => rec.event);
     const { anchors } = parseAnchors(readFileSync(QUIET_ANCHORS_FIXTURE_PATH, 'utf8'));
-    const hbLine = cadenceText('Heartbeats', observedCadence(heartbeatTimes(events)), 14);
+    const hbLine = cadenceText('Check-ins', observedCadence(heartbeatTimes(events)), 14);
     const vfLine = cadenceText('Verifications', observedCadence(anchorTimes(anchors, { now: Date.parse(QUIET_FIXTURE_NOW), days: 14 })), 14);
-    assert.equal(hbLine, 'Heartbeats: median every 2.4 h, longest gap 7.6 h (14 days)');
+    assert.equal(hbLine, 'Check-ins: median every 2.4 h, longest gap 7.6 h (14 days)');
     assert.equal(vfLine, 'Verifications: median every 2.9 h, longest gap 5.1 h (14 days)');
     const before = await measure(1440, 900);
     const tipOf = (expr) => page.evaluate(`(() => { const el = ${expr}; el.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()`);
-    await page.evaluate("document.getElementById('details').open = true; document.getElementById('live-fold').open = true");
-    const polled = await tipOf("document.querySelector('#live .stat')");
-    const next = await tipOf("document.querySelectorAll('#live .stat')[1]");
-    await page.evaluate("document.getElementById('live-fold').open = false; document.getElementById('details').open = false");
     const health = await tipOf("document.getElementById('health')");
     await press('Escape');
-    for (const [tip, lines] of [
-      [polled, [hbLine, 'Heartbeat: green up to 8 h, amber after 8 h, red after 12 h', CADENCE_NOTE]],
-      [next, ["GitHub's cron often runs scheduled jobs hours late on Free plans.", hbLine]],
-      [health, [`Observed: ${hbLine}`, `Observed: ${vfLine}`, CADENCE_NOTE]],
-    ]) {
-      const got = (tip ?? '').split('\n');
-      for (const line of lines) assert.ok(got.includes(line), `tooltip has "${line}":\n${tip}`);
+    assert.match(health, /^Healthy: the audit log is verified, and the factory checked in 1[23]m ago\.$/);
+    await page.evaluate("document.getElementById('details').open = true; document.getElementById('live-fold').open = true");
+    const live = await page.evaluate("document.getElementById('live').innerText");
+    const polled = await tipOf("document.querySelector('#live .stat')");
+    const next = await tipOf("document.querySelectorAll('#live .stat')[1]");
+    await press('Escape');
+    await page.evaluate("document.getElementById('live-fold').open = false; document.getElementById('details').open = false");
+    for (const line of [`Observed: ${hbLine}`, `Observed: ${vfLine}`, `Check-in: green up to 8 h, amber after 8 h, red after 12 h. ${CADENCE_NOTE}.`,
+      'Healthy: fresh data, verified chain, heartbeat within 8 h, verifier anchor within 8 h.']) {
+      assert.ok(live.split('\n').includes(line), `Details, Liveness shows "${line}":\n${live}`);
     }
-    assert.match(health, /^Healthy: fresh data, verified chain, heartbeat within 8 h, verifier anchor within 8 h\.$/m);
-    assert.match(health, /heartbeat missing or over 12 h, verifier over 26 h or unreadable\.$/m);
-    // Tooltips only: the visible words don't change.
+    assert.match(polled, /^The factory's last check-in, 1[23]m ago\. Amber after 8 h without one, red after 12 h\.$/);
+    assert.equal(next, 'Expected at the next hourly run. GitHub often runs these hours late.');
+    // Closed Details: the visible words above the fold don't change.
     const after = await measure(1440, 900);
     assert.deepEqual([after.aboveFoldWords, after.totalWords], [before.aboveFoldWords, before.totalWords]);
-    assert.ok(!(await page.evaluate("document.body.innerText")).includes('median every'), 'the cadence is not visible text');
   });
 
   test('the word rules: separators split sentences, icons are not words, closed details and hidden tips are skipped', async () => {
@@ -291,22 +289,18 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     const colorOf = (label) => r.find((t) => t.label === label).color;
     assert.equal(new Set(['iso-date: waiting', 'ordinal: done', 'casual-date: running', 'time-expression: needs you'].map(colorOf)).size, 4);
     assert.equal(r.find((t) => t.label === 'ordinal: done').href, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/41');
-    assert.match(r.find((t) => t.label === 'ordinal: done').tip, /^State: done \(issue closed as completed\)$/m);
-    assert.match(r.find((t) => t.label === 'casual-date: running').tip, /^Issue: open$/m);
-    assert.match(r.find((t) => t.label === 'range: waiting').tip, /^No task issue found$/m);
-    const range = r.find((t) => t.label === 'range: waiting');
-    assert.match(range.tip, /^en\/range · Port Range$/m);
-    assert.match(range.tip, /^Tier: routine \(auto: merges by itself once its checks pass\)$/m);
-    assert.match(range.tip, /^State: waiting \(waiting on month-parser\)$/m);
-    assert.match(r.find((t) => t.label === 'month-parser: running').tip, /^Since \d+[mhd] ago \(2026-10-16T10:00:00Z\)$/m);
+    const tipOfTile = (label) => r.find((t) => t.label === label).tip;
+    assert.match(tipOfTile('ordinal: done'), /^en\/ordinal: done \d+[mhd] ago\. Routine task; select to view issue #41\.$/);
+    assert.equal(tipOfTile('casual-date: running'), 'en/casual-date: running, implement agent running. Routine task; select to view issue #44.');
+    assert.equal(tipOfTile('range: waiting'), 'en/range: waiting on month-parser. Routine task; select to view its contract.');
+    assert.equal(tipOfTile('time-expression: needs you'), 'en/time-expression: needs you: the same failure repeated. Routine task; select to view issue #45.');
     // No issue in the events: the tile links to the task's contract instead.
     assert.equal(r.find((t) => t.label === 'range: waiting').href, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/blob/main/contracts/en/range.yaml');
     assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#board .group-h')].map((g) => g.textContent)"), ['Common parsers', 'Numeric', 'Casual', 'Months', 'Relative']);
-    assert.match(r.find((t) => t.label === 'ordinal: done').tip, /^Tier: routine \(auto: merges by itself once its checks pass\)$/m);
     assert.equal(await page.evaluate("document.getElementById('board-legend').innerText.replace(/\\s+/g, ' ').trim()"), '2 done 2 running 2 needs you 2 waiting');
     // Keyboard: a tile takes focus and shows its tooltip.
     const tip = await page.evaluate("(() => { document.querySelector('#board .tile').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
-    assert.match(tip ?? '', /^common\/iso-date · Port IsoDate$/m);
+    assert.equal(tip, 'common/iso-date: ready, waiting for a free slot. Core task; select to view issue #47.');
     await press('Escape');
   });
 
@@ -335,6 +329,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(r.stepsLink, '#human-steps');
     await page.evaluate("document.querySelector('.score--human a').click()");
     await page.waitFor("document.getElementById('details').open && document.getElementById('human-fold').open", { what: 'Details to open at the steps' });
+    assert.equal(await page.evaluate('document.activeElement.id'), 'human-steps', 'focus moves to the list');
     assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#human-steps li')].map((li) => li.innerText.replace(/\\s+/g, ' ').replace(/ \\d+[mhd] ago$/, '').trim())"),
       ['#6 ordinal · put an agent PR in the merge queue']);
     await page.evaluate("document.getElementById('human-fold').open = false; document.getElementById('details').open = false");
@@ -358,8 +353,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(await page.evaluate("document.getElementById('tip').hidden"), true);
     // A scoreboard sentence is focusable and its tooltip has the definitions.
     const tileTip = await page.evaluate("(() => { const k = document.querySelector('#score .score-item'); k.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
-    assert.match(tileTip ?? '', /^Routine \(tier auto: merges by itself once its checks pass\): 2 of 7 done\.$/m);
-    assert.match(tileTip ?? '', /Safety drills \(drill\/\*\) are not tasks/);
+    assert.equal(tileTip, "Tasks whose issue is closed as completed, out of all tasks in the task map. Safety drills aren't counted.");
   });
 
   test('"View all" expands the checks with Enter and collapses with Space, keeping focus', async () => {
@@ -468,9 +462,9 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
         quality: item('quality').querySelector('p').innerText.replace(/\\s+/g, ' ').trim(), qualityTip: tipOf(item('quality')) };
     })()`);
     assert.deepEqual(r.cost, ['Running cost: about $10.97', '$10.97 real tasks (median $3.44 each)']);
-    assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\.$/m);
+    assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\. Run: /);
     assert.equal(r.quality, 'Quality: 0 reverts of real work · reviewer blocked 0 bad changes before merge');
-    assert.match(r.qualityTip, /^Safety drills: drills: unexpected extra$/m);
+    assert.equal(r.qualityTip, 'Reverts and reviewer blocks leave out safety drills. Drill record unavailable: drills: unexpected extra.');
     await open('1', { force: true });
   });
 
@@ -487,6 +481,81 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(dark.bg, 'rgb(13, 17, 23)');
     assert.equal(dark.tiles, 4);
     assert.equal(light.tiles, 4);
+  });
+
+  test('status-line links keep keyboard focus when the page refreshes', async () => {
+    await open('1');
+    await page.setViewport(1440, 900);
+    const key = await page.evaluate(`(() => {
+      const a = document.querySelector('#state-part a');
+      a.focus();
+      window.__statusLink = a;
+      return a.getAttribute('data-focus-key');
+    })()`);
+    assert.ok(key);
+    // A clock refresh, then a data reload (sample mode): focus stays on the same link.
+    await page.evaluate("document.getElementById('refresh').click()");
+    await page.waitFor(READY_EXPR, { timeoutMs: 10000, what: 'the reload' });
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await page.evaluate("({ same: document.activeElement === window.__statusLink, key: document.activeElement.getAttribute('data-focus-key'), inside: !!document.activeElement.closest('#state-part') })");
+    assert.ok(after.inside, 'focus is still in the status line');
+    assert.equal(after.key, key);
+  });
+
+  // Every tooltip: at most 2 sentences and 25 words, no lists. Measured on both samples with
+  // Details and all its sections open, so every tooltip source is rendered.
+  for (const fx of FIXTURES) {
+    test(`${fx.name}: every tooltip is at most 2 short sentences (25 words)`, async () => {
+      await open(fx.param);
+      const found = await page.evaluate(`(() => {
+        const folds = [...document.querySelectorAll('main details')];
+        folds.forEach((d) => { d.open = true; });
+        const out = [];
+        const text = (el) => el.dataset.tip || (el.getAttribute('aria-describedby') || '').split(/\\s+/).filter(Boolean)
+          .map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+        for (const el of document.querySelectorAll('[aria-describedby], [data-tip], [title]')) {
+          for (const t of [text(el), el.getAttribute('title') ?? ''].filter(Boolean)) {
+            const words = t.split(/\\s+/).filter((w) => /[\\p{L}\\p{N}]/u.test(w)).length;
+            const sentences = t.split(/(?<=[.!?])\\s+|\\n+/).filter((x) => /[\\p{L}\\p{N}]/u.test(x)).length;
+            out.push({ where: el.id || el.className || el.tagName, words, sentences, t });
+          }
+        }
+        folds.forEach((d) => { d.open = false; });
+        return out;
+      })()`);
+      assert.ok(found.length > 30, `found ${found.length} tooltips`);
+      const bad = found.filter((x) => x.words > 25 || x.sentences > 2);
+      assert.deepEqual(bad, [], bad.map((x) => `${x.words} words, ${x.sentences} sentences: ${x.t}`).join('\n'));
+    });
+  }
+
+  test('the tooltip is readable: 14 px+, line-height 1.5+, 12 px padding, ~320 px wide, contrast 4.5:1+ in both themes', async () => {
+    await open('1');
+    await page.setViewport(1440, 900);
+    for (const scheme of ['light', 'dark']) {
+      await page.setColorScheme(scheme);
+      const s = await page.evaluate(`(() => {
+        document.activeElement?.blur();
+        document.querySelector('.score--cost').focus();
+        const t = document.getElementById('tip');
+        const cs = getComputedStyle(t);
+        const rgb = (c) => c.match(/[\\d.]+/g).slice(0, 3).map(Number);
+        const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+        const [a, b] = [lum(rgb(cs.color)), lum(rgb(cs.backgroundColor))];
+        return { shown: !t.hidden, font: parseFloat(cs.fontSize), lh: parseFloat(cs.lineHeight) / parseFloat(cs.fontSize),
+          pad: Math.min(...['Top', 'Right', 'Bottom', 'Left'].map((k) => parseFloat(cs['padding' + k]))), maxWidth: parseFloat(cs.maxWidth),
+          contrast: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) };
+      })()`);
+      const detail = `${scheme}: ${JSON.stringify(s)}`;
+      assert.ok(s.shown, detail);
+      assert.ok(s.font >= 14, detail);
+      assert.ok(s.lh >= 1.5, detail);
+      assert.ok(s.pad >= 12, detail);
+      assert.ok(s.maxWidth <= 340, detail);
+      assert.ok(s.contrast >= 4.5, detail);
+      await press('Escape');
+    }
+    await page.setColorScheme('light');
   });
 
   test('the console stays clean', () => {

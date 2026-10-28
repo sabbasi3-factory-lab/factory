@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  JOURNAL_URL, costItem, earliestSpendDay, healthSummary, humanItem, humanSteps, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
+  JOURNAL_URL, costItem, costJoin, earliestSpendDay, healthSummary, humanItem, humanSteps, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
   shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
 } from '../lib.js';
 
@@ -205,6 +205,8 @@ test('speed: about M min (or hours past 90 min) per task, with the first and las
   assert.deepEqual(text(speedItem({ medianMs: 9.6 * MIN, count: 26, firstAt: at('2026-10-22T18:44:00Z'), lastAt: at('2026-10-27T23:49:06Z') })), ['Speed: about 10 min per task', 'Oct 22 → Oct 27']);
   assert.deepEqual(text(speedItem({ medianMs: 3 * 60 * MIN, count: 2, firstAt: at('2026-10-22T00:00:00Z'), lastAt: at('2026-10-22T05:00:00Z') })), ['Speed: about 3 hours per task', 'Oct 22 → Oct 22']);
   assert.deepEqual(text(speedItem({})), ['Speed: — no task merged yet']);
+  // Done tasks whose start and merge aren't in the log: the timing is unavailable, not "no merge".
+  assert.deepEqual(text(speedItem({ count: 0, done: 26 })), ['Speed: — timing unavailable']);
   // The median over every done task in the loaded log (days: Infinity), only the given tasks.
   const events = [
     ev('dispatched', '2026-10-01T10:00:00Z', { task: 'en/old', issue: 1, attempt: 1 }),
@@ -260,4 +262,30 @@ test('quality: reverts of real work · reviewer blocks · safety drills passed f
   assert.equal(segText(qualityItem({ reverts: 1, objections: 2 }, { ok: false, error: 'drills.json: HTTP 404' }).main), 'Quality: 1 revert of real work · reviewer blocked 2 bad changes before merge');
   const one = validateDrills({ as_of: '2026-10-27', source: 'x', defects_found_and_fixed: 1, runs: [{ id: 'D1', result: 'pass' }, { id: 'D2', result: 'fail' }] });
   assert.match(segText(qualityItem({ reverts: 0, objections: 0 }, one).main), /· 1 safety drill passed \(1 defect found and fixed\)$/);
+});
+
+// --- lifetime numbers: the whole log, not the 14-day window -------------------------------------
+
+test('lifetime: after an idle fortnight the run cost, speed, go-live and human steps still count the old days', () => {
+  const now = at('2026-11-20T12:00:00Z'); // 3+ weeks after the last activity
+  const events = [
+    ev('dispatched', '2026-10-21T22:12:01Z', { task: 'en/a', issue: 31, attempt: 1 }), // go-live, far outside 14 days
+    ev('pr_opened', '2026-10-21T22:20:00Z', { pr: 54, task: 'en/a', author: 'agent[bot]' }),
+    ev('queued', '2026-10-21T22:30:00Z', { pr: 54, actor: 'owner' }),
+    ev('merged', '2026-10-21T22:31:00Z', { pr: 54, task: 'en/a', merged_at: '2026-10-21T22:31:00Z' }),
+    ev('spend_snapshot', '2026-10-21T23:00:00Z', { day: '2026-10-21', aic_today: 31.4, runs: [{ run_id: 7, aic: 31.4, status: 'measured' }], runs_total: 1 }),
+    ev('heartbeat', '2026-11-20T11:00:00Z', { factory_enabled: true }), // only check-ins since
+  ];
+  const c = costJoin(events, [{ id: 7, workflow: 'implement', created_at: '2026-10-21T22:12:09Z', display_title: 'Implement en/a #31 attempt 1' }], { now });
+  assert.equal(c.total, 31.4, 'the run cost is lifetime');
+  assert.deepEqual(c.perTask, [{ task: 'en/a', aic: 31.4, runs: 1 }]);
+  assert.equal(c.perDay.aic.reduce((x, y) => x + y, 0), 0, 'only the per-day list is windowed');
+  assert.deepEqual(text(costItem({ build, cost: c, medianAic: 31.4 }))[1], '= $1,110 to build the factory (one-time) + $0.31 to run it');
+  const speed = issueToMerged(events, { now, days: Infinity, tasks: new Set(['en/a']) });
+  assert.deepEqual([speed.count, speed.medianMs], [1, 18 * MIN + 59000]);
+  assert.equal(issueToMerged(events, { now }).count, 0, 'the 14-day window would have lost it');
+  const h = humanSteps(events);
+  assert.equal(h.goLive, at('2026-10-21T22:12:01Z'), 'go-live stays put outside the window');
+  assert.equal(h.total, 1);
+  assert.equal(text(humanItem(h))[0], 'Human effort after go-live: 1 manual step');
 });
