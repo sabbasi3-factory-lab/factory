@@ -13,8 +13,8 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `app.js` | UI: polling, rendering, settings |
 | `lib.js` | Pure logic: canonical JSON, SHA-256 checks, chain check, metrics, verifier anchors. Runs in the browser and in Node |
 | `style.css` | Layout; light and dark themes (system setting, or the Theme button, remembered in `localStorage`) |
-| `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs` | Tests for `lib.js` |
-| `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, the quiet state the live page is usually in) |
+| `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board, cost join, 14-day medians, quality, human touch, liveness, recent activity and the closed rule) |
+| `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts and Actions run lists each sample uses instead of GitHub |
 | `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
 | `test/glance.test.mjs` | The 5-second glance test: word budgets, layout, tooltips and keyboard behaviour, measured on the rendered `?fixture=1` and `?fixture=quiet` pages in headless Chrome |
@@ -22,79 +22,53 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 
 ## Layout
 
-The page is built for a 5-second glance: without reading sentences you can tell whether
-the factory is healthy, whether anything needs you, and whether work is moving. Numbers,
-colour and icons come first; every state has an icon as well as a colour; explanations
-live in tooltips (on the ⓘ buttons and on chips, tiles, cards and labels), which open on
-hover and on keyboard focus (Tab reaches them) and close with Escape. "—" means no data.
+One screen at 1440×900: everything that matters is above the fold, and a 5-second glance tells
+you whether the factory is healthy, what it's doing, whether anything needs you, and how the
+tasks are going. Numbers, colour and icons come first; every state has an icon as well as a
+colour; explanations and definitions live in tooltips (on the ⓘ buttons, chips, numbers, tiles
+and rows), which open on hover and on keyboard focus (Tab reaches them) and close with Escape.
+Every time on the page is relative ("23m ago", "in 31m"); the exact UTC time is in the tooltip
+or the element's title. "—" means no data (the tooltip says why).
 
-From the top, at widths up to 1480 px:
+Top to bottom:
 
-- **Sticky header:** "updated 12s ago" (its tooltip has the check times, API requests
-  left, token use, factory version and source), Refresh, Theme and Settings as icon
-  buttons, and the **glance line** in large type, for example
-  "✓ Healthy · 2 need you · ⏻ Factory off · ⓘ Dry run". Each part is a chip with
-  details in its tooltip: the **health chip** (rule below; it includes the independent
-  verifier), the Needs-you count (a link to the panel), the kill switch (on is green, off
-  is a neutral grey: off is the deliberate safe state) and dry-run or live mode. With
-  sample data (`?fixture=1` or `?fixture=quiet`) there's also a "Sample" chip. Until the first load the health chip
-  reads "… Loading" in neutral grey and the tiles show "…": nothing is red before
-  something is known to be wrong.
-- **Dispatch banner:** under the glance line, why the controller isn't dispatching, from
-  its newest `dispatch_state` audit event (recorded when the state changes, and daily), for
-  example "Paused since 17:43Z: spend unknown, 2 unreadable runs" (amber),
-  "Waiting since 17:43Z: 3 ready, held by limits" (or "dependencies not merged") or
-  "Idle since 17:43Z: nothing ready" (blue). "Since" is the payload's `since`, which the
-  controller carries across re-records (else the first event of the newest run with the
-  same state and reason). When the state was already in place at its first record (no
-  evidence of when it began), it reads "Paused (recorded 20:10Z): …" instead. A spend
-  pause is backfilled from when the first unreadable run of the day ended. It's
-  hidden while agents are running, or when the window has no `dispatch_state` event.
-- **Needs you:** the big count and one line per item, oldest first: icon, `#22` (or
-  `factory#3` for the other repo), a title of at most 4 words (full title, reason and
-  waiting time in the tooltip), an age chip, and "View PR" or "View issue". Empty: a green
-  ✓ and a big 0, because the header chip already says "✓ Nothing needs you" (the ✓ is
-  labelled "Nothing needs you" for screen readers). The panel keeps its place and height
-  rather than collapsing, so the page doesn't jump when an item arrives, and the detail
-  panels don't rise into the first screen (collapsing it measured worse for the
-  above-the-fold budget, not better). If the review list can't be read: "⚠ Review list
-  unavailable".
-- **Seven KPI tiles** (last 7 days): label, big number and a per-day trend line. Zero-touch
-  rate, checks passed, AIC today, merged today, median time to merge, heartbeat age and
-  "Verified" (age of the newest independent-verifier anchor, trend: anchors per day). The
-  last two are green, amber or red with a ✓, ⚠ or ✗ icon. The detail line of each tile is
-  in its tooltip. A day with nothing to measure leaves a gap in the line rather than a zero.
-  The Heartbeat and Verified tooltips also show the **observed cadence** measured from the
-  loaded data, the limits, and why they're that loose, for example:
-  "Heartbeats: median every 2.4 h, longest gap 7.6 h (7 days)" · "Green up to 8 h, amber
-  after 8 h, red after 12 h" · "GitHub runs scheduled jobs late on Free plans" (and
-  "Verifications: median every 2.9 h, longest gap 5.1 h (7 days)" from the anchors' `at`
-  times in the window). It's `observedCadence()` in `lib.js`; with fewer than 2 points the
-  line says "too few to measure". The health chip's tooltip repeats both lines under its rule.
-- **Pipeline:** seven lanes (Ready, Running, PR open, Checks, Queue, Merged, Deployed).
-  Empty lanes shrink to a narrow column with just the name (the lane's accessible label
-  still says "Ready: 0"); only Merged and Deployed show a count, because they show only
-  the latest cards. A card shows `#20` (the PR,
-  else the issue) and the time in its stage; icons flag needs human, stale contract, a
-  failed check, a repair or a dry-run plan, and the tooltip has the task, attempt, model
-  and tags. Merged and Deployed show the latest 3 cards and a "+N" button for the rest.
-  "Closed N" counts PRs closed without merging.
-- **Details, in two independent columns** (one column below 1100 px): Agents then
-  "Where the time goes" on the left, Latest checks then Cost per task on the right, so a
-  short panel never leaves a hole next to a tall one.
-  - **Agents:** "N of 3 agents running" with the WIP slots, then a card per active
-    attempt. With nothing running it's that one line. Without any `run_finished` events
-    the count is "—" (see below).
-  - **Latest checks:** the newest 5 (✓ or ✗, workflow, PR, time), then "View all". Run
-    ids, held-out seeds and failure signatures are in the workflow's tooltip.
-  - **Where the time goes:** a stacked bar per task or PR plus the average, and a
-    one-line insight such as "Checks is 52% of the time".
-  - **Cost per task:** AIC bars and "Average 334 AIC · 33% of budget".
-- **Task timeline** and **audit log**, both collapsed. Clicking a task name opens its
-  timeline. The audit log keeps v1's type filter, integrity column and canonical JSON.
+- **Sticky header and status line:** "updated 12s ago" (its tooltip has the check times, API
+  requests left, token use, factory version and source), Refresh, Theme and Settings as icon
+  buttons, then the status line in large type, for example
+  "✓ Healthy · ⏻ Factory on · ✓ Idle: all 26 tasks done". The **health chip** (rule below; it
+  includes the independent verifier), the kill switch (on is green, off a neutral grey: off is
+  the deliberate safe state), the **state** in plain English, and "ⓘ Dry run" only when the
+  controller is in dry-run mode. The state is `stateLine()` in `lib.js`: "Paused: daily AI budget
+  reached" (or another dispatch gate, from the newest `dispatch_state`; the kill switch has its
+  own chip), "Running: 2 tasks", "Waiting on you: 1 task", "Idle: all 26 tasks done",
+  "Waiting: 3 tasks ready" or "Waiting: 4 tasks on dependencies". Its tooltip has the task counts
+  and the controller's last dispatch state with how long it has held. With sample data there's
+  also a "Sample" chip. Until the first load the health chip reads "… Loading" in neutral grey
+  and the numbers show "…": nothing is red before something is known to be wrong.
+- **Four big numbers** (number and a short label; the definition is in each tooltip):
+  **Tasks done** "26/26" with the done count per tier ("auto 18 · auto-strict 8"),
+  **Issue → merged** (median over the last 14 days), **Cost per task** (median, in dollars) and
+  **Needs you** (a green ✓ 0, or the count and up to three items with "View issue"/"View PR").
+- **Task board:** one tile per task of the task map, grouped by its contract area ("Common
+  parsers", "Month names", …), named without the `common/` or `en/` prefix. Each tile has a state
+  colour and icon: ✓ done (green), ▶ running (blue), ⚠ needs you (amber), ⧗ waiting (grey); a legend
+  with counts shows when more than one state is present. Selecting a tile (click or Enter) views
+  its issue on GitHub (or its contract when the loaded events name no issue); the tooltip has the
+  full task id and title, tier, state, reason and since when.
+- **Five small panels**, each a few "number + label" rows with the detail in tooltips:
+  **Cost** (today against the daily cap, total to date), **Quality** (reverts, escaped defects,
+  reviewer objections, "Repairs worked: 50%"), **Human touch** (actions in the last 7 days, median
+  time to unblock a hand-off), **Liveness** (when the controller last polled and when the next
+  poll is expected) and **Recent activity** (the last 5 meaningful events, for example
+  "#29 iso-format-parser merged 19h").
+- **Folded details** (closed by default): **Latest checks** (newest 5, then "View all"),
+  **Where the time goes** (bug-fixed: medians, see below), **Task timeline** (clicking a task
+  name in the chart opens it) and the **Audit log** (type filter, integrity column, canonical
+  JSON, and the independent verifier's line).
+- **Footer:** "Read-only · verified in your browser".
 
-Empty states are one short muted line. On narrow screens the glance line wraps and the
-lanes stack.
+Empty states are one short muted line. On narrow screens the numbers, panels and board columns
+wrap.
 
 ### Health chip
 
@@ -102,7 +76,7 @@ lanes stack.
 |---|---|
 | … Loading (grey) | Nothing loaded yet and no error |
 | ✓ Healthy | Fresh data, a verified chain, a heartbeat within 8 h and a verifier anchor within 8 h |
-| ⚠ Paused (amber) | Dispatch is held by a gate (spend unknown, budget, Actions load) and nothing else is wrong. The kill switch doesn't count: "Factory off" has its own chip. With another warning it reads Degraded, with the pause listed |
+| ⚠ Paused (amber) | Dispatch is held by a gate (spend unknown, budget, Actions load) and nothing else is wrong. The kill switch doesn't count: "Factory off" has its own chip. With another warning it reads Degraded, with the pause listed. The state chip next to it names the gate |
 | ⚠ Degraded | The last refresh failed (older data is shown), the data is over 10 min old, the heartbeat is late (over 8 h) or unknown, the chain isn't verified, or the verifier is late (over 8 h) or not set up yet |
 | ✗ Down | No audit log, nothing loaded because of an error, a broken chain, a heartbeat missing from the window or over 12 h old, or a verifier over 26 h old or unknown (unreadable, empty, malformed, out of order or in the future) |
 
@@ -128,17 +102,19 @@ python3 -m http.server -d dashboard 8000
 
 - <http://localhost:8000/> reads the live audit log of `sabbasi3-factory-lab/chrono-node-rs`.
   Until the controller creates the `audit` branch, it shows "No audit log yet".
-- <http://localhost:8000/?fixture=1> loads `test/fixtures/sample.jsonl` instead, so you can
-  see a populated dashboard offline: a busy factory with two items that need you. The clock
-  is pinned just after the last sample event. The same URL works on Pages, because the
-  fixtures are published with the site.
-- <http://localhost:8000/?fixture=quiet> loads `test/fixtures/quiet.jsonl` and
-  `quiet-anchors.jsonl`: the state the live page is usually in. Nothing needs you, the
-  factory is off, dry run, no agents running, the verifier OK, ten merged PRs, and
-  heartbeats and anchors at the irregular cadence GitHub really delivers.
+- <http://localhost:8000/?fixture=1> loads `test/fixtures/sample.jsonl` and
+  `sample-meta.json` instead, so you can see a populated dashboard offline: a busy factory
+  with eight tasks (two done, two running, two needing you, two waiting), spend snapshots
+  joined with titled and untitled agent runs, and an escaped defect. The clock is pinned just
+  after the last sample event. The same URL works on Pages, because the fixtures are published
+  with the site. Sample mode makes no request to GitHub.
+- <http://localhost:8000/?fixture=quiet> loads `test/fixtures/quiet.jsonl`, `quiet-anchors.jsonl`
+  and `quiet-meta.json`: a quiet factory. Nothing needs you, the factory is off, dry run, all
+  three tasks done, the verifier OK, ten merged owner PRs, and heartbeats and anchors at the
+  irregular cadence GitHub really delivers.
 
 Other query parameters: `?poll=N` (seconds between checks, 10–3600, default 30) and
-`?days=N` (days of day files to load, 1–31, default 7).
+`?days=N` (days of day files to load, 1–31, default 14, the window of the medians).
 
 ## Run the tests
 
@@ -155,7 +131,8 @@ the macOS app. Without one it's skipped locally and fails when `CI` is set. It s
 `dashboard/` on an ephemeral local port, opens both `?fixture=1` and `?fixture=quiet` at
 1440×900 and 390×844 and checks these budgets on each:
 
-- at most 80 visible words above the fold at 1440×900;
+- at most 150 visible words above the fold at 1440×900 (it was 80; the owner approved 150 for
+  the one-screen layout, where the board and the small panels are above the fold too);
 - at most 250 visible words in total (closed `<details>`, hidden elements and tooltips
   don't count);
 - no visible sentence longer than 8 words.
@@ -163,20 +140,22 @@ the macOS app. Without one it's skipped locally and fails when `CI` is set. It s
 A word is a whitespace-separated token with a letter or digit, so icons, "·" and "—" aren't
 words; a sentence ends at a "·", "|", ".", "!" or "?", a line break or the edge of its
 element. The exact rules are on `measureGlance()` in `test/glance-measure.mjs`. The test
-also checks the two-column layout, that tooltips open on keyboard focus, that "View all"
-works with Enter and Space, that focus survives a re-render, that no button or link text
-starts with "Open" (links out to GitHub say "View …"), that nothing is red or amber while
-the sample data is held back (the page shows "… Loading"), that "Factory off" is neutral
-grey, that the quiet page says "Nothing needs you" only once, that the Heartbeat, Verified
-and health tooltips show the observed cadence and the limits without adding visible words,
-and that the console stays clean. On failure it prints the offending words and sentences.
+also checks the one-screen layout (the four numbers in one row, the board and all five small
+panels above the fold, the details closed below them), that no raw ISO time is visible, that
+sample mode makes no GitHub request, the task board's state icons, colours, links and
+tooltips, the numbers and panel rows of both samples, that both themes really change the
+colours, that tooltips open on keyboard focus, that "View all" works with Enter and Space, that
+focus survives a re-render, that no button or link text starts with "Open" (links out to GitHub
+say "View …"), that nothing is red or amber while the sample data is held back (the page shows
+"… Loading"), that "Factory off" is neutral grey, that the liveness and health tooltips show the
+observed cadence and the limits without adding visible words, and that the console stays clean.
+On failure it prints the offending words and sentences.
 
-The quiet fixture is there because the busy one hid a real failure: with two items needing
-you, the sample passed the fold budget while the live page, with nothing needing you, had
-82 words above the fold ("Nothing needs you" twice, plus the seventh tile). Against that
-design the quiet fixture measures 81 and fails, as it should.
+The quiet fixture is there because the busy one once hid a real failure: with two items
+needing you, the sample passed the fold budget while the live page, with nothing needing you,
+didn't. Measure the live page too after a layout change (below).
 
-To measure the live page (four API requests), or save screenshots:
+To measure the live page (about nine API requests on a first load), or save screenshots:
 
 ```sh
 node dashboard/test/glance-measure.mjs                  # live data
@@ -194,31 +173,55 @@ After changing `make-fixture.mjs`, regenerate the fixtures with
    with `If-None-Match` set to the last ETag.
 2. When the branch head changes, it lists the `audit/` tree at that commit
    (`GET /git/trees/<sha>:audit?recursive=1`, one more API call per head change), then
-   fetches only the day files from the last 7 UTC days that exist, from
+   fetches only the day files from the last 14 UTC days that exist, from
    `raw.githubusercontent.com` pinned to the head SHA, so raw caching can't serve stale
    files. Skipping missing days keeps the console free of 404 errors. If the listing
-   fails, it falls back to fetching all 7 days and treats a 404 as an empty day.
+   fails, it falls back to fetching all 14 days and treats a 404 as an empty day.
 3. A missing `audit` branch shows "No audit log yet" and is re-checked every 5 minutes.
 4. It reads the open-PR lists of `sabbasi3-factory-lab/chrono-node-rs` and
    `sabbasi3-factory-lab/factory` (`GET /pulls?state=open&per_page=100`, with ETags):
    after an audit head change but at most every 5 minutes, and at least every 15. v1
-   events have no "closed" PR event and no human-tier PR events, so these lists decide
-   which PRs are still open and which owner reviews are waiting. PR bodies are only
-   matched for a tier line and never shown or kept. If a list can't be read, or the last
-   good read is over 20 minutes old, the page says the PR state is unknown instead of
-   guessing. With them, one more call (`GET /issues?state=open`, which lists open issues
-   and PRs) drops Needs-you items and Running rows whose issue or PR is closed now: the
-   audit log has no event for an issue or PR closed by hand. When that list is unknown
-   (or a full page of 100, so possibly cut short), nothing is dropped.
+   events have no human-tier PR events, so these lists decide which owner reviews are
+   waiting. PR bodies are only matched for a tier line and never shown or kept. If a list
+   can't be read, or the last good read is over 20 minutes old, the page says the review list
+   is unavailable instead of guessing. With them, one more call (`GET /issues?state=open`,
+   which lists open issues and PRs) gives the **closed rule** for every view of in-flight work
+   (`isClosedRef()` in `lib.js`): a Needs-you item, a running row or a running task on the board
+   whose issue, or the PR it points at, is closed now is dropped (the audit log has no event for
+   an issue or PR closed by hand). When that list is unknown (or a full page of 100, so possibly
+   cut short), or the work is newer than the list, nothing is dropped.
 5. It reads the independent verifier's anchors file from `raw.githubusercontent.com` at
    most every 5 minutes; until the `anchors` branch exists, one API call at most every 15
    minutes checks for it instead (see [Integrity](#integrity)).
+6. It reads the **task catalog** from `raw.githubusercontent.com` (no API cost) on load and
+   then hourly: `main/scripts/seed-backlog/taskmap.yaml` (the task ids and areas, flow- or
+   block-style entries) and every task's generated contract `main/contracts/<id>.yaml` (title,
+   tier, area, `depends_on`). A failed task map is retried after 5 minutes; meanwhile the board
+   shows the tasks seen in the audit log and says the task map is unavailable. A missing contract
+   only leaves that task's tier unknown.
+7. It reads the **task issues**, one API call with an ETag:
+   `GET /repos/sabbasi3-factory-lab/chrono-node-rs/issues?state=all&labels=factory:task&per_page=100`.
+   Each issue's task id comes from the hidden `<!-- factory-task: <id> -->` marker in its body,
+   else the title prefix (`<id>: Port <Class>`); PRs are ignored and bodies aren't kept. On load,
+   then at most every 30 minutes, or sooner (at most every 2 minutes) when the audit log shows a
+   new `task_done` or `merged`; only with at least 6 API requests left. If it can't be read, the
+   board falls back to the audit log (the last good list is kept if there is one) and its
+   tooltips say so.
+8. It reads the **agent workflow run lists** for the cost join, three API calls with ETags:
+   `GET /repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/{implement,repair,review}.lock.yml/runs?per_page=100`.
+   Only when a spend snapshot names a run id the lists don't have yet (each id is looked for
+   once), at most every 10 minutes, and only with at least 8 API requests left in the hour.
+   If they can't be read, the cost per task shows "—" and its tooltip says why; the totals,
+   which need only the snapshots, still show.
 
 **Rate limits.** Without a token, GitHub allows 60 API requests an hour per IP, and
 conditional requests that return 304 still count against it (they're only free when
-authenticated). So the dashboard spreads the remaining requests over the time left in
-the rate-limit window: without a token that's about one check a minute; with a token it
-checks every 30 s. The "updated" tooltip and Settings show the requests left and the
+authenticated). A first load takes about ten (branch, tree, two PR lists, open issues, the
+anchors probe, task issues, three run lists). In steady state the side reads take about 14 an
+hour (the PR lists and open issues every 15 min, the task issues every 30 min, the run lists
+only for new runs, a few more after merges), and the branch polls are spread over the rest. The
+dashboard spreads the remaining requests over the time left in the rate-limit window: without a
+token that's about one check a minute; with a token it checks every 30 s. The "updated" tooltip and Settings show the requests left and the
 reset time. Hidden tabs don't poll. Raw file downloads don't use the API limit.
 
 **Optional token.** In Settings you can paste a read-only token (a fine-grained token with
@@ -233,7 +236,7 @@ because new events arrived, focus returns to the same element within the same ta
 
 The Content-Security-Policy allows scripts and styles only from the site itself (no
 inline scripts), and network requests only to the site, `api.github.com` and
-`raw.githubusercontent.com`.
+`raw.githubusercontent.com`. Every request is a GET.
 
 ## Integrity
 
@@ -254,8 +257,8 @@ that file from `raw.githubusercontent.com` (no API cost) at most every 5 minutes
 every line's exact keys, types and formats, that it is canonical JSON, and that `at` and
 `events` never go down. It doesn't recompute hashes. There's no separate chip: the
 verifier is part of the health chip (see [Health chip](#health-chip)), whose tooltip says,
-for example, "Verified 23m ago · 41 anchors", and of the "Verified" tile: green up to 8 h,
-amber after 8 h, red after 26 h. It's also red ("Verifier unknown", health Down) if the
+for example, "Verified 23m ago · 41 anchors": fine up to 8 h, Degraded after 8 h, Down after
+26 h. It's also Down ("Verifier unknown", health Down) if the
 file can't be read, is empty, has any malformed or out-of-order line, or its newest anchor
 is in the future. A 404 reads "Verifier not set up" in amber (health Degraded): the branch
 is created by the workflow's first successful run. Until the
@@ -263,38 +266,48 @@ branch exists, the page checks for it with one API call at most every 15 minutes
 (`GET /git/matching-refs/heads/anchors`, which answers `[]` rather than 404) instead of
 fetching the raw file, so the console stays free of 404 errors. The audit log section has a
 muted line with the details: last run, anchor count, and how many events the newest anchor
-covers (more than the page loads, since the page reads only 7 days) with its audit head.
+covers (more than the page loads, since the page reads only 14 days) with its audit head.
 With `?fixture=1` it reads `test/fixtures/anchors.jsonl`, with `?fixture=quiet`
 `test/fixtures/quiet-anchors.jsonl`.
 
 ## How the panels are derived
 
-| Item | Derivation |
+Drill tasks (`drill/*`, the factory's own fire drills) are left out of every task aggregate.
+"Real" means not a dry-run plan (`isPlanOnly()`); observed facts such as `merged` always count.
+
+| Item | Derivation (`lib.js`) |
 |---|---|
-| Agents running | `dispatched` and `repair_dispatched` attempts not yet retired, against the WIP limit of 3 (`policies/limits.yaml`). An attempt retires on its `run_finished`, a later attempt for the same task, the task's PR being `merged`, the controller's `task_done`, or a `needs_human` or `cancelled` for the task. The count is real (with a spinner, elapsed time and task link per agent) once the window has a `run_finished` or a live `task_done`, because the controller then closes the lifecycle of every task it dispatches. Without either, the count is "—" while attempts are listed (they may have finished), and the cards show a "?" instead of a spinner. Dry-run dispatches are plans, so they're counted separately as "planned, not running" |
-| Merge queue | PRs `queued`, minus later `dequeued` or `merged` |
-| Merged today | `merged` events whose `merged_at` is today (UTC) |
-| Zero-touch rate | Merged factory PRs (a `merged` or other event links the PR to a `task`) with no `human_action` on that PR, over the window. "—" until a factory PR merges |
-| AIC today | The newest real (`dry_run: false`) `spend_snapshot` for today (UTC): the controller's total, measured from gh-aw usage artifacts plus 900 AIC reserved per run still in flight. The tooltip splits it into measured and reserved, unless the snapshot lists only some of the runs (the controller lists at most 50): then the total stands and the split is shown as unavailable. If `run_finished` events add up to more today, that sum is used (as in the controller). With no snapshot today, it's the `run_finished` sum. Against the 10,000 AIC daily budget (`policies/budgets.yaml`): amber at 80%, red at 100% |
-| Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue). An item closes when a later event for the same task, PR or issue shows it moved on: `ready`, `picked`, `dispatched`, `repair_dispatched`, `run_started`, `contract_pinned`, `human_action`, `merged`, `cancelled`, `accepted` or `rejected`. A controller decision logged in dry-run mode is only a plan, so it doesn't close an item; observed facts (`human_action`, `merged`, …) do, even though every v1 payload carries `dry_run: true` |
-| Kill switch | `factory_enabled` from the latest `heartbeat` |
-| Factory version, dry run | `factory_version` and `dry_run` from the latest event's payload |
-| Heartbeat age | Time since the latest `heartbeat`. Green with ✓ up to 8 h, amber with ⚠ after 8 h, red with ✗ after 12 h (the watchdog's alert limit) or when there's none. The tooltip adds the observed cadence: median and longest gap between the heartbeats in the window |
-| Trend lines | Per UTC day over the window: zero-touch rate so far (cumulative), share of `check_result` events with `success`, AIC (the day's newest `spend_snapshot`, or the `run_finished` sum if larger), `merged` count, median PR `opened_at` → `merged_at`, and `heartbeat` count (24 scheduled; GitHub delivers far fewer) |
-| Owner reviews ("Review and merge") | Open, non-draft PRs in either repo whose body has a `Tier:` line saying `human` or `owner` (markdown bold allowed, case-insensitive), or with an `owner-review`, `human-tier` or `needs-human` label. Listed with the audit items, oldest first, and counted toward the review-queue cap. If the lists can't be read, the panel says the review list is unavailable instead of "Nothing needs you" |
-| Pipeline lane | The latest stage event for the task (or task-less PR): `ready` → Ready; `picked`, `dispatched`, `run_started`, `repair_dispatched`, `run_finished` → Running; `pr_opened`, `dequeued` → PR open; `check_result` → Checks; `queued` → Merge queue; `merged` → Merged; `deployed`, `accepted` → Deployed. `cancelled` removes the card. Dry-run decisions never move a card. A card stays in PR open, Checks or Merge queue only if one of its PRs is open on GitHub now; otherwise it goes to the muted "Closed" count. Without a current open-PR list, those lanes say "PR state unknown". With `?fixture=1`, PRs opened and never merged count as open |
-| Time per stage | First time each stage (ready → picked → running → pr-open → checks → queued → merged → deployed) was reached, per task, or per PR when the PR has no task. Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp. A skipped stage shows "(to …)" |
+| Health chip, kill switch | As before: `healthSummary()`, and `factory_enabled` from the latest `heartbeat` |
+| State | `stateLine()`: the newest `dispatch_state` if paused by a gate; otherwise from the board: running tasks, tasks needing you, all done, ready tasks waiting for a slot, tasks waiting on dependencies |
+| Task board | `taskBoard()`: per task of the catalog, **done** when its task issue is closed as "completed" (no audit events needed); while the issue is open, only after the controller's `task_done`; an issue closed otherwise is never done. Without a known issue (or when the issue list can't be read): after a `merged` or `task_done` not followed by a reopening `ready`, `auto_ready`, `dispatched` or `repair_dispatched`. The tile links to the task issue; **needs you** with an open Needs-you item for the task; **running** once real work started (`dispatched`, `repair_dispatched` or `review_dispatched`) and not done, unless its issue or current PR is closed (the closed rule); **waiting** otherwise: a dependency not done, ready but no free slot, not started, closed without a merge, or no events in the loaded window. "Since" is when it entered that state |
+| Tasks done | Done tiles over all tiles, and done per tier (from the contracts) |
+| Issue → merged | `issueToMerged()`: per task merged in the last 14 days, from its first real `auto_ready` (else its first real `dispatched`) to its last `merged` (`merged_at`); the median |
+| Cost per task | `costJoin()` + `medianTaskCost()`: each run's latest measured AIC across the real `spend_snapshot` events (a "reserved" entry is a placeholder and never replaces a measurement), joined with the run lists. Implement and repair runs name their task in the title ("Implement <task> #<issue> attempt <n>"); a review run ("Review one factory PR"), or an older untitled implement or repair run ("Implement one factory task"), is matched to the `review_dispatched`, `dispatched` or `repair_dispatched` event it was created at or within 30 min after (nearest pairs first, each event and run once). A task's cost is the sum over its runs; the number is the median over the done tasks with attributed cost, in dollars (1 AIC = $0.01) |
+| Needs you | Open `needs_human` and `stale_contract` items, one per task (or PR/issue), plus owner reviews. An item closes when a later event for the same task, PR or issue shows it moved on: `ready`, `picked`, `dispatched`, `repair_dispatched`, `run_started`, `contract_pinned`, `human_action`, `merged`, `cancelled`, `accepted` or `rejected` (real ones only), or when its issue or PR is closed (the closed rule) |
+| Owner reviews | Open, non-draft PRs in either repo whose body has a `Tier:` line saying `human` or `owner` (markdown bold allowed, case-insensitive), or with an `owner-review`, `human-tier` or `needs-human` label |
+| Cost: today | The newest real `spend_snapshot` for today (UTC), measured plus reserved for runs in flight (a larger `run_finished` sum wins, as in the controller), against the daily cap `policies/budgets.yaml` `factory_per_day.max_aic` (10,000 AIC = $100, `DEFAULTS.aicBudget`): amber at 80%, red at 100% |
+| Cost: to date | The sum of every run's latest measured AIC in the loaded window ("to date" when the window reaches the log's first event, else "in 14 days"). The tooltip splits it by workflow, drills and unattributed runs, and lists AIC per day |
+| Reverts | Real `auto_revert` events |
+| Escaped defects | Main commits whose post-merge `ci` failed (`check_result` with event `push`, workflow `ci`, conclusion `failure`), once per commit, leaving out merge commits of drill tasks |
+| Reviewer objections | Real `needs_human` with reason `review_objected` |
+| Repairs worked | Per real `repair_dispatched`: worked when the task's PR later merged with no `needs_human` for the task in between, failed when a `needs_human` came first, else pending; worked ÷ (worked + failed) |
+| Human actions | `human_action` events in the last 7 days (reviews and others) plus `queued` events by a person (an actor that isn't a `[bot]`) |
+| To unblock | `humanTouch()`: per real `needs_human`, the time to the next real event for the same task, PR or issue that resolves a Needs-you item (above) or closes the task (`task_done`); the median |
+| Polled | The newest controller event (`heartbeat`, `spend_snapshot`, `dispatch_state`, dispatches, `auto_ready`, `auto_merge`, `needs_human`, `task_done`, …), coloured by the heartbeat's age (amber after 8 h, red after 12 h) |
+| Next | `liveness()`: with work in flight or dispatch paused by a gate, the controller's follow-up chain polls again ~10 min after its last poll; otherwise, or once that time has passed, the next full hour (the schedule; GitHub's cron often runs hours late, so the tooltip shows the observed cadence) |
+| Recent activity | `recentActivity()`: the newest 5 real events as "#<issue or PR> <task> <verb>", skipping heartbeats, spend snapshots, dispatch states, dequeues, passing checks and duplicates (`task_done`, `handoff_done`, `auto_merge`) |
+| Where the time goes | `stageSummary()`: per non-drill task merged in the last 14 days (plain PRs without a task are left out), the time from each stage it reached (ready, picked, running, PR open, checks, queued, merged) to the next, labelled with the short task name; the top bar is the **median** per stage over those tasks, and the insight names the stage with the largest median |
+| Time per stage | First time each stage was reached (`auto_ready` and `ready` count as ready). Uses the payload's own time (`opened_at`, `completed_at`, `at`, `merged_at`) where there is one, otherwise the event timestamp |
 
 **Not derivable from v1 events yet:**
 
-- *Human-tier PRs* and *closed PRs*: v1 events carry neither, so they're read from the open-PR lists (see above) until the audit log records them.
-- *Whether an agent is still running*, in a log with neither `run_finished` nor the controller's `task_done`: the agents count shows "—" while attempts are listed.
-- *Tokens and AIC* while a run is in progress: they arrive only with `run_finished`, so
-  agent cards show elapsed time only until then. Cost says "No cost data yet".
-- *Golden pass %, repairs per task, escaped bugs, and flow/throughput charts* from
-  DESIGN §11 aren't in v1. They need outcome events. "Where the time goes" uses the
-  stage events that exist; per-job durations (queue wait, run setup, detection) need
-  `run_finished` details.
+- *Human-tier PRs* and *closed issues or PRs*: v1 events carry neither, so they're read from
+  GitHub's open lists (see above).
+- *Running or waiting tasks without events in the window*: done tasks come from their issues,
+  but a task with an open issue and no events in the last 14 days shows as waiting ("no events in
+  the loaded window"); load more with `?days=31`.
+- *Golden pass %, per-job durations (queue wait, run setup, detection) and deploys* need
+  outcome events the controller doesn't log yet.
 
 ## Watchdog
 

@@ -10,7 +10,9 @@
 // The CLI loads the page once (four API requests in live mode) and then measures and,
 // with --shots, screenshots it at 1440x900 and 390x844 in the light and dark themes.
 
-export const BUDGETS = Object.freeze({ foldWords: 80, totalWords: 250, sentenceWords: 8, foldY: 900 });
+// foldWords was 80. The owner asked for a one-screen layout (status line, key numbers, task board
+// and small panels all above the fold at 1440x900) and approved raising it to 150 for that layout.
+export const BUDGETS = Object.freeze({ foldWords: 150, totalWords: 250, sentenceWords: 8, foldY: 900 });
 
 /** Truthy once the dashboard has rendered its data (app.js sets data-ready="1"). */
 export const READY_EXPR = "document.documentElement.dataset.ready === '1'";
@@ -160,34 +162,27 @@ export function measureGlance({ foldY = 900, maxSentenceWords = 8 } = {}) {
 }
 
 /**
- * The detail area's layout: two independent column stacks (.cols > .col), each section
- * starting right below the previous one in its column (its bottom plus the column gap),
- * and how much empty space each panel has below its content (`slack`, in px).
+ * The one-screen layout: the key numbers, the task board, the small panels and the folded
+ * details, as document rectangles ({ id, top, bottom, left, width }, in px from the top of the
+ * page), so a test can check what sits above the fold.
  */
 export function measureLayout() {
-  const px = (v) => Number.parseFloat(v) || 0;
-  const box = (el) => el.getBoundingClientRect();
-  const shown = (el) => getComputedStyle(el).display !== 'none' && box(el).height > 0;
-  const cols = [...document.querySelectorAll('main .cols > .col')].map((col) => {
-    const gap = px(getComputedStyle(col).rowGap);
-    const sections = [...col.children].filter(shown);
-    return {
-      left: Math.round(box(col).left),
-      top: Math.round(box(col).top),
-      width: Math.round(box(col).width),
-      sections: sections.map((sec) => sec.getAttribute('aria-labelledby')),
-      // 0 when each section starts exactly a gap below the previous one.
-      offsets: sections.slice(1).map((sec, i) => Math.round((box(sec).top - box(sections[i]).bottom - gap) * 10) / 10),
-    };
-  });
-  const slack = [...document.querySelectorAll('main .cols .panel')].filter(shown).map((panel) => {
-    const cs = getComputedStyle(panel);
-    const inner = box(panel).bottom - px(cs.borderBottomWidth) - px(cs.paddingBottom);
-    const kids = [...panel.children].filter((k) => shown(k) && getComputedStyle(k).position !== 'absolute');
-    const contentBottom = Math.max(box(panel).top + px(cs.borderTopWidth) + px(cs.paddingTop), ...kids.map((k) => box(k).bottom + px(getComputedStyle(k).marginBottom)));
-    return { id: panel.id, slack: Math.round(inner - contentBottom) };
-  });
-  return { cols, slack };
+  const rect = (el) => {
+    const b = el.getBoundingClientRect();
+    return { id: el.id || el.getAttribute('aria-labelledby') || el.className, top: Math.round(b.top + scrollY), bottom: Math.round(b.bottom + scrollY), left: Math.round(b.left), width: Math.round(b.width) };
+  };
+  const all = (sel) => [...document.querySelectorAll(sel)].filter((el) => el.getBoundingClientRect().height > 0).map(rect);
+  const one = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? rect(el) : null;
+  };
+  return {
+    numbers: all('.numbers-main > .ntile, .numbers > .ntile'),
+    board: one('#board'),
+    tiles: document.querySelectorAll('#board .tile').length,
+    minis: all('.minis > .mini'),
+    folds: all('.folds > section'),
+  };
 }
 
 /** A short human-readable report of one measurement. */

@@ -6,7 +6,11 @@
 // - fixtures/quiet.jsonl and fixtures/quiet-anchors.jsonl (?fixture=quiet): the quiet
 //   state the live page is usually in: nothing needs the owner, factory off, dry run,
 //   no agents running, ten merged PRs, and heartbeats and anchors at the irregular
-//   cadence GitHub's scheduler really delivers (every 2 to 8 h, not hourly).
+//   cadence GitHub's scheduler really delivers (every 2 to 8 h, not hourly), plus three
+//   tasks done earlier, so the board reads "all done".
+// - fixtures/sample-meta.json and quiet-meta.json: the task map, contracts and agent run lists
+//   each sample uses instead of GitHub (flow- and block-style task map entries, `[]` and block
+//   dependency lists, titled and untitled runs).
 //
 //   node dashboard/test/make-fixture.mjs
 //
@@ -20,6 +24,10 @@ export const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample.jsonl', imp
 export const ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/anchors.jsonl', import.meta.url));
 export const QUIET_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet.jsonl', import.meta.url));
 export const QUIET_ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-anchors.jsonl', import.meta.url));
+// Stand-ins for the task map, the contracts and the Actions run lists, so sample mode reads nothing
+// from GitHub: { taskmap, contracts: { id: yaml }, runs: { implement, repair, review } }.
+export const META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample-meta.json', import.meta.url));
+export const QUIET_META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-meta.json', import.meta.url));
 // The preview pins its clock 12 min after the last event, so ages and "today" read as
 // they would live.
 export const FIXTURE_NOW = '2026-10-16T11:12:00Z';
@@ -61,6 +69,8 @@ const STEPS = [
   ['2026-10-15T13:02:00Z', { type: 'human_action', action: 'review', pr: 5, reviewer: OWNER, state: 'approved', submitted_at: '2026-10-15T13:01:48Z' }],
   ['2026-10-15T13:03:00Z', { type: 'queued', pr: 5, actor: OWNER, at: '2026-10-15T13:02:55Z' }],
   ['2026-10-15T13:20:00Z', { type: 'merged', pr: 5, merge_commit_sha: hex('m5'), merged_at: '2026-10-15T13:19:30Z' }],
+  // Post-merge ci on main fails for the owner's PR 5: an escaped defect.
+  ['2026-10-15T13:31:00Z', { type: 'check_result', workflow: 'ci', run_id: 3010, run_attempt: 1, event: 'push', head_sha: hex('m5'), prs: [], conclusion: 'failure', completed_at: '2026-10-15T13:30:41Z', failure_signature: 'test:golden-en-casual' }],
   ['2026-10-15T13:50:00Z', { type: 'ready', task: 'en/ordinal', issue: 41, contract_sha: hex('c41', 7) }],
   ['2026-10-15T13:58:00Z', { type: 'picked', task: 'en/ordinal', issue: 41, effect: 'pick', reason: 'priority' }],
   ['2026-10-15T14:00:00Z', { type: 'dispatched', task: 'en/ordinal', issue: 41, attempt: 1, contract_sha: hex('c41', 7), workflow: 'implement', run_id: 4001, model: 'pinned-model-a', effect: 'dispatch', reason: 'ready' }],
@@ -71,7 +81,9 @@ const STEPS = [
   ['2026-10-15T15:10:00Z', { type: 'human_action', action: 'review', pr: 6, reviewer: OWNER, state: 'commented', submitted_at: '2026-10-15T15:09:12Z' }],
   ['2026-10-15T15:12:00Z', { type: 'queued', pr: 6, actor: CONTROLLER, at: '2026-10-15T15:11:58Z' }],
   ['2026-10-15T15:30:00Z', { type: 'merged', pr: 6, task: 'en/ordinal', merge_commit_sha: hex('m6'), merged_at: '2026-10-15T15:29:44Z' }],
+  ['2026-10-15T15:31:00Z', { type: 'task_done', task: 'en/ordinal', issue: 41, pr: 6, effect: 'close_task', reason: 'task_merged' }],
   ['2026-10-15T15:45:00Z', { type: 'deployed', task: 'en/ordinal', pr: 6, merge_commit_sha: hex('m6'), deployment_id: 5001 }],
+  ['2026-10-15T15:46:00Z', { type: 'spend_snapshot', day: '2026-10-15', aic_today: 280, runs: [{ run_id: 4001, aic: 280, status: 'measured' }], runs_total: 1 }],
   ['2026-10-16T07:00:00Z', { type: 'needs_human', task: 'en/time-expression', issue: 45, attempt: 3, effect: 'label', reason: 'same-failure-signature' }],
   ['2026-10-16T08:00:00Z', { type: 'ready', task: 'en/weekday-parser', issue: 42, contract_sha: hex('c42', 7) }],
   ['2026-10-16T08:05:00Z', { type: 'picked', task: 'en/weekday-parser', issue: 42, effect: 'pick', reason: 'priority' }],
@@ -80,11 +92,14 @@ const STEPS = [
   ['2026-10-16T08:32:00Z', { type: 'pr_opened', pr: 7, task: 'en/weekday-parser', head_sha: hex('h7'), author: AGENT, opened_at: '2026-10-16T08:31:44Z' }],
   ['2026-10-16T08:45:00Z', { type: 'check_result', workflow: 'ci', run_id: 3005, run_attempt: 1, event: 'pull_request', head_sha: hex('h7'), prs: [7], conclusion: 'success', completed_at: '2026-10-16T08:44:21Z' }],
   ['2026-10-16T08:50:00Z', { type: 'check_result', workflow: 'gates', run_id: 3006, run_attempt: 1, event: 'pull_request', head_sha: hex('h7'), prs: [7], conclusion: 'success', completed_at: '2026-10-16T08:49:40Z', heldout_seed: '5521300987112340021' }],
+  ['2026-10-16T08:50:30Z', { type: 'review_dispatched', task: 'en/weekday-parser', issue: 42, pr: 7, head_sha: hex('h7'), run_id: 3006, effect: 'dispatch_workflow:review', reason: 'review_needed' }],
   ['2026-10-16T08:52:00Z', { type: 'queued', pr: 7, actor: CONTROLLER, at: '2026-10-16T08:51:51Z' }],
   ['2026-10-16T09:00:06Z', hb('2026-10-16T09', 2025, 1, 6)],
+  ['2026-10-16T09:00:20Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 1307, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 900, status: 'reserved' }], runs_total: 3 }],
   ['2026-10-16T09:00:30Z', { type: 'picked', task: 'en/month-parser', issue: 43, effect: 'pick', reason: 'priority' }],
   ['2026-10-16T09:01:00Z', { type: 'dispatched', task: 'en/month-parser', issue: 43, attempt: 1, contract_sha: hex('c43', 7), workflow: 'implement', run_id: 4102, model: 'pinned-model-a', effect: 'dispatch', reason: 'ready' }],
   ['2026-10-16T09:10:00Z', { type: 'merged', pr: 7, task: 'en/weekday-parser', merge_commit_sha: hex('m7'), merged_at: '2026-10-16T09:09:37Z' }],
+  ['2026-10-16T09:10:30Z', { type: 'task_done', task: 'en/weekday-parser', issue: 42, pr: 7, effect: 'close_task', reason: 'task_merged' }],
   ['2026-10-16T09:25:00Z', { type: 'deployed', task: 'en/weekday-parser', pr: 7, merge_commit_sha: hex('m7'), deployment_id: 5002 }],
   ['2026-10-16T09:40:00Z', { type: 'run_finished', task: 'en/month-parser', attempt: 1, run_id: 4102, model: 'pinned-model-a', tokens_input: 1130000, tokens_output: 30100, tokens_cache: 880000, aic: 410, duration_ms: 2280000 }],
   ['2026-10-16T09:41:00Z', { type: 'pr_opened', pr: 8, task: 'en/month-parser', head_sha: hex('h8'), author: AGENT, opened_at: '2026-10-16T09:40:39Z' }],
@@ -98,6 +113,8 @@ const STEPS = [
   ['2026-10-16T10:50:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:49:51Z' }],
   ['2026-10-16T10:55:00Z', { type: 'dequeued', pr: 9, actor: CONTROLLER, at: '2026-10-16T10:54:40Z' }],
   ['2026-10-16T10:58:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:57:30Z' }],
+  ['2026-10-16T10:59:00Z', { type: 'auto_ready', task: 'common/iso-date', issue: 47, reason: 'deps_merged' }],
+  ['2026-10-16T11:00:00Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 2617, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 410, status: 'measured' }, { run_id: 4103, aic: 900, status: 'reserved' }, { run_id: 4104, aic: 900, status: 'reserved' }], runs_total: 5 }],
   ['2026-10-16T11:00:03Z', hb('2026-10-16T11', 2027, 3, 13)],
 ];
 
@@ -183,6 +200,15 @@ const QUIET_PRS = [
   [25, '2026-10-16T11:30:44Z', 3, 0.4, 0.2],
 ];
 
+// Tasks done earlier in the quiet week: [task, issue, pr, auto_ready time, minutes to the PR,
+// minutes to the merge]. The check lands 4 min and the queue 5 min after the PR, so the merge must
+// come later than that. Their dispatches are dry-run plans; the merges are observed facts.
+const QUIET_TASKS = [
+  ['en/casual-time-parser', 31, 30, '2026-10-15T15:10:00Z', 6, 14],
+  ['en/month-name-parser', 32, 31, '2026-10-16T05:20:00Z', 7, 15],
+  ['common/iso-format-parser', 33, 32, '2026-10-16T14:40:00Z', 8, 21],
+];
+
 function quietSteps() {
   const steps = [];
   const add = (ms, payload) => steps.push([isoSeconds(ms), payload]);
@@ -211,6 +237,17 @@ function quietSteps() {
     check(merged - 10000, 'ci', 'merge_group');
     add(merged + 30000, { type: 'merged', pr, merge_commit_sha: hex(`qm${pr}`), merged_at: isoSeconds(merged) });
   }
+  for (const [task, issue, pr, ready, prMin, mergeMin] of QUIET_TASKS) {
+    const t0 = Date.parse(ready);
+    const head = hex(`qt${pr}`);
+    add(t0, { type: 'auto_ready', task, issue, reason: 'deps_merged' });
+    add(t0 + 20000, { type: 'dispatched', task, issue, attempt: 1, contract_sha: hex(`qc${issue}`), effect: 'dispatch_workflow:implement', reason: 'would_dispatch' });
+    add(t0 + prMin * 60000, { type: 'pr_opened', pr, head_sha: head, author: AGENT, opened_at: isoSeconds(t0 + prMin * 60000 - 10000) });
+    add(t0 + (prMin + 4) * 60000, { type: 'check_result', workflow: 'ci', run_id: runId++, run_attempt: 1, event: 'pull_request', head_sha: head, prs: [pr], conclusion: 'success', completed_at: isoSeconds(t0 + (prMin + 4) * 60000 - 15000) });
+    add(t0 + (prMin + 5) * 60000, { type: 'queued', pr, actor: CONTROLLER, at: isoSeconds(t0 + (prMin + 5) * 60000 - 5000) });
+    add(t0 + mergeMin * 60000, { type: 'merged', pr, task, merge_commit_sha: hex(`qtm${pr}`), merged_at: isoSeconds(t0 + mergeMin * 60000 - 20000) });
+    add(t0 + mergeMin * 60000 + 5000, { type: 'task_done', task, issue, pr, effect: 'close_task', reason: 'task_merged' });
+  }
   return steps.sort((a, b) => a[0].localeCompare(b[0]));
 }
 
@@ -221,6 +258,114 @@ export function buildQuietFixtureLines() {
 export function buildQuietAnchorLines() {
   return anchorLines(buildQuietFixtureLines(), QUIET_ANCHORS, 8001);
 }
+
+// --- Task map, contracts and agent run lists -----------------------------------------
+
+const tierOf = (id) => (id.startsWith('common/') ? 'auto-strict' : 'auto');
+const upstreamOf = (id) => id.split('/').pop().split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+
+function contractYaml(id, area, deps, blockDeps) {
+  return [
+    '# Generated by scripts/seed-backlog/seed.js from scripts/seed-backlog/taskmap.yaml.',
+    `id: ${id}`,
+    `title: Port ${upstreamOf(id)}`,
+    `tier: ${tierOf(id)}`,
+    `area: ${area}`,
+    'priority: 3',
+    ...(blockDeps && deps.length ? ['depends_on:', ...deps.map((d) => `  - ${d}`)] : [`depends_on: [${deps.join(', ')}]`]),
+    `upstream_class: ${upstreamOf(id)}`,
+    'acceptance:',
+    '  - golden:',
+    `      step: ${upstreamOf(id)}`,
+    '',
+  ].join('\n');
+}
+
+// [id, area, depends_on, block-style list]
+const SAMPLE_TASKS = [
+  ['common/iso-date', 'common-parsers', [], false],
+  ['en/ordinal', 'en-numeric-dates', [], true],
+  ['en/weekday-parser', 'en-casual', [], false],
+  ['en/casual-date', 'en-casual', ['en/weekday-parser'], true],
+  ['en/time-expression', 'en-casual', [], false],
+  ['en/month-parser', 'en-month-names', [], false],
+  ['en/range', 'en-month-names', ['en/month-parser', 'en/ordinal'], true],
+  ['en/relative', 'en-relative', [], false],
+];
+
+function taskmapYaml(tasks) {
+  const lines = [
+    '# Sample task map (make-fixture.mjs): flow and block entries, like scripts/seed-backlog/taskmap.yaml.',
+    'version: 1',
+    'done:',
+    '  - { step: ENCasualDateParser, rust: src/locales/en/parsers/casual_date.rs }',
+    'tasks:',
+  ];
+  tasks.forEach(([id, area], i) => {
+    if (i === 3) {
+      // One block-style entry with a nested list, as in the real task map.
+      lines.push(`  - id: ${id}`, `    step: ${upstreamOf(id)}`, `    area: ${area} # comment`, '    unit:', '      cases:', '        - { test: today, text: "today", expect: { text: "today" } }');
+    } else lines.push(`  - { id: ${id}, step: ${upstreamOf(id)}, source: x/${upstreamOf(id)}.ts, area: ${area} }`);
+  });
+  lines.push('acceptance:', '  clippy: deny-warnings', '');
+  return lines.join('\n');
+}
+
+const run = (id, createdAt, title) => ({ id, created_at: createdAt, display_title: title });
+
+// A task-issue list entry as GitHub returns it (only the fields the page reads). `marker: false`
+// leaves the body without the hidden task marker, so the title prefix is used.
+const issue = (number, task, state, closedAt = null, { marker = true, reason = state === 'closed' ? 'completed' : null, pr = false } = {}) => ({
+  number,
+  title: `${task}: Port ${upstreamOf(task)}`,
+  body: `${marker ? `<!-- factory-task: ${task} -->\n` : ''}Port \`${upstreamOf(task)}\`.`,
+  state,
+  state_reason: reason,
+  closed_at: closedAt,
+  ...(pr ? { pull_request: { url: 'x' } } : {}),
+});
+
+export function buildMeta() {
+  return {
+    taskmap: taskmapYaml(SAMPLE_TASKS),
+    contracts: Object.fromEntries(SAMPLE_TASKS.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
+    runs: {
+      implement: [
+        run(4104, '2026-10-16T10:31:06Z', 'Implement en/casual-date #44 attempt 1'),
+        run(4102, '2026-10-16T09:01:07Z', 'Implement en/month-parser #43 attempt 1'),
+        // Older runs had no task in the title: attributed by dispatch time.
+        run(4101, '2026-10-16T08:06:08Z', 'Implement one factory task'),
+        run(4001, '2026-10-15T14:00:09Z', 'Implement en/ordinal #41 attempt 1'),
+      ],
+      repair: [run(4103, '2026-10-16T10:00:08Z', 'Repair en/month-parser #43 attempt 2')],
+      review: [run(4105, '2026-10-16T08:51:10Z', 'Review one factory PR')],
+    },
+    // GET /issues?state=all&labels=factory:task. en/range has no issue (its tile links the contract).
+    issues: [
+      issue(47, 'common/iso-date', 'open'),
+      issue(46, 'en/relative', 'open', null, { marker: false }),
+      issue(45, 'en/time-expression', 'open'),
+      issue(44, 'en/casual-date', 'open'),
+      issue(43, 'en/month-parser', 'open'),
+      issue(42, 'en/weekday-parser', 'closed', '2026-10-16T09:10:31Z'),
+      issue(41, 'en/ordinal', 'closed', '2026-10-15T15:31:02Z'),
+      issue(40, 'drill/repair-ok', 'closed', '2026-10-15T09:00:00Z', { reason: 'not_planned' }),
+      issue(7, 'en/weekday-parser', 'closed', '2026-10-16T09:10:00Z', { pr: true }), // a PR: ignored
+    ],
+  };
+}
+
+export function buildQuietMeta() {
+  const tasks = QUIET_TASKS.map(([id]) => [id, id.startsWith('common/') ? 'common-parsers' : id.includes('month') ? 'en-month-names' : 'en-casual', [], false]);
+  return {
+    taskmap: taskmapYaml(tasks),
+    contracts: Object.fromEntries(tasks.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
+    runs: { implement: [], repair: [], review: [] }, // dry run: no agent ran
+    issues: QUIET_TASKS.map(([id, num, , ready, , mergeMin]) => issue(num, id, 'closed', new Date(Date.parse(ready) + mergeMin * 60000 + 10000).toISOString().replace(/\.\d{3}Z$/, 'Z'))),
+  };
+}
+
+export const metaText = (meta) => JSON.stringify(meta, null, 2) + '\n';
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const lines = buildFixtureLines();
@@ -235,4 +380,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const quietAnchors = buildQuietAnchorLines();
   writeFileSync(QUIET_ANCHORS_FIXTURE_PATH, quietAnchors.join('\n') + '\n');
   console.log(`wrote ${quietAnchors.length} anchors to dashboard/test/fixtures/quiet-anchors.jsonl`);
+  writeFileSync(META_FIXTURE_PATH, metaText(buildMeta()));
+  writeFileSync(QUIET_META_FIXTURE_PATH, metaText(buildQuietMeta()));
+  console.log('wrote dashboard/test/fixtures/sample-meta.json and quiet-meta.json');
 }

@@ -338,18 +338,6 @@ export function healthSummary({ loaded = false, noLog = false, error = null, cha
   return { level: worst, label, reasons };
 }
 
-/**
- * The heartbeat tile: { level, value }. Until the first load it's the neutral "loading"
- * level with "…", never a red alarm; after it, ok/warn/alert from heartbeat.level, and a
- * missing heartbeat is an alert with "—".
- */
-export function heartbeatTile(heartbeat, loaded) {
-  if (!loaded) return { level: 'loading', value: '…' };
-  if (heartbeat?.ageMin == null) return { level: 'alert', value: '—' };
-  const level = heartbeat.level === 'ok' ? 'ok' : heartbeat.level === 'warn' ? 'warn' : 'alert';
-  return { level, value: compactAge(heartbeat.ageMin * 60000) };
-}
-
 /** One-token age: "45s", "12m", "7h", "3d"; "—" when unknown. */
 export function compactAge(ms) {
   if (!isNum(ms) || ms < 0) return '—';
@@ -517,21 +505,6 @@ export function verifierReason(v) {
     return `Verified ${compactAge(v.ageMin * 60000)} ago · ${v.count.toLocaleString('en-US')} anchor${v.count === 1 ? '' : 's'}`;
   }
   return `Verifier unknown: ${v.title ?? v.reason}`;
-}
-
-/** Anchors per UTC day over the window, oldest first: the "Verified" tile's trend (24 scheduled). */
-export function anchorsPerDay(anchors, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
-  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
-  const labels = [];
-  for (let i = days - 1; i >= 0; i--) labels.push(utcDay(end - i * 86400000));
-  const index = new Map(labels.map((d, i) => [d, i]));
-  const counts = labels.map(() => 0);
-  for (const a of anchors || []) {
-    const ms = parseUtcSeconds(a?.at);
-    const i = ms == null ? undefined : index.get(utcDay(ms));
-    if (i != null) counts[i]++;
-  }
-  return { days: labels, counts };
 }
 
 // ---------------------------------------------------------------------------
@@ -908,11 +881,7 @@ export function deriveMetrics(events, { now = Date.now(), ...overrides } = {}) {
  */
 export function dropClosed(m, open, asOf = null) {
   if (!m || !(open instanceof Set) || !isNum(asOf)) return m;
-  const newer = (x) => {
-    const t = x.since != null ? parseTime(x.since) : x.startedAt;
-    return !isNum(t) || t > asOf;
-  };
-  const closed = (x) => !newer(x) && ((isNum(x.issue) && !open.has(x.issue)) || (isNum(x.pr) && !open.has(x.pr)));
+  const closed = (x) => isClosedRef({ issue: x.issue, pr: x.pr, at: x.since != null ? parseTime(x.since) : x.startedAt }, open, asOf);
   const items = m.needsYou.items.filter((i) => !closed(i));
   const rows = m.running.rows.filter((r) => !closed(r));
   return {
@@ -925,6 +894,17 @@ export function dropClosed(m, open, asOf = null) {
       closedDropped: m.running.rows.length - rows.length,
     },
   };
+}
+
+/**
+ * The one "closed" rule for in-flight work (Needs-you items, running rows, the task board): a
+ * reference `{ issue, pr, at }` is closed when its issue, or the PR it points at, is not in `open`
+ * (the source repo's open issue and PR numbers, read at `asOf`, ms). Never closed when the open set
+ * is unknown, or when `at` (when the item started) is missing or newer than the snapshot.
+ */
+export function isClosedRef(ref, open, asOf) {
+  if (!ref || !(open instanceof Set) || !isNum(asOf) || !isNum(ref.at) || ref.at > asOf) return false;
+  return (isNum(ref.issue) && !open.has(ref.issue)) || (isNum(ref.pr) && !open.has(ref.pr));
 }
 
 function runKey(p, ev) {
@@ -962,6 +942,7 @@ function tokensPerTask(finished) {
 
 const STAGE_OF = {
   ready: 'ready',
+  auto_ready: 'ready',
   picked: 'picked',
   dispatched: 'running',
   run_started: 'running',
@@ -1044,29 +1025,8 @@ export function timelineFor(events, subjectKey) {
   return out;
 }
 
-/**
- * Sparkline geometry: every valid point gets a marker; lines join only consecutive
- * valid points, so a gap (null) is never bridged.
- */
-export function sparkSegments(values) {
-  const points = [];
-  const segments = [];
-  let run = [];
-  (values || []).forEach((v, i) => {
-    if (isNum(v)) {
-      points.push({ i, v });
-      run.push({ i, v });
-    } else {
-      if (run.length > 1) segments.push(run);
-      run = [];
-    }
-  });
-  if (run.length > 1) segments.push(run);
-  return { points, segments };
-}
-
 // ---------------------------------------------------------------------------
-// v2 views: short SHAs, 7-day series, pipeline lanes, stage and cost charts
+// Short SHAs, medians and spend snapshots
 
 /** First 7 characters of a hex SHA; anything else is returned unchanged. */
 export function shortSha(value) {
@@ -1080,10 +1040,6 @@ function median(values) {
   return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
 }
 
-/**
- * Per-UTC-day series for the KPI trend lines, oldest day first. Rates are null on days
- * with nothing to measure, so a trend line shows a gap instead of a fake zero.
- */
 /**
  * The newest real (non-dry-run) `spend_snapshot` per UTC day: the controller's spend for that
  * day, measured from gh-aw usage artifacts plus reservations for runs still going.
@@ -1111,265 +1067,6 @@ export function spendSnapshots(events) {
     byDay.set(p.day, { t, at: ev.timestamp, total: p.aic_today, measured: complete ? measured : null, reserved: complete ? reserved : null, runs, listed: list.length });
   }
   return byDay;
-}
-
-export function dailySeries(events, { now = Date.now(), days = DEFAULTS.windowDays } = {}) {
-  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
-  const labels = [];
-  for (let i = days - 1; i >= 0; i--) labels.push(utcDay(end - i * 86400000));
-  const index = new Map(labels.map((d, i) => [d, i]));
-  const zeros = () => labels.map(() => 0);
-  const dayOf = (ms) => (ms == null ? null : index.get(utcDay(ms)) ?? null);
-
-  const prTask = prTaskMap(events);
-  const merged = zeros();
-  const aic = zeros();
-  const heartbeats = zeros();
-  const checksPassed = zeros();
-  const checksTotal = zeros();
-  const mergeMinutes = labels.map(() => []);
-  const factoryMerged = zeros();
-  const factoryMergedPrs = labels.map(() => []);
-  const opened = new Map();
-  const touched = new Set();
-
-  for (const ev of events) {
-    const p = ev.payload || {};
-    if (ev.type === 'human_action' && isNum(p.pr)) touched.add(p.pr);
-    if (ev.type === 'pr_opened' && isNum(p.pr) && !opened.has(p.pr)) opened.set(p.pr, eventTime(ev));
-  }
-  for (const ev of events) {
-    const p = ev.payload || {};
-    const d = dayOf(ev.type === 'run_finished' || ev.type === 'heartbeat' ? parseTime(ev.timestamp) : eventTime(ev));
-    if (d == null) continue;
-    switch (ev.type) {
-      case 'merged': {
-        merged[d]++;
-        const at = eventTime(ev);
-        if (isNum(p.pr) && opened.get(p.pr) != null && at != null) mergeMinutes[d].push((at - opened.get(p.pr)) / 60000);
-        if (isStr(p.task) || prTask.has(p.pr)) {
-          factoryMerged[d]++;
-          factoryMergedPrs[d].push(p.pr);
-        }
-        break;
-      }
-      case 'run_finished':
-        if (isNum(p.aic)) aic[d] += p.aic;
-        break;
-      case 'heartbeat':
-        heartbeats[d]++;
-        break;
-      case 'check_result':
-        checksTotal[d]++;
-        if (p.conclusion === 'success') checksPassed[d]++;
-        break;
-      default:
-        break;
-    }
-  }
-
-  // A day's spend snapshot is its total (run_finished, where present, can only raise it).
-  for (const [day, snap] of spendSnapshots(events)) {
-    const d = index.get(day);
-    if (d != null) aic[d] = Math.max(aic[d], snap.total);
-  }
-
-  // Zero-touch is cumulative across the window, so each point is "rate so far".
-  const zeroTouchPct = [];
-  let fm = 0;
-  let untouched = 0;
-  for (let i = 0; i < labels.length; i++) {
-    fm += factoryMerged[i];
-    untouched += factoryMergedPrs[i].filter((pr) => !touched.has(pr)).length;
-    zeroTouchPct.push(fm ? (untouched / fm) * 100 : null);
-  }
-  const passed = checksPassed.reduce((a, b) => a + b, 0);
-  const total = checksTotal.reduce((a, b) => a + b, 0);
-  return {
-    days: labels,
-    merged,
-    aic,
-    heartbeats,
-    checksPassPct: checksTotal.map((t, i) => (t ? (checksPassed[i] / t) * 100 : null)),
-    checks: { passed, total, pct: total ? (passed / total) * 100 : null },
-    mergeMedianMin: mergeMinutes.map(median),
-    mergeMedianAllMin: median(mergeMinutes.flat()),
-    zeroTouchPct,
-  };
-}
-
-export const PIPELINE_LANES = Object.freeze([
-  { key: 'ready', label: 'Ready' },
-  { key: 'running', label: 'Running' },
-  { key: 'pr-open', label: 'PR open' },
-  { key: 'checks', label: 'Checks' },
-  { key: 'queued', label: 'Merge queue' },
-  { key: 'merged', label: 'Merged' },
-  { key: 'deployed', label: 'Deployed' },
-]);
-
-const LANE_OF = {
-  ready: 'ready',
-  picked: 'running',
-  dispatched: 'running',
-  run_started: 'running',
-  repair_dispatched: 'running',
-  run_finished: 'running',
-  pr_opened: 'pr-open',
-  check_result: 'checks',
-  queued: 'queued',
-  dequeued: 'pr-open',
-  merged: 'merged',
-  deployed: 'deployed',
-  accepted: 'deployed',
-};
-const SIDE_STATE = { needs_human: 'needs human', stale_contract: 'stale contract', blocked: 'blocked' };
-const DONE_LANES = new Set(['merged', 'deployed']);
-
-const PR_LANES = new Set(['pr-open', 'checks', 'queued']);
-const LANE_RANK = { ready: 0, running: 1, 'pr-open': 2, checks: 3, queued: 4, merged: 5, deployed: 6 };
-// Records of something that already happened (the daily collector may append run_finished
-// hours later); they may move a card forward but never back.
-const RECORD_ONLY = new Set(['run_started', 'run_finished']);
-// After a merge, only real new work moves a card back: a new attempt, a new PR, re-admission.
-const REOPENS = new Set(['ready', 'picked', 'dispatched', 'repair_dispatched', 'pr_opened']);
-const CHECK_OK = new Set(['success', 'neutral', 'skipped']);
-
-/** Whether an event of `type` may move a card from lane `from` to lane `to`. */
-function laneMoveAllowed(type, from, to) {
-  if (from == null || from === to || LANE_RANK[to] >= LANE_RANK[from]) return true;
-  if (RECORD_ONLY.has(type)) return false;
-  if (DONE_LANES.has(from)) return REOPENS.has(type);
-  return true;
-}
-
-/**
- * One card per task (or per PR that has no task) in the lane of its latest stage.
- * v1 has no "closed" event, so `openPrs` (a Set of PR numbers that are open on GitHub
- * right now) decides PR lanes: a card in PR open, Checks or Merge queue stays only if one
- * of its PRs is open; otherwise it's counted in `closed`. Without `openPrs` (the list
- * couldn't be fetched) cards stay, and those lanes are flagged `prStateUnknown`.
- * Side states (needs-human, stale contract, blocked) become tags on the card; dry-run
- * decisions never move a card, because nothing was launched.
- */
-export function pipeline(events, { openPrs = null } = {}) {
-  const prTask = prTaskMap(events);
-  const cards = new Map();
-  const card = (key) => {
-    if (!cards.has(key)) {
-      cards.set(key, {
-        key,
-        kind: key.startsWith('task:') ? 'task' : 'pr',
-        label: key.startsWith('task:') ? key.slice(5) : `PR #${key.slice(3)}`,
-        issue: null, prs: [], lane: null, enteredAt: null, attempt: null, model: null, workflow: null,
-        side: null, checkHead: null, oldHeads: new Set(), checks: new Map(), planned: false, removed: false,
-      });
-    }
-    return cards.get(key);
-  };
-
-  for (const ev of events) {
-    const p = ev.payload || {};
-    const subjects = eventSubjects(ev, prTask);
-    let keys = [...subjects].filter((s) => s.startsWith('task:'));
-    if (!keys.length) keys = [...subjects].filter((s) => s.startsWith('pr:'));
-    if (!keys.length) continue;
-    const planOnly = isPlanOnly(ev);
-    const lane = LANE_OF[ev.type];
-    for (const key of keys) {
-      const c = card(key);
-      if (isNum(p.issue)) c.issue = p.issue;
-      for (const pr of eventPrs(ev)) if (!c.prs.includes(pr)) c.prs.push(pr);
-      if (ev.type === 'cancelled' && !planOnly) {
-        c.removed = true;
-        continue;
-      }
-      if (SIDE_STATE[ev.type]) {
-        c.side = { label: SIDE_STATE[ev.type], reason: isStr(p.reason) ? p.reason : null };
-        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
-        continue;
-      }
-      // Resolutions without a lane (human_action, contract_pinned) still clear the side
-      // state; plan-only (dry-run) decisions never resolve anything.
-      if (RESOLVES_NEEDS_YOU.has(ev.type) && !planOnly) c.side = null;
-      if (!lane) continue;
-      if (planOnly) {
-        c.planned = true;
-        if (!c.lane) [c.lane, c.enteredAt] = ['ready', parseTime(ev.timestamp)];
-        continue;
-      }
-      // Latest result per workflow for the PR's current head: a success from one
-      // workflow doesn't hide another workflow's failure; a new head starts afresh.
-      const head = isStr(p.head_sha) ? p.head_sha : null;
-      if ((ev.type === 'check_result' || ev.type === 'pr_opened') && head && head !== c.checkHead) {
-        if (c.oldHeads.has(head)) continue; // a late result for a head that's been replaced
-        if (c.checkHead) c.oldHeads.add(c.checkHead);
-        c.checkHead = head;
-        c.checks = new Map();
-      }
-      // A cancelled task stays out of the pipeline until real new work reopens it; a late
-      // run_finished or check result after the cancellation doesn't bring it back.
-      if (c.removed && !REOPENS.has(ev.type)) continue;
-      c.removed = false;
-      if (c.lane !== lane && laneMoveAllowed(ev.type, c.lane, lane)) [c.lane, c.enteredAt] = [lane, eventTime(ev)];
-      if (ev.type === 'dispatched' || ev.type === 'repair_dispatched') {
-        if (isNum(p.attempt)) c.attempt = p.attempt;
-        if (isStr(p.model)) c.model = p.model;
-        c.workflow = isStr(p.workflow) ? p.workflow : ev.type === 'repair_dispatched' ? 'repair' : 'implement';
-        c.planned = false;
-      }
-      if (ev.type === 'pr_opened' && !head) c.checks = new Map();
-      if (ev.type === 'check_result') {
-        c.checks.set(isStr(p.workflow) ? p.workflow : 'check', {
-          conclusion: isStr(p.conclusion) ? p.conclusion : null,
-          signature: isStr(p.failure_signature) ? p.failure_signature : null,
-        });
-      }
-    }
-  }
-
-  const lanes = PIPELINE_LANES.map((l) => ({ ...l, cards: [], prStateUnknown: false }));
-  const byKey = new Map(lanes.map((l) => [l.key, l]));
-  const known = openPrs instanceof Set;
-  const closed = [];
-  for (const c of cards.values()) {
-    if (c.removed || !c.lane) continue;
-    if (PR_LANES.has(c.lane) && c.prs.length) {
-      if (!known) byKey.get(c.lane).prStateUnknown = true;
-      else if (!c.prs.some((pr) => openPrs.has(pr))) {
-        closed.push({ key: c.key, label: c.label, prs: c.prs.slice(), lane: c.lane });
-        continue;
-      }
-    }
-    const tags = [];
-    if (c.side) tags.push({ text: c.side.label, tone: 'fail', title: c.side.reason });
-    if (c.lane === 'running' && c.workflow === 'repair') tags.push({ text: `repair${c.attempt ? ` a${c.attempt}` : ''}`, tone: 'warn', title: null });
-    if (!DONE_LANES.has(c.lane)) {
-      for (const [wf, r] of c.checks) {
-        if (r.conclusion && !CHECK_OK.has(r.conclusion)) tags.push({ text: `${wf} ${r.conclusion}`, tone: 'fail', title: r.signature });
-      }
-    }
-    if (c.planned) tags.push({ text: 'dry-run plan', tone: 'info', title: null });
-    byKey.get(c.lane).cards.push({ ...c, tags });
-  }
-  for (const l of lanes) {
-    // Active lanes: longest-waiting first. Done lanes: most recent first.
-    l.cards.sort((a, b) => (DONE_LANES.has(l.key) ? (b.enteredAt ?? 0) - (a.enteredAt ?? 0) : (a.enteredAt ?? 0) - (b.enteredAt ?? 0)));
-  }
-  closed.sort((a, b) => (a.prs[0] ?? 0) - (b.prs[0] ?? 0));
-  return { lanes, total: lanes.reduce((n, l) => n + l.cards.length, 0), closed, prStateKnown: known };
-}
-
-/** PR numbers opened in the events and never merged: the "open" set for sample data. */
-export function unmergedPrs(events) {
-  const open = new Set();
-  for (const ev of events) {
-    const pr = ev.payload?.pr;
-    if (!isNum(pr)) continue;
-    if (ev.type === 'pr_opened') open.add(pr);
-    if (ev.type === 'merged') open.delete(pr);
-  }
-  return open;
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,55 +1142,6 @@ export const STAGE_LABELS = Object.freeze({
   ready: 'Ready', picked: 'Picked', running: 'Agent running', 'pr-open': 'PR open',
   checks: 'Checks', queued: 'Merge queue', merged: 'Merged, not yet deployed', deployed: 'Deployed',
 });
-
-/** Stacked-bar data from stageTimes(), plus the stage that takes the largest share. */
-export function stageBreakdown(rows) {
-  const out = [];
-  const sums = {};
-  for (const r of rows || []) {
-    const segments = [];
-    for (const st of STAGES) {
-      const d = r.durations?.[st];
-      if (d && isNum(d.ms) && d.ms > 0) {
-        segments.push({ stage: st, ms: d.ms, to: d.to });
-        sums[st] = (sums[st] ?? 0) + d.ms;
-      }
-    }
-    const totalMs = segments.reduce((a, s) => a + s.ms, 0);
-    if (totalMs > 0) out.push({ key: r.key, label: r.label, segments, totalMs, current: r.current });
-  }
-  const grand = Object.values(sums).reduce((a, b) => a + b, 0);
-  let insight = null;
-  if (grand > 0) {
-    const [stage, ms] = Object.entries(sums).sort((a, b) => b[1] - a[1])[0];
-    insight = { stage, label: STAGE_LABELS[stage], pct: (ms / grand) * 100, totalMs: grand, tasks: out.length };
-  }
-  // Average per task and PR across the window: each stage's total divided by the row count.
-  const average = out.length
-    ? { key: 'average', label: 'Average', segments: STAGES.filter((st) => sums[st]).map((st) => ({ stage: st, ms: sums[st] / out.length })), totalMs: grand / out.length }
-    : null;
-  return { rows: out, average, maxMs: Math.max(0, ...out.map((r) => r.totalMs)), insight };
-}
-
-/** Cost bars from deriveMetrics().tokensPerTask, highest first, with an average-vs-budget line. */
-export function costSummary(tokens, perTaskBudget = DEFAULTS.perTaskAic) {
-  const rows = (tokens?.rows ?? []).filter((r) => r.task !== '(no task)').slice().sort((a, b) => b.aic - a.aic);
-  if (!rows.length) return { rows: [], maxAic: 0, avgAic: null, pct: null, overBudget: [] };
-  const total = rows.reduce((a, r) => a + r.aic, 0);
-  const avgAic = total / rows.length;
-  return {
-    rows,
-    maxAic: rows[0].aic,
-    avgAic,
-    pct: perTaskBudget > 0 ? (avgAic / perTaskBudget) * 100 : null,
-    overBudget: rows.filter((r) => r.aic > perTaskBudget).map((r) => r.task),
-  };
-}
-
-/** Median run_finished duration (ms), used as the "typical run" for agent progress bars. */
-export function typicalRunMs(events) {
-  return median(events.filter((e) => e.type === 'run_finished').map((e) => e.payload?.duration_ms));
-}
 
 // ---------------------------------------------------------------------------
 // Dispatch state
@@ -1575,4 +1223,825 @@ export function dispatchBanner(events, { now = Date.now() } = {}) {
     ? `In this state since ${since}${p.since_source === 'evidence' ? ' (from the cause: when the first unreadable run of today ended)' : ''}.`
     : `First recorded ${since}; when it began is unknown (it was already in place).`;
   return { level, state: p.state, reason: p.reason ?? null, since, sinceKnown, text: `${head} ${when}: ${why}`, tip: tip.join('\n') };
+}
+
+// ---------------------------------------------------------------------------
+// One-screen view: relative times, the task catalog and board, cost, quality, human touch,
+// liveness and recent activity. Drill tasks (drill/*) were fire drills of the factory itself:
+// they're kept out of every task aggregate.
+
+export const MEDIAN_DAYS = 14;
+export const HUMAN_DAYS = 7;
+const DAY_MS = 86400000;
+const HOUR_MS = 3600000;
+
+export const isDrill = (task) => typeof task === 'string' && task.startsWith('drill/');
+
+/**
+ * A relative time in the page's compact style (like "updated 12s ago"): "just now", "23m ago",
+ * "5h ago", "3d ago"; "in 23m" for a future time; "—" when unknown.
+ */
+export function relativeTime(ms, now) {
+  if (!isNum(ms) || !isNum(now)) return '—';
+  const d = now - ms;
+  const a = Math.abs(d);
+  if (a < 45000) return 'just now';
+  let t;
+  if (a < HOUR_MS) t = `${Math.max(1, Math.floor(a / 60000))}m`;
+  else if (a < 48 * HOUR_MS) t = `${Math.floor(a / HOUR_MS)}h`;
+  else t = `${Math.floor(a / DAY_MS)}d`;
+  return d >= 0 ? `${t} ago` : `in ${t}`;
+}
+
+/** A duration in at most two units: "45s", "42m", "5h 12m", "3d 4h"; "—" when unknown. */
+export function shortDuration(ms) {
+  if (!isNum(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 172800) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+/** AIC as dollars (1 AIC = $0.01): "$0.62", "$16.32", and whole dollars from $100 ("$100", "$1,234"). */
+export function formatUsd(aic) {
+  if (!isNum(aic)) return '—';
+  const usd = aic / 100;
+  return usd >= 100 ? `$${Math.round(usd).toLocaleString('en-US')}` : `$${usd.toFixed(2)}`;
+}
+
+// --- Task catalog: scripts/seed-backlog/taskmap.yaml and contracts/<id>.yaml -------------
+// A deliberately small YAML reader for these generated files: top-level keys, flow maps and
+// lists on one line, block lists and block maps of scalars. Anything else is ignored.
+
+function stripComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
+  }
+  return line;
+}
+
+function yamlScalar(v) {
+  const t = String(v ?? '').trim();
+  if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t.at(-1) === t[0]) return t.slice(1, -1);
+  return t;
+}
+
+// Splits "a: b, c: { d, e }" at its top-level commas.
+function splitFlow(s) {
+  const out = [];
+  let depth = 0;
+  let quote = null;
+  let cur = '';
+  for (const c of s) {
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+function flowMap(s) {
+  const out = {};
+  for (const part of splitFlow(s.trim().replace(/^\{/, '').replace(/\}$/, ''))) {
+    const i = part.indexOf(':');
+    if (i < 0) continue;
+    const v = part.slice(i + 1).trim();
+    out[part.slice(0, i).trim()] = /^[{[]/.test(v) ? null : yamlScalar(v); // nested values are skipped
+  }
+  return out;
+}
+
+function flowList(s) {
+  return splitFlow(s.trim().replace(/^\[/, '').replace(/\]$/, '')).map(yamlScalar).filter(Boolean);
+}
+
+const yamlLines = (text) => String(text ?? '').split('\n').map((l) => stripComment(l.replace(/\r$/, '')).replace(/\s+$/, '')).filter((l) => l.trim());
+
+/**
+ * The tasks of the task map, in file order: [{ id, area }]. Entries may be flow maps
+ * (`- { id: x, area: y }`) or block maps (`- id: x` then `area: y` on the following lines).
+ */
+export function parseTaskmap(text) {
+  const tasks = [];
+  let section = null;
+  let itemIndent = null;
+  let block = null; // the block-style entry being read: { keyIndent, fields }
+  for (const line of yamlLines(text)) {
+    const top = /^([A-Za-z_][\w-]*):(.*)$/.exec(line);
+    if (top) {
+      section = top[1];
+      block = null;
+      continue;
+    }
+    if (section !== 'tasks') continue;
+    const indent = line.length - line.trimStart().length;
+    const item = /^(\s*)-\s+(.*)$/.exec(line);
+    if (item && (itemIndent == null || indent === itemIndent)) {
+      itemIndent = indent;
+      block = null;
+      const body = item[2].trim();
+      if (body.startsWith('{')) tasks.push(flowMap(body));
+      else {
+        const kv = /^([\w-]+):\s*(.*)$/.exec(body);
+        if (kv) {
+          block = { keyIndent: indent + 2, fields: { [kv[1]]: yamlScalar(kv[2]) } };
+          tasks.push(block.fields);
+        }
+      }
+      continue;
+    }
+    if (block && indent === block.keyIndent) {
+      const kv = /^\s*([\w-]+):\s*(.*)$/.exec(line);
+      if (kv && !/^[>|]/.test(kv[2])) block.fields[kv[1]] = kv[2] === '' ? null : yamlScalar(kv[2]);
+    }
+  }
+  return tasks.filter((t) => isStr(t.id)).map((t) => ({ id: t.id, area: isStr(t.area) ? t.area : null }));
+}
+
+const CONTRACT_FIELDS = { id: 'id', title: 'title', tier: 'tier', area: 'area', upstream_class: 'upstreamClass' };
+
+/** The top-level fields of a generated contract: { id, title, tier, area, dependsOn, upstreamClass }. */
+export function parseContract(text) {
+  const out = { id: null, title: null, tier: null, area: null, dependsOn: [], upstreamClass: null };
+  let inDeps = false;
+  for (const line of yamlLines(text)) {
+    const top = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
+    if (top) {
+      inDeps = false;
+      const [, key, value] = top;
+      if (key === 'depends_on') {
+        if (value.startsWith('[')) out.dependsOn = flowList(value);
+        else inDeps = value === '';
+      } else if (CONTRACT_FIELDS[key] && value !== '') out[CONTRACT_FIELDS[key]] = yamlScalar(value);
+      continue;
+    }
+    const dep = inDeps ? /^\s+-\s+(.+)$/.exec(line) : null;
+    if (dep) out.dependsOn.push(yamlScalar(dep[1]));
+  }
+  return out;
+}
+
+/** "common/iso-format-parser" → "iso-format-parser": the area label carries the prefix. */
+export function shortTaskName(id) {
+  return String(id ?? '').split('/').pop();
+}
+
+export const AREA_LABELS = Object.freeze({
+  'common-parsers': 'Common parsers',
+  'common-refiners': 'Common refiners',
+  'en-casual': 'Casual',
+  'en-month-names': 'Month names',
+  'en-numeric-dates': 'Numeric dates',
+  'en-relative': 'Relative',
+  'en-refiners': 'English refiners',
+  other: 'Other',
+});
+
+/** A readable group label for a contract area ("en-month-names" → "Month names"). */
+export function areaLabel(area) {
+  if (!isStr(area)) return AREA_LABELS.other;
+  if (AREA_LABELS[area]) return AREA_LABELS[area];
+  const words = area.replace(/^en-/, '').replace(/[-_]+/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : AREA_LABELS.other;
+}
+
+/**
+ * The tasks to show: the task map's entries joined with their contracts (a Map id → parsed
+ * contract; a missing contract leaves tier and dependencies unknown). Drill tasks are dropped.
+ */
+export function taskCatalog(entries, contracts = new Map()) {
+  return (entries || []).filter((e) => isStr(e?.id) && !isDrill(e.id)).map((e) => {
+    const c = contracts.get(e.id) ?? null;
+    return {
+      id: e.id,
+      short: shortTaskName(e.id),
+      area: c?.area ?? e.area ?? 'other',
+      tier: c?.tier ?? null,
+      dependsOn: c?.dependsOn ?? [],
+      title: c?.title ?? null,
+      contract: c != null,
+    };
+  });
+}
+
+/** Without the task map: the non-drill tasks seen in the events, grouped by their prefix. */
+export function fallbackCatalog(events) {
+  const ids = [];
+  for (const ev of events || []) {
+    const t = ev?.payload?.task;
+    if (isStr(t) && !isDrill(t) && !ids.includes(t)) ids.push(t);
+  }
+  return ids.map((id) => ({ id, short: shortTaskName(id), area: id.includes('/') ? `${id.split('/')[0]}-tasks` : 'other', tier: null, dependsOn: [], title: null, contract: false }));
+}
+
+// --- Task board ---------------------------------------------------------------------
+
+// --- Task issues: GET /issues?state=all&labels=factory:task ---------------------------------
+
+const TASK_MARKER = /<!--\s*factory-task:\s*([^\s>]+?)\s*-->/;
+const TASK_TITLE = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+):\s/;
+
+/**
+ * The fields kept from one task-issue list entry: { task, number, state, stateReason, closedAt },
+ * or null for a PR or an issue that names no task. The task id comes from the body's hidden
+ * marker (<!-- factory-task: <id> -->), else the title prefix ("<id>: Port <Class>"). The body
+ * isn't kept.
+ */
+export function summarizeTaskIssue(issue) {
+  if (!issue || typeof issue !== 'object' || issue.pull_request != null || !isNum(issue.number)) return null;
+  const task = TASK_MARKER.exec(typeof issue.body === 'string' ? issue.body : '')?.[1] ?? TASK_TITLE.exec(typeof issue.title === 'string' ? issue.title : '')?.[1] ?? null;
+  if (!task) return null;
+  return {
+    task,
+    number: issue.number,
+    state: issue.state === 'closed' ? 'closed' : 'open',
+    stateReason: isStr(issue.state_reason) ? issue.state_reason : null,
+    closedAt: parseTime(issue.closed_at),
+  };
+}
+
+/** Task id → { number, state, stateReason, closedAt } from summarized task issues; the newest issue wins. */
+export function taskIssueMap(summaries) {
+  const map = new Map();
+  for (const s of summaries || []) {
+    if (!s?.task) continue;
+    const prev = map.get(s.task);
+    if (!prev || s.number > prev.number) map.set(s.task, { number: s.number, state: s.state, stateReason: s.stateReason, closedAt: s.closedAt });
+  }
+  return map;
+}
+
+
+export const TASK_STATES = Object.freeze(['done', 'running', 'needs', 'waiting']);
+export const TASK_STATE_LABELS = Object.freeze({ done: 'done', running: 'running', needs: 'needs you', waiting: 'waiting' });
+const AGENT_EVENTS = new Set(['dispatched', 'repair_dispatched', 'review_dispatched']);
+const REOPENS_TASK = new Set(['ready', 'auto_ready', 'dispatched', 'repair_dispatched']);
+const STEP_TEXT = {
+  ready: 'ready', auto_ready: 'ready', picked: 'picked', dispatched: 'implement agent running', repair_dispatched: 'repair agent running',
+  review_dispatched: 'review agent running', pr_opened: 'PR open', check_result: 'checks', queued: 'in the merge queue', auto_merge: 'in the merge queue',
+  dequeued: 'PR open', run_finished: 'agent finished',
+};
+
+/**
+ * One tile per catalog task, in catalog order, each in one state:
+ *
+ * - done: a `merged` or `task_done` for the task, not followed by a reopening `ready`,
+ *   `auto_ready`, `dispatched` or `repair_dispatched`;
+ * - needs: an open Needs-you item for the task (`needsItems`, already filtered by dropClosed);
+ * - running: work started (a real `dispatched`, `repair_dispatched` or `review_dispatched`) and
+ *   not done, unless its issue or current PR is closed now (isClosedRef: never on an unknown
+ *   open set, never for work newer than the snapshot);
+ * - waiting: everything else: a dependency not done, ready but no free slot, not started, closed
+ *   without a merge, or no events in the loaded window.
+ *
+ * Dry-run decisions are plans and never start or reopen a task. `since` is when the task
+ * entered its state (ms), `issue` the task's issue number.
+ *
+ * `issues` (taskIssueMap(), or null when the task-issue list couldn't be read) takes precedence
+ * over the audit window: an issue closed as "completed" is done even with no events loaded; an
+ * issue closed otherwise is not done; while the issue is open, only a `task_done` (the
+ * controller closing it) makes the task done, not a merge alone. Tasks without a known issue keep
+ * the audit-derived state. The issue's number is the tile's link.
+ */
+export function taskBoard(events, catalog, { open = null, asOf = null, needsItems = [], issues = null } = {}) {
+  const prTask = prTaskMap(events || []);
+  const info = new Map((catalog || []).map((t) => [t.id, { issue: null, prs: [], pr: null, seen: false, readyAt: null, started: null, doneAt: null, taskDoneAt: null, step: null, stepAt: null }]));
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== 'object') continue;
+    const p = ev.payload || {};
+    const ids = [...eventSubjects(ev, prTask)].filter((s) => s.startsWith('task:')).map((s) => s.slice(5)).filter((id) => info.has(id));
+    if (!ids.length) continue;
+    const t = eventTime(ev);
+    const plan = isPlanOnly(ev);
+    for (const id of ids) {
+      const s = info.get(id);
+      s.seen = true;
+      if (isNum(p.issue) && isStr(p.task)) s.issue = p.issue;
+      for (const pr of eventPrs(ev)) if (!s.prs.includes(pr)) s.prs.push(pr);
+      if (plan || t == null) continue;
+      if (REOPENS_TASK.has(ev.type)) [s.doneAt, s.taskDoneAt] = [null, null];
+      if (ev.type === 'ready' || ev.type === 'auto_ready') s.readyAt = t;
+      if (AGENT_EVENTS.has(ev.type)) s.started ??= t;
+      if (ev.type === 'dispatched') s.pr = null; // a new attempt has no PR yet
+      if (isNum(p.pr) && ev.type !== 'merged') s.pr = p.pr;
+      if (STEP_TEXT[ev.type]) [s.step, s.stepAt] = [STEP_TEXT[ev.type], t];
+      if ((ev.type === 'merged' || ev.type === 'task_done') && s.doneAt == null) s.doneAt = t;
+      if (ev.type === 'task_done') s.taskDoneAt ??= t;
+    }
+  }
+  // The task issue, when known, decides done-ness (see above).
+  for (const [id, s] of info) {
+    const iss = issues instanceof Map ? issues.get(id) : null;
+    s.issueState = iss ? (iss.state === 'closed' ? (iss.stateReason === 'completed' ? 'completed' : 'closed') : 'open') : null;
+    if (!iss) continue;
+    s.issue = iss.number;
+    if (s.issueState === 'completed') s.doneAt = iss.closedAt ?? s.doneAt ?? s.taskDoneAt;
+    else if (s.issueState === 'closed') s.doneAt = null;
+    else s.doneAt = s.taskDoneAt;
+  }
+  const needsByTask = new Map();
+  for (const it of needsItems || []) if (isStr(it?.task) && !needsByTask.has(it.task)) needsByTask.set(it.task, it);
+  const doneIds = new Set([...info].filter(([, s]) => s.doneAt != null).map(([id]) => id));
+
+  const tasks = (catalog || []).map((c) => {
+    const s = info.get(c.id);
+    const base = { ...c, issue: s.issue, prs: s.prs.slice(), step: s.step, issueState: s.issueState };
+    if (s.issueState === 'completed') return { ...base, state: 'done', since: s.doneAt, reason: 'issue closed as completed' };
+    if (s.doneAt != null) return { ...base, state: 'done', since: s.doneAt, reason: 'merged' };
+    const need = needsByTask.get(c.id);
+    if (need) return { ...base, state: 'needs', since: parseTime(need.since), reason: need.reason ?? need.kind ?? null };
+    const closed = s.issueState === 'closed' || (s.started != null && isClosedRef({ issue: s.issue, pr: s.pr, at: s.stepAt }, open, asOf));
+    if (s.started != null && !closed) return { ...base, state: 'running', since: s.stepAt ?? s.started, reason: s.step };
+    const blockedBy = c.dependsOn.filter((d) => !doneIds.has(d));
+    let reason;
+    if (s.issueState === 'closed') reason = 'issue closed, not completed';
+    else if (closed) reason = 'issue or PR closed without a merge';
+    else if (blockedBy.length) reason = `waiting on ${blockedBy.map(shortTaskName).join(', ')}`;
+    else if (s.readyAt != null) reason = 'ready, waiting for a free slot';
+    else if (!s.seen) reason = 'no events in the loaded window';
+    else reason = 'not started';
+    return { ...base, state: 'waiting', since: s.readyAt ?? null, reason, blockedBy, ready: !closed && !blockedBy.length && s.readyAt != null };
+  });
+
+  const counts = Object.fromEntries(TASK_STATES.map((st) => [st, tasks.filter((t) => t.state === st).length]));
+  const byTier = {};
+  for (const t of tasks) {
+    const tier = t.tier ?? 'unknown';
+    byTier[tier] ??= { done: 0, total: 0 };
+    byTier[tier].total++;
+    if (t.state === 'done') byTier[tier].done++;
+  }
+  const groups = [];
+  for (const t of tasks) {
+    let g = groups.find((x) => x.area === t.area);
+    if (!g) groups.push((g = { area: t.area, label: areaLabel(t.area), tasks: [] }));
+    g.tasks.push(t);
+  }
+  return { tasks, counts, byTier, groups, total: tasks.length, readyWaiting: tasks.filter((t) => t.ready).length };
+}
+
+/**
+ * The status line's plain-English state: { text, level }. In order: loading; paused by a gate
+ * (not the kill switch, which has its own chip); tasks running; tasks needing you; all done;
+ * ready tasks waiting for a slot; tasks waiting on dependencies; idle.
+ */
+export function stateLine({ loaded = true, board = null, dispatch = null } = {}) {
+  if (!loaded) return { text: 'Loading…', level: 'loading' };
+  const p = dispatch ?? null;
+  if (p?.state === 'paused' && p.reason !== 'kill_switch') {
+    return { text: `Paused: ${p.reason === 'budget_unknown' ? 'spend unknown' : PAUSE_TEXT[p.reason] ?? 'held by a gate'}`, level: 'warn' };
+  }
+  const c = board?.counts ?? null;
+  if (!c || !board.total) return { text: p?.state === 'running' ? 'Running' : 'Idle: no tasks yet', level: 'info' };
+  if (c.running) return { text: `Running: ${plural(c.running, 'task')}`, level: 'info' };
+  if (c.needs) return { text: `Waiting on you: ${plural(c.needs, 'task')}`, level: 'warn' };
+  if (c.done === board.total) return { text: `Idle: all ${board.total} tasks done`, level: 'ok' };
+  if (board.readyWaiting) return { text: `Waiting: ${plural(board.readyWaiting, 'task')} ready`, level: 'info' };
+  return { text: `Waiting: ${plural(c.waiting, 'task')} on dependencies`, level: 'info' };
+}
+
+/** The newest dispatch_state payload with a usable timestamp, or null. */
+export function latestDispatchState(events) {
+  let last = null;
+  for (const ev of events || []) if (ev?.type === 'dispatch_state' && parseTime(ev.timestamp) != null && isStr(ev.payload?.state)) last = ev.payload;
+  return last;
+}
+
+// --- Medians over the last 14 days ---------------------------------------------------
+
+/**
+ * Issue → merged per non-drill task merged in the last `days` days: from the task's first real
+ * `auto_ready` (else its first real `dispatched`) to its last `merged`. Returns
+ * { medianMs, count, items: [{ task, ms }] }.
+ */
+export function issueToMerged(events, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
+  const from = now - days * DAY_MS;
+  const per = new Map();
+  const get = (t) => per.get(t) ?? per.set(t, { ready: null, dispatched: null, merged: null }).get(t);
+  const prTask = prTaskMap(events || []);
+  for (const ev of events || []) {
+    const p = ev?.payload || {};
+    const task = isStr(p.task) ? p.task : prTask.get(p.pr) ?? null;
+    if (!task || isDrill(task) || isPlanOnly(ev)) continue;
+    const t = eventTime(ev);
+    if (t == null) continue;
+    if (ev.type === 'auto_ready') get(task).ready ??= t;
+    else if (ev.type === 'dispatched') get(task).dispatched ??= t;
+    else if (ev.type === 'merged') get(task).merged = t;
+  }
+  const items = [];
+  for (const [task, s] of per) {
+    const start = s.ready ?? s.dispatched;
+    if (start == null || s.merged == null || s.merged < from || s.merged > now || s.merged < start) continue;
+    items.push({ task, ms: s.merged - start });
+  }
+  return { medianMs: median(items.map((i) => i.ms)), count: items.length, items };
+}
+
+/**
+ * "Where the time goes": stacked stage bars for the non-drill tasks merged in the last `days`
+ * days (plain PRs without a task are left out), labelled with the short task name, and the
+ * MEDIAN time per stage over those tasks (each stage's median among the tasks that went
+ * through it). `rows` come from stageTimes(). The insight names the stage with the largest
+ * median.
+ */
+export function stageSummary(rows, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
+  const from = now - days * DAY_MS;
+  const out = [];
+  for (const r of rows || []) {
+    if (!String(r?.key).startsWith('task:') || isDrill(r.key.slice(5))) continue;
+    const merged = r.reached?.merged;
+    if (!isNum(merged) || merged < from || merged > now) continue;
+    const segments = [];
+    for (const st of STAGES) {
+      const d = r.durations?.[st];
+      if (d && isNum(d.ms) && d.ms > 0) segments.push({ stage: st, ms: d.ms, to: d.to });
+    }
+    const totalMs = segments.reduce((a, s) => a + s.ms, 0);
+    if (totalMs > 0) out.push({ key: r.key, task: r.key.slice(5), label: shortTaskName(r.key.slice(5)), segments, totalMs, mergedAt: merged });
+  }
+  out.sort((a, b) => a.mergedAt - b.mergedAt);
+  const segments = [];
+  for (const st of STAGES) {
+    const values = out.map((r) => r.segments.find((s) => s.stage === st)?.ms).filter(isNum);
+    if (values.length) segments.push({ stage: st, ms: median(values), tasks: values.length });
+  }
+  const totalMs = segments.reduce((a, s) => a + s.ms, 0);
+  const med = out.length ? { key: 'median', label: 'Median', segments, totalMs } : null;
+  let insight = null;
+  if (totalMs > 0) {
+    const top = segments.slice().sort((a, b) => b.ms - a.ms)[0];
+    insight = { stage: top.stage, label: STAGE_LABELS[top.stage], pct: (top.ms / totalMs) * 100, ms: top.ms, tasks: out.length };
+  }
+  return { rows: out, median: med, maxMs: Math.max(0, totalMs, ...out.map((r) => r.totalMs)), insight, days };
+}
+
+// --- Cost: spend snapshots joined with the agent workflow runs -----------------------
+
+export const AGENT_WORKFLOWS = Object.freeze(['implement', 'repair', 'review']);
+export const REVIEW_MATCH_MS = 30 * 60000;
+const RUN_TITLE = /^(Implement|Repair)\s+(\S+)\s+#(\d+)\s+attempt\s+(\d+)$/;
+
+/** "Implement <task> #<issue> attempt <n>" (or "Repair …") → { workflow, task, issue, attempt }, else null. */
+export function parseRunTitle(title) {
+  const m = RUN_TITLE.exec(String(title ?? '').trim());
+  return m ? { workflow: m[1].toLowerCase(), task: m[2], issue: Number(m[3]), attempt: Number(m[4]) } : null;
+}
+
+/**
+ * The latest measured value per run id across the real (`dry_run: false`) spend snapshots, in
+ * log order: Map run_id → { aic, status, day, at }. A "reserved" entry is a placeholder for a run
+ * still going, not a measurement, so it never replaces one; `reservedOnly` lists the runs that
+ * were never measured.
+ */
+export function runSpend(events) {
+  const measured = new Map();
+  const seen = new Set();
+  for (const ev of events || []) {
+    if (ev?.type !== 'spend_snapshot' || ev.payload?.dry_run !== false) continue;
+    const p = ev.payload;
+    const at = parseTime(ev.timestamp);
+    for (const r of Array.isArray(p.runs) ? p.runs : []) {
+      if (!isNum(r?.run_id) || !isNum(r.aic)) continue;
+      seen.add(r.run_id);
+      if (r.status === 'reserved') continue;
+      measured.set(r.run_id, { aic: r.aic, status: isStr(r.status) ? r.status : 'measured', day: isStr(p.day) ? p.day : at == null ? null : utcDay(at), at });
+    }
+  }
+  return { measured, reservedOnly: [...seen].filter((id) => !measured.has(id)), seen };
+}
+
+/** Run ids listed in any real spend snapshot. */
+export function snapshotRunIds(events) {
+  return runSpend(events).seen;
+}
+
+/**
+ * Pairs runs with the controller events that dispatched them, by time: a run belongs to an
+ * event of `type` it was created at or after, within 30 min; the nearest pairs are taken first
+ * and each event and run is used once. Events in `claimed` ("task#attempt") already have a run.
+ * Returns Map run id → event payload.
+ */
+function matchByTime(runs, events, type, claimed = new Set()) {
+  const evs = (events || []).filter((e) => e?.type === type && !isPlanOnly(e) && parseTime(e.timestamp) != null
+    && !claimed.has(`${e.payload?.task}#${isNum(e.payload?.attempt) ? e.payload.attempt : 1}`));
+  const pairs = [];
+  for (const r of runs) {
+    const created = parseTime(r.created_at);
+    if (created == null) continue;
+    evs.forEach((e, i) => {
+      const gap = created - parseTime(e.timestamp);
+      if (gap >= 0 && gap <= REVIEW_MATCH_MS) pairs.push({ run: r.id, ev: i, gap });
+    });
+  }
+  pairs.sort((a, b) => a.gap - b.gap || a.ev - b.ev);
+  const usedRuns = new Map();
+  const usedEvents = new Set();
+  for (const pr of pairs) {
+    if (usedRuns.has(pr.run) || usedEvents.has(pr.ev)) continue;
+    usedRuns.set(pr.run, evs[pr.ev].payload || {});
+    usedEvents.add(pr.ev);
+  }
+  return usedRuns;
+}
+
+const DISPATCH_EVENT = { implement: 'dispatched', repair: 'repair_dispatched', review: 'review_dispatched' };
+
+/**
+ * AIC per task, from the controller's spend snapshots (the latest measured value per run id)
+ * joined with the agent workflow runs (`agentRuns`: [{ id, created_at, workflow, display_title }],
+ * or null when the run lists couldn't be read). Implement and repair runs name their task in the
+ * title ("Implement <task> #<issue> attempt <n>"); a review run ("Review one factory PR"), or an
+ * implement or repair run whose title doesn't parse (older runs read "Implement one factory
+ * task"), is matched by time to the `review_dispatched`, `dispatched` or `repair_dispatched`
+ * event it followed (matchByTime).
+ *
+ * Returns { known, total, perTask: [{ task, aic, runs }] (non-drill, highest first), drillAic,
+ * unattributed, unattributedRuns, perDay: { days, aic }, byWorkflow: { implement, repair, review,
+ * unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns }. `total` is every measured run
+ * (drills included: they were real spend); `unattributed` is the part no task could be found for.
+ */
+export function costJoin(events, agentRuns, { now = Date.now(), days = MEDIAN_DAYS } = {}) {
+  const { measured } = runSpend(events);
+  const known = Array.isArray(agentRuns);
+  const runs = known ? agentRuns.filter((r) => isNum(r?.id)) : [];
+  const listed = new Map(runs.map((r) => [r.id, r]));
+  const titled = new Map();
+  for (const r of runs) {
+    const t = parseRunTitle(r.display_title);
+    if (t && t.workflow === r.workflow) titled.set(r.id, t);
+  }
+  const byTime = new Map();
+  for (const wf of AGENT_WORKFLOWS) {
+    const claimed = new Set([...titled.values()].filter((t) => t.workflow === wf).map((t) => `${t.task}#${t.attempt}`));
+    const untitled = runs.filter((r) => r.workflow === wf && !titled.has(r.id));
+    for (const [id, p] of matchByTime(untitled, events, DISPATCH_EVENT[wf], claimed)) byTime.set(id, p);
+  }
+  const byWorkflow = Object.fromEntries([...AGENT_WORKFLOWS, 'unknown'].map((w) => [w, { runs: 0, measured: 0, aic: 0 }]));
+  for (const r of runs) if (byWorkflow[r.workflow]) byWorkflow[r.workflow].runs++;
+
+  const perTask = new Map();
+  let total = 0;
+  let drillAic = 0;
+  let unattributed = 0;
+  let unattributedRuns = 0;
+  const unknownRunIds = [];
+  const end = Date.parse(utcDay(now) + 'T00:00:00Z');
+  const dayLabels = [];
+  for (let i = days - 1; i >= 0; i--) dayLabels.push(utcDay(end - i * DAY_MS));
+  const dayIndex = new Map(dayLabels.map((d, i) => [d, i]));
+  const perDay = dayLabels.map(() => 0);
+
+  for (const [id, m] of measured) {
+    total += m.aic;
+    const di = dayIndex.get(m.day);
+    if (di != null) perDay[di] += m.aic;
+    const run = listed.get(id);
+    const wf = run && byWorkflow[run.workflow] ? run.workflow : 'unknown';
+    byWorkflow[wf].measured++;
+    byWorkflow[wf].aic += m.aic;
+    if (!run) unknownRunIds.push(id);
+    const task = titled.get(id)?.task ?? (isStr(byTime.get(id)?.task) ? byTime.get(id).task : null);
+    if (!task) {
+      unattributed += m.aic;
+      unattributedRuns++;
+    } else if (isDrill(task)) drillAic += m.aic;
+    else {
+      const row = perTask.get(task) ?? perTask.set(task, { task, aic: 0, runs: 0 }).get(task);
+      row.aic += m.aic;
+      row.runs++;
+    }
+  }
+  return {
+    known,
+    total,
+    perTask: [...perTask.values()].sort((a, b) => b.aic - a.aic || a.task.localeCompare(b.task)),
+    drillAic,
+    unattributed,
+    unattributedRuns,
+    perDay: { days: dayLabels, aic: perDay },
+    byWorkflow,
+    unknownRunIds,
+    measuredRuns: measured.size,
+  };
+}
+
+/** Median AIC over the given (done) tasks that have attributed cost: { medianAic, count }. */
+export function medianTaskCost(cost, taskIds) {
+  const want = new Set(taskIds || []);
+  const values = (cost?.perTask ?? []).filter((r) => want.has(r.task)).map((r) => r.aic);
+  return { medianAic: median(values), count: values.length };
+}
+
+// --- Quality and human touch ---------------------------------------------------------
+
+/**
+ * Quality over the loaded window, drills excluded:
+ * - reverts: real `auto_revert` events;
+ * - escaped defects: main commits whose post-merge `ci` failed (`check_result` with event
+ *   "push", workflow "ci", conclusion "failure"), counted once per commit, leaving out merge
+ *   commits of drill tasks;
+ * - objections: `needs_human` with reason "review_objected";
+ * - repairs: per real `repair_dispatched`, "succeeded" when the task's PR later merged with no
+ *   `needs_human` for the task in between, "failed" when a `needs_human` came first, otherwise
+ *   pending. `rate` = succeeded / (succeeded + failed), null without any.
+ */
+export function qualityStats(events) {
+  const list = (events || []).filter((e) => e && typeof e === 'object');
+  const prTask = prTaskMap(list);
+  const taskOf = (ev) => (isStr(ev.payload?.task) ? ev.payload.task : prTask.get(ev.payload?.pr) ?? null);
+  const drillShas = new Set();
+  for (const ev of list) {
+    if ((ev.type === 'merged' || ev.type === 'auto_revert') && isDrill(taskOf(ev)) && isStr(ev.payload?.merge_commit_sha)) drillShas.add(ev.payload.merge_commit_sha);
+  }
+  let reverts = 0;
+  let objections = 0;
+  const escaped = new Set();
+  for (const ev of list) {
+    const p = ev.payload || {};
+    if (isPlanOnly(ev)) continue;
+    if (ev.type === 'auto_revert' && !isDrill(taskOf(ev))) reverts++;
+    if (ev.type === 'needs_human' && p.reason === 'review_objected' && !isDrill(taskOf(ev))) objections++;
+    if (ev.type === 'check_result' && p.event === 'push' && p.workflow === 'ci' && p.conclusion === 'failure' && isStr(p.head_sha) && !drillShas.has(p.head_sha)) escaped.add(p.head_sha);
+  }
+  let succeeded = 0;
+  let failed = 0;
+  let pending = 0;
+  list.forEach((ev, i) => {
+    if (ev.type !== 'repair_dispatched' || isPlanOnly(ev)) return;
+    const task = taskOf(ev);
+    if (!task || isDrill(task)) return;
+    let outcome = 'pending';
+    for (const later of list.slice(i + 1)) {
+      if (taskOf(later) !== task || isPlanOnly(later)) continue;
+      if (later.type === 'needs_human') {
+        outcome = 'failed';
+        break;
+      }
+      if (later.type === 'merged') {
+        outcome = 'succeeded';
+        break;
+      }
+    }
+    if (outcome === 'succeeded') succeeded++;
+    else if (outcome === 'failed') failed++;
+    else pending++;
+  });
+  return {
+    reverts,
+    escaped: { count: escaped.size, shas: [...escaped] },
+    objections,
+    repairs: { succeeded, failed, pending, rate: succeeded + failed ? succeeded / (succeeded + failed) : null },
+  };
+}
+
+const isBot = (actor) => /\[bot\]$/.test(String(actor ?? ''));
+
+/**
+ * Human touch: `human_action` events in the last `days` days by action (reviews and others),
+ * plus PRs a person put in the merge queue (`queued` by an actor that isn't a [bot]); and the
+ * median time from a non-drill `needs_human` to its resolution: the next real event for the same
+ * task, PR or issue that resolves a Needs-you item (ready, dispatched, human_action, merged, …)
+ * or closes the task (`task_done`), over the loaded window.
+ */
+export function humanTouch(events, { now = Date.now(), days = HUMAN_DAYS } = {}) {
+  const list = (events || []).filter((e) => e && typeof e === 'object');
+  const from = now - days * DAY_MS;
+  const inWindow = (ev) => {
+    const t = eventTime(ev);
+    return t != null && t >= from && t <= now;
+  };
+  let reviews = 0;
+  let other = 0;
+  let enqueues = 0;
+  for (const ev of list) {
+    if (!inWindow(ev)) continue;
+    if (ev.type === 'human_action') {
+      if (ev.payload?.action === 'review') reviews++;
+      else other++;
+    } else if (ev.type === 'queued' && isStr(ev.payload?.actor) && !isBot(ev.payload.actor)) enqueues++;
+  }
+  const prTask = prTaskMap(list);
+  const durations = [];
+  let open = 0;
+  list.forEach((ev, i) => {
+    if (ev.type !== 'needs_human' || isPlanOnly(ev)) return;
+    const task = isStr(ev.payload?.task) ? ev.payload.task : null;
+    if (isDrill(task)) return;
+    const start = parseTime(ev.timestamp);
+    if (start == null) return;
+    const subjects = eventSubjects(ev, prTask);
+    const end = list.slice(i + 1).find((x) => (RESOLVES_NEEDS_YOU.has(x.type) || x.type === 'task_done') && !isPlanOnly(x)
+      && [...eventSubjects(x, prTask)].some((s) => subjects.has(s)));
+    const t = end ? eventTime(end) : null;
+    if (t != null && t >= start) durations.push(t - start);
+    else open++;
+  });
+  return { total: reviews + other + enqueues, reviews, other, enqueues, days, medianResolveMs: median(durations), resolved: durations.length, unresolved: open };
+}
+
+// --- Liveness ------------------------------------------------------------------------
+
+// Events only the controller writes, on its polls.
+const POLL_TYPES = new Set([
+  'heartbeat', 'spend_snapshot', 'dispatch_state', 'dispatched', 'repair_dispatched', 'review_dispatched', 'auto_ready', 'auto_merge',
+  'needs_human', 'task_done', 'handoff_done', 'auto_revert', 'main_ci_rerun', 'ready', 'picked', 'stale_contract', 'cancelled',
+]);
+export const FOLLOW_UP_MIN = 10;
+
+/**
+ * The controller's last poll (the newest heartbeat or other controller event) and when the next
+ * is expected: with work in flight or dispatch paused by a gate (not the kill switch), the
+ * follow-up chain polls again about 10 min after the last poll; otherwise, or when that time
+ * has passed without a poll, the next scheduled (hourly) run: the next full hour after the later
+ * of the last poll and now. Returns { lastAt, lastType, nextAt, mode: 'follow-up' | 'cron' | null,
+ * followUpMissed }.
+ */
+export function liveness(events, { now = Date.now(), inFlight = false, dispatch = null } = {}) {
+  let last = null;
+  for (const ev of events || []) {
+    if (!POLL_TYPES.has(ev?.type)) continue;
+    const t = parseTime(ev.timestamp);
+    if (t != null && (last == null || t >= last.at)) last = { at: t, type: ev.type };
+  }
+  if (!last) return { lastAt: null, lastType: null, nextAt: null, mode: null, followUpMissed: false };
+  const ds = dispatch ?? latestDispatchState(events);
+  const pausedByGate = ds?.state === 'paused' && isStr(ds.reason) && ds.reason !== 'kill_switch';
+  const chain = inFlight || (isNum(ds?.in_flight) && ds.in_flight > 0) || pausedByGate;
+  if (chain) {
+    const next = last.at + FOLLOW_UP_MIN * 60000;
+    if (next >= now) return { lastAt: last.at, lastType: last.type, nextAt: next, mode: 'follow-up', followUpMissed: false };
+  }
+  const base = Math.max(last.at, now);
+  return { lastAt: last.at, lastType: last.type, nextAt: Math.floor(base / HOUR_MS) * HOUR_MS + HOUR_MS, mode: 'cron', followUpMissed: chain };
+}
+
+// --- Recent activity -----------------------------------------------------------------
+
+// Noise, or the same fact as a neighbouring event (task_done ~ merged, auto_merge ~ queued).
+const RECENT_SKIP = new Set(['heartbeat', 'spend_snapshot', 'dispatch_state', 'dequeued', 'task_done', 'handoff_done', 'auto_merge', 'run_started']);
+const RECENT_VERB = {
+  merged: () => 'merged',
+  pr_opened: () => 'PR opened',
+  dispatched: (p) => (isNum(p.attempt) && p.attempt > 1 ? `started, attempt ${p.attempt}` : 'started'),
+  repair_dispatched: () => 'repairing',
+  review_dispatched: () => 'in review',
+  needs_human: () => 'needs you',
+  stale_contract: () => 'contract changed',
+  auto_ready: () => 'ready',
+  ready: () => 'ready',
+  picked: () => 'picked',
+  queued: (p) => (isStr(p.actor) && !isBot(p.actor) ? 'queued by hand' : 'queued'),
+  human_action: (p) => (p.action === 'review' ? 'reviewed' : isStr(p.action) ? p.action : 'touched by a person'),
+  check_result: (p) => `${isStr(p.workflow) ? p.workflow : 'check'} failed${p.event === 'push' ? ' on main' : ''}`,
+  auto_revert: () => 'reverted',
+  main_ci_rerun: () => 'main CI re-run',
+  cancelled: () => 'cancelled',
+  deployed: () => 'deployed',
+  run_finished: () => 'agent finished',
+};
+
+/**
+ * The newest `limit` meaningful events as short sentences, newest first:
+ * [{ text, at, type, task, issue, pr }], e.g. "#29 iso-format-parser merged". The reference is
+ * the task's issue (else the PR). Skips heartbeats, spend snapshots, dispatch states, dequeues,
+ * dry-run plans, passing checks and duplicates (task_done, handoff_done, auto_merge, and a line
+ * identical to the previous one).
+ */
+export function recentActivity(events, { limit = 5 } = {}) {
+  const list = (events || []).filter((e) => e && typeof e === 'object');
+  const prTask = prTaskMap(list);
+  const issueOf = new Map();
+  for (const ev of list) if (isStr(ev.payload?.task) && isNum(ev.payload?.issue)) issueOf.set(ev.payload.task, ev.payload.issue);
+  const out = [];
+  for (let i = list.length - 1; i >= 0 && out.length < limit; i--) {
+    const ev = list[i];
+    const p = ev.payload || {};
+    const verb = RECENT_VERB[ev.type];
+    if (!verb || RECENT_SKIP.has(ev.type) || isPlanOnly(ev)) continue;
+    if (ev.type === 'check_result' && p.conclusion !== 'failure') continue;
+    const pr = eventPrs(ev)[0] ?? null;
+    const task = isStr(p.task) ? p.task : prTask.get(pr) ?? null;
+    const issue = isNum(p.issue) ? p.issue : task ? issueOf.get(task) ?? null : null;
+    const ref = issue ?? pr;
+    const text = [ref != null ? `#${ref}` : null, task ? shortTaskName(task) : null, verb(p)].filter(Boolean).join(' ');
+    if (out.length && out.at(-1).text === text) continue;
+    out.push({ text, at: eventTime(ev), type: ev.type, task, issue, pr });
+  }
+  return out;
 }

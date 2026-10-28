@@ -2,129 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  HEALTH_LABELS, PIPELINE_LANES, anchorsPerDay, canonicalize, combineNeedsYou, compactAge, heartbeatTile, verifierReason, verifierStatus, costSummary, dailySeries, dayPaths, deriveMetrics, existingDayPaths,
-  healthSummary, isHumanTierPr, parseJsonl, prRef, reviewItems, shortTitle, sparkSegments, summarizePr, unmergedPrs, pipeline, shortSha,
-  stageBreakdown, typicalRunMs,
+  HEALTH_LABELS, canonicalize, combineNeedsYou, compactAge, verifierReason, verifierStatus, dayPaths, deriveMetrics, existingDayPaths,
+  healthSummary, isHumanTierPr, parseContract, parseJsonl, parseTaskmap, prRef, reviewItems, shortTitle, stateLine, summarizePr, shortSha,
+  taskBoard, taskCatalog,
 } from '../lib.js';
-import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, buildQuietAnchorLines } from './make-fixture.mjs';
+import { FIXTURE_NOW, FIXTURE_PATH, QUIET_FIXTURE_NOW, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildQuietAnchorLines } from './make-fixture.mjs';
 
 const at = (iso) => Date.parse(iso);
 const fixture = () => parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
-const mk = (type, timestamp, payload, dryRun = false) => ({
-  type, timestamp, payload: { dedupe_key: 'k', factory_version: 'v', dry_run: dryRun, ...payload },
-});
-
 test('shortSha shows 7 characters of a full SHA and leaves other values alone', () => {
   assert.equal(shortSha('320c4fcedefc03648caa4cda140bd93932367986'), '320c4fc');
   assert.equal(shortSha('f4c1a9e'), 'f4c1a9e');
   assert.equal(shortSha('v1.2.3'), 'v1.2.3');
   assert.equal(shortSha(null), null);
-});
-
-test('daily series: 7 UTC days, counts per day, gaps where there is nothing to measure', () => {
-  const s = dailySeries(fixture(), { now: at(FIXTURE_NOW) });
-  assert.deepEqual(s.days, ['2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16']);
-  assert.deepEqual(s.merged, [0, 0, 0, 0, 0, 2, 1]);
-  assert.deepEqual(s.aic, [0, 0, 0, 0, 0, 280, 722]);
-  assert.deepEqual(s.heartbeats, [0, 0, 0, 0, 0, 1, 3]);
-  assert.deepEqual(s.checksPassPct.slice(0, 5), [null, null, null, null, null]);
-  assert.equal(s.checksPassPct[5], 100);
-  assert.equal(Math.round(s.checksPassPct[6]), 67); // 2 of 3 on the 16th
-  assert.deepEqual([s.checks.passed, s.checks.total], [6, 7]);
-  // Zero-touch is cumulative: PR 6 (reviewed) on the 15th, PR 7 (untouched) on the 16th.
-  assert.deepEqual(s.zeroTouchPct, [null, null, null, null, null, 0, 50]);
-  // PR open -> merged: #5 50m, #6 54m on the 15th; #7 38m on the 16th.
-  assert.equal(Math.round(s.mergeMedianMin[6]), 38);
-  assert.equal(Math.round(s.mergeMedianAllMin), 50);
-
-  const empty = dailySeries([], { now: at(FIXTURE_NOW), days: 3 });
-  assert.deepEqual(empty.merged, [0, 0, 0]);
-  assert.deepEqual(empty.checksPassPct, [null, null, null]);
-  assert.equal(empty.checks.pct, null);
-  assert.equal(empty.mergeMedianAllMin, null);
-});
-
-test('pipeline: one card per task or task-less PR, in the lane of its latest stage, with tags', () => {
-  const { lanes, total } = pipeline(fixture());
-  assert.deepEqual(lanes.map((l) => l.key), PIPELINE_LANES.map((l) => l.key));
-  assert.equal(lanes.length, 7);
-  const lane = (k) => lanes.find((l) => l.key === k).cards;
-  const where = Object.fromEntries(lanes.flatMap((l) => l.cards.map((c) => [c.label, l.key])));
-  assert.deepEqual(where, {
-    'en/time-expression': 'ready',
-    'en/relative': 'ready',
-    'en/month-parser': 'running',
-    'en/casual-date': 'running',
-    'PR #9': 'queued',
-    'PR #5': 'merged',
-    'en/weekday-parser': 'deployed',
-    'en/ordinal': 'deployed',
-  });
-  assert.equal(total, 8);
-  const month = lane('running').find((c) => c.label === 'en/month-parser');
-  assert.deepEqual(month.tags.map((t) => t.text), ['repair a2', 'gates failure']);
-  assert.equal(month.tags[1].title, 'golden:en/month#3');
-  assert.deepEqual([month.issue, month.prs, month.attempt, month.model], [43, [8], 2, 'pinned-model-a']);
-  assert.deepEqual(lane('ready').map((c) => c.tags[0].text), ['needs human', 'stale contract']);
-  // Done lanes put the newest first.
-  assert.deepEqual(lane('deployed').map((c) => c.label), ['en/weekday-parser', 'en/ordinal']);
-  assert.deepEqual(pipeline([]).total, 0);
-});
-
-test('pipeline: dry-run decisions never move a card; cancelled removes it', () => {
-  const events = [
-    mk('ready', '2026-10-16T08:00:00Z', { task: 't/a', issue: 1 }),
-    mk('dispatched', '2026-10-16T08:05:00Z', { task: 't/a', issue: 1, attempt: 1, effect: 'dispatch', reason: 'ready' }, true),
-    mk('ready', '2026-10-16T08:00:00Z', { task: 't/b', issue: 2 }),
-    mk('cancelled', '2026-10-16T08:10:00Z', { task: 't/b', issue: 2, effect: 'close', reason: 'owner' }),
-  ];
-  const { lanes } = pipeline(events);
-  const ready = lanes.find((l) => l.key === 'ready').cards;
-  assert.deepEqual(ready.map((c) => c.label), ['t/a']);
-  assert.deepEqual(ready[0].tags.map((t) => t.text), ['dry-run plan']);
-  assert.equal(lanes.find((l) => l.key === 'running').cards.length, 0);
-});
-
-test('pipeline: a delayed completion after cancellation keeps the card out; a reopening event brings it back', () => {
-  const base = [
-    mk('dispatched', '2026-10-16T08:05:00Z', { task: 't/c', issue: 3, attempt: 1 }),
-    mk('cancelled', '2026-10-16T08:10:00Z', { task: 't/c', issue: 3, effect: 'close', reason: 'owner' }),
-    mk('run_finished', '2026-10-16T09:00:00Z', { task: 't/c', issue: 3, attempt: 1, aic: 40 }),
-    mk('run_started', '2026-10-16T09:01:00Z', { task: 't/c', issue: 3, attempt: 1 }),
-  ];
-  assert.equal(pipeline(base).total, 0);
-  const reopened = pipeline([...base, mk('dispatched', '2026-10-16T10:00:00Z', { task: 't/c', issue: 3, attempt: 2 })]);
-  assert.deepEqual(reopened.lanes.find((l) => l.key === 'running').cards.map((c) => [c.label, c.attempt]), [['t/c', 2]]);
-});
-
-test('stage breakdown: stacked segments per task and the stage with the largest share', () => {
-  const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
-  const sb = stageBreakdown(m.stageTimes);
-  const weekday = sb.rows.find((r) => r.label === 'en/weekday-parser');
-  assert.deepEqual(weekday.segments.map((s) => s.stage), ['ready', 'picked', 'running', 'pr-open', 'checks', 'queued', 'merged']);
-  assert.equal(weekday.totalMs, at('2026-10-16T09:25:00Z') - at('2026-10-16T08:00:00Z'));
-  assert.equal(sb.maxMs, Math.max(...sb.rows.map((r) => r.totalMs)));
-  assert.equal(sb.insight.stage, 'running');
-  assert.equal(sb.insight.label, 'Agent running');
-  assert.equal(Math.round(sb.insight.pct), 33);
-  assert.equal(sb.insight.tasks, sb.rows.length);
-  assert.equal(sb.average.label, 'Average');
-  assert.equal(Math.round(sb.average.totalMs), Math.round(sb.rows.reduce((a, r) => a + r.totalMs, 0) / sb.rows.length));
-  assert.deepEqual(stageBreakdown([]), { rows: [], average: null, maxMs: 0, insight: null });
-});
-
-test('cost summary: highest first, average against the 1,000 AIC per-task budget', () => {
-  const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
-  const c = costSummary(m.tokensPerTask);
-  assert.deepEqual(c.rows.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 312], ['en/ordinal', 280]]);
-  assert.equal(c.maxAic, 410);
-  assert.equal(c.avgAic, 334);
-  assert.equal(Math.round(c.pct * 10) / 10, 33.4);
-  assert.deepEqual(c.overBudget, []);
-  assert.deepEqual(costSummary({ rows: [{ task: 'x', aic: 1500 }] }).overBudget, ['x']);
-  assert.equal(costSummary({ rows: [] }).avgAic, null);
-  assert.equal(typicalRunMs(fixture()), 2040000); // median of 34m, 24m50s, 38m
-  assert.equal(typicalRunMs([]), null);
 });
 
 test('only day files listed in the audit tree are fetched, so missing days cause no 404s', () => {
@@ -143,45 +33,6 @@ test('only day files listed in the audit tree are fetched, so missing days cause
 });
 
 // --- closed PRs and owner reviews (factory#4 data fixes) ----------------------------
-
-const prEvents = () => [
-  mk('pr_opened', '2026-10-16T08:00:00Z', { pr: 16, author: 'owner' }),
-  mk('pr_opened', '2026-10-16T08:01:00Z', { pr: 17, author: 'owner' }),
-  mk('check_result', '2026-10-16T08:10:00Z', { workflow: 'ci', prs: [17], conclusion: 'success' }),
-  mk('pr_opened', '2026-10-16T08:02:00Z', { pr: 20, author: 'owner' }),
-  mk('check_result', '2026-10-16T08:12:00Z', { workflow: 'ci', prs: [20], conclusion: 'success' }),
-  mk('pr_opened', '2026-10-16T08:03:00Z', { pr: 21, author: 'owner' }),
-  mk('queued', '2026-10-16T08:20:00Z', { pr: 21, actor: 'owner', at: '2026-10-16T08:20:00Z' }),
-  mk('pr_opened', '2026-10-16T08:04:00Z', { pr: 22, author: 'owner' }),
-  mk('pr_opened', '2026-10-16T08:05:00Z', { pr: 5, author: 'owner' }),
-  mk('merged', '2026-10-16T08:30:00Z', { pr: 5, merge_commit_sha: 'a'.repeat(40) }),
-  mk('pr_opened', '2026-10-16T08:06:00Z', { pr: 30, task: 't/x', author: 'bot' }),
-  mk('check_result', '2026-10-16T08:40:00Z', { workflow: 'gates', prs: [30], conclusion: 'failure' }),
-];
-
-test('closed PRs: only open PRs stay in PR lanes; closed ones are counted, merged ones untouched', () => {
-  const pl = pipeline(prEvents(), { openPrs: new Set([20, 22]) });
-  const where = Object.fromEntries(pl.lanes.flatMap((l) => l.cards.map((c) => [c.label, l.key])));
-  assert.deepEqual(where, { 'PR #20': 'checks', 'PR #22': 'pr-open', 'PR #5': 'merged' });
-  assert.deepEqual(pl.closed.map((c) => c.label), ['PR #16', 'PR #17', 'PR #21', 't/x']);
-  assert.equal(pl.prStateKnown, true);
-  assert.ok(pl.lanes.every((l) => !l.prStateUnknown));
-  assert.equal(pl.total, 3);
-});
-
-test('closed PRs: without the open-PR list, cards stay and PR lanes say the state is unknown', () => {
-  for (const pl of [pipeline(prEvents()), pipeline(prEvents(), { openPrs: null })]) {
-    assert.equal(pl.prStateKnown, false);
-    assert.deepEqual(pl.closed, []);
-    const unknown = pl.lanes.filter((l) => l.prStateUnknown).map((l) => l.key);
-    assert.deepEqual(unknown, ['pr-open', 'checks', 'queued']);
-    assert.equal(pl.lanes.find((l) => l.key === 'merged').prStateUnknown, false);
-    assert.equal(pl.total, 7);
-  }
-  // Sample data: PRs opened and never merged count as open.
-  assert.deepEqual([...unmergedPrs(prEvents())].sort((a, b) => a - b), [16, 17, 20, 21, 22, 30]);
-  assert.equal(pipeline(fixture(), { openPrs: unmergedPrs(fixture()) }).closed.length, 0);
-});
 
 test('tier matcher: bold or plain "Tier:" with human or owner, labels, drafts excluded', () => {
   const yes = [
@@ -236,82 +87,6 @@ test('needs-you: owner reviews are listed oldest first, after deduping audit ite
 });
 
 // --- review of factory#4 -----------------------------------------------------------
-
-const laneOf = (events, label, opts) => {
-  for (const l of pipeline(events, opts).lanes) for (const c of l.cards) if (c.label === label) return l.key;
-  return null;
-};
-const cardOf = (events, label, opts) => pipeline(events, opts).lanes.flatMap((l) => l.cards).find((c) => c.label === label);
-
-test('pipeline: a late run_finished never moves a merged or deployed card back; a real repair does', () => {
-  const T = { task: 't/a', issue: 1 };
-  const base = [
-    mk('dispatched', '2026-10-16T08:00:00Z', { ...T, attempt: 1, effect: 'dispatch', reason: 'ready' }),
-    mk('pr_opened', '2026-10-16T08:30:00Z', { ...T, pr: 10, head_sha: 'a'.repeat(40), author: 'bot' }),
-    mk('merged', '2026-10-16T09:00:00Z', { ...T, pr: 10, merge_commit_sha: 'b'.repeat(40) }),
-  ];
-  const finished = mk('run_finished', '2026-10-17T02:00:00Z', { ...T, attempt: 1, aic: 100 });
-  const deployed = mk('deployed', '2026-10-16T09:20:00Z', { ...T, pr: 10 });
-  // Collector record after the merge (and after the deploy): the card stays put.
-  assert.equal(laneOf([...base, finished], 't/a'), 'merged');
-  assert.equal(laneOf([...base, deployed, finished], 't/a'), 'deployed');
-  // Record before the merge: the merge still wins.
-  assert.equal(laneOf([base[0], base[1], finished, base[2]], 't/a'), 'merged');
-  // Other late records don't undo a merge either (the merge queue may log dequeued after merged).
-  assert.equal(laneOf([...base, mk('dequeued', '2026-10-16T09:00:01Z', { pr: 10, actor: 'bot' })], 't/a'), 'merged');
-  // A real repair moves it back to Running; a dry-run one doesn't.
-  const repair = (dry) => mk('repair_dispatched', '2026-10-16T10:00:00Z', { ...T, pr: 10, attempt: 2, effect: 'dispatch', reason: 'regression' }, dry);
-  assert.equal(laneOf([...base, finished, repair(false)], 't/a'), 'running');
-  assert.equal(laneOf([...base, finished, repair(true)], 't/a'), 'merged');
-  // Forward moves by records still work: dispatched (ready lane) -> run_finished stays Running.
-  assert.equal(laneOf([mk('ready', '2026-10-16T07:00:00Z', T), base[0], finished], 't/a'), 'running');
-});
-
-test('pipeline: human_action and contract_pinned clear side-state tags; dry-run decisions do not', () => {
-  const nh = mk('needs_human', '2026-10-16T08:00:00Z', { task: 't/a', issue: 1, pr: 10, effect: 'label', reason: 'r' });
-  const opened = mk('pr_opened', '2026-10-16T07:00:00Z', { task: 't/a', pr: 10, author: 'bot' });
-  const review = mk('human_action', '2026-10-16T09:00:00Z', { action: 'review', pr: 10, reviewer: 'owner', state: 'approved', submitted_at: '2026-10-16T09:00:00Z' }, true);
-  const tags = (events) => cardOf(events, 't/a', { openPrs: new Set([10]) }).tags.map((t) => t.text);
-  assert.deepEqual(tags([opened, nh]), ['needs human']);
-  assert.deepEqual(tags([opened, nh, review]), [], 'human_action is a fact, even with dry_run: true');
-
-  const stale = mk('stale_contract', '2026-10-16T08:00:00Z', { task: 't/b', issue: 2, effect: 'hold', reason: 'contract-changed' });
-  const pinned = mk('contract_pinned', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, contract_sha: 'abc1234' });
-  const tagsB = (events) => cardOf(events, 't/b').tags.map((t) => t.text);
-  assert.deepEqual(tagsB([stale]), ['stale contract']);
-  assert.deepEqual(tagsB([stale, pinned]), []);
-  const dryPick = mk('picked', '2026-10-16T09:00:00Z', { task: 't/b', issue: 2, effect: 'pick', reason: 'priority' }, true);
-  assert.deepEqual(tagsB([stale, dryPick]), ['stale contract', 'dry-run plan']);
-});
-
-test('pipeline: failure tags come from the latest result per workflow on the current head', () => {
-  const head1 = '1'.repeat(40);
-  const head2 = '2'.repeat(40);
-  const chk = (t, workflow, conclusion, head, extra = {}) => mk('check_result', t, { workflow, conclusion, prs: [7], head_sha: head, ...extra });
-  const opened = mk('pr_opened', '2026-10-16T08:00:00Z', { pr: 7, head_sha: head1, author: 'owner' });
-  const tags = (events) => cardOf(events, 'PR #7', { openPrs: new Set([7]) }).tags.map((t) => t.text);
-  // gates fails, then ci succeeds on the same head: the gates failure is still shown.
-  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1, { failure_signature: 'golden:x#1' }), chk('2026-10-16T08:11:00Z', 'ci', 'success', head1)]), ['gates failure']);
-  // A later gates success on that head clears it.
-  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T08:20:00Z', 'gates', 'success', head1)]), []);
-  // Both workflows failing show both.
-  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T08:11:00Z', 'ci', 'timed_out', head1)]), ['gates failure', 'ci timed_out']);
-  // A new head starts afresh, and a late result for the old head is ignored.
-  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'failure', head1), chk('2026-10-16T09:00:00Z', 'ci', 'success', head2), chk('2026-10-16T09:01:00Z', 'gates', 'failure', head1)]), []);
-  // Skipped and neutral aren't failures.
-  assert.deepEqual(tags([opened, chk('2026-10-16T08:10:00Z', 'gates', 'skipped', head1), chk('2026-10-16T08:11:00Z', 'ci', 'neutral', head1)]), []);
-});
-
-test('sparkline geometry marks every valid point and never bridges a gap', () => {
-  const g = sparkSegments([100, null, 50, null, 75]);
-  assert.deepEqual(g.points.map((p) => [p.i, p.v]), [[0, 100], [2, 50], [4, 75]]);
-  assert.deepEqual(g.segments, []);
-  const h = sparkSegments([1, 2, null, 3, null, 4, 5, 6]);
-  assert.equal(h.points.length, 6);
-  assert.deepEqual(h.segments.map((seg) => seg.map((p) => p.i)), [[0, 1], [5, 6, 7]]);
-  assert.deepEqual(sparkSegments([null, null]), { points: [], segments: [] });
-  assert.deepEqual(sparkSegments(undefined), { points: [], segments: [] });
-});
 
 // --- glance view (one health chip, compact numbers) ----------------------------------
 
@@ -392,25 +167,21 @@ test('compact ages are one token; short titles keep at most N words; refs are re
   assert.equal(prRef(home, null, home), '—');
 });
 
-test('not loaded yet is neutral: the health chip says Loading and the heartbeat tile "…", never red', () => {
+test('not loaded yet is neutral: the health chip and the state say Loading, never red', () => {
   // Before the first load there are no events, so the raw heartbeat level is "none" (an alert).
   const hb = deriveMetrics([], { now: at(FIXTURE_NOW) }).heartbeat;
   assert.equal(hb.level, 'none');
-  assert.deepEqual(heartbeatTile(hb, false), { level: 'loading', value: '…' });
   assert.deepEqual(healthSummary({ loaded: false, heartbeat: hb, chain: null }), { level: 'loading', label: 'Loading', reasons: ['Loading the audit log'] });
+  assert.deepEqual(stateLine({ loaded: false }), { text: 'Loading…', level: 'loading' });
   // Even a stale verifier doesn't turn the loading state red; a real failure does.
   const stale = { level: 'alert', reason: 'verifier-stale', ageMin: 30 * 60, count: 3 };
   assert.equal(healthSummary({ loaded: false, verifier: stale }).level, 'loading');
   assert.equal(healthSummary({ loaded: false, error: 'offline' }).level, 'alert');
-  // After the load: real levels, and a missing heartbeat is an alert.
-  assert.deepEqual(heartbeatTile(hb, true), { level: 'alert', value: '—' });
+  // After the load: real levels; the heartbeat turns amber after 8 h and red after 12 h.
   const m = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) });
-  assert.deepEqual(heartbeatTile(m.heartbeat, true), { level: 'ok', value: '11m' });
-  assert.equal(heartbeatTile(deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 70 * 60000 }).heartbeat, true).level, 'ok');
-  const late = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 8 * 60 * 60000 }).heartbeat;
-  assert.deepEqual(heartbeatTile(late, true), { level: 'warn', value: '8h' });
-  const staleHb = deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 12 * 60 * 60000 }).heartbeat;
-  assert.deepEqual(heartbeatTile(staleHb, true), { level: 'alert', value: '12h' });
+  assert.equal(m.heartbeat.level, 'ok');
+  assert.equal(deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 8 * 60 * 60000 }).heartbeat.level, 'warn');
+  assert.equal(deriveMetrics(fixture(), { now: at(FIXTURE_NOW) + 12 * 60 * 60000 }).heartbeat.level, 'alert');
 });
 
 test('health chip folds in the verifier: stale or unknown is Down, late or not set up is Degraded', () => {
@@ -470,18 +241,15 @@ test('the quiet fixture reads as the quiet live page: Healthy, nothing needs you
   const v = verifierStatus({ status: 'ok', text: buildQuietAnchorLines().join('\n') + '\n' }, NOW);
   assert.deepEqual([v.level, v.count, verifierReason(v)], ['ok', 16, 'Verified 1h ago · 16 anchors']);
   assert.deepEqual(healthSummary({ loaded: true, chain: { status: 'verified' }, heartbeat: m.heartbeat, dataAgeMin: null, verifier: v }), { level: 'ok', label: 'Healthy', reasons: [] });
-  assert.deepEqual(heartbeatTile(m.heartbeat, true), { level: 'ok', value: '12m' });
+  assert.equal(m.heartbeat.level, 'ok');
+  assert.equal(Math.round(m.heartbeat.ageMin), 12);
   assert.deepEqual(combineNeedsYou(m.needsYou.items, [], 'sabbasi3-factory-lab/chrono-node-rs'), []);
   assert.deepEqual([m.killSwitch.enabled, m.dryRun, m.running.available, m.running.rows.length], [false, true, false, 0]);
-  const pl = pipeline(events, { openPrs: unmergedPrs(events) });
-  assert.deepEqual(pl.lanes.map((l) => l.cards.length), [0, 0, 0, 0, 0, 10, 0]);
+  // The board: the three quiet-week tasks are done (their merges are facts, even in dry run).
+  const meta = JSON.parse(readFileSync(QUIET_META_FIXTURE_PATH, 'utf8'));
+  const entries = parseTaskmap(meta.taskmap);
+  const board = taskBoard(events, taskCatalog(entries, new Map(entries.map((e) => [e.id, parseContract(meta.contracts[e.id])]))), { needsItems: m.needsYou.items });
+  assert.deepEqual(board.counts, { done: 3, running: 0, needs: 0, waiting: 0 });
+  assert.deepEqual(stateLine({ board, dispatch: { state: 'paused', reason: 'kill_switch' } }), { text: 'Idle: all 3 tasks done', level: 'ok' });
 });
 
-test('anchors per day: counts per UTC day over the window, ignoring anchors outside it', () => {
-  const now = at('2026-10-16T12:00:00Z');
-  const a = (t) => ({ at: t });
-  const r = anchorsPerDay([a('2026-10-09T23:00:00Z'), a('2026-10-15T01:00:00Z'), a('2026-10-16T00:00:00Z'), a('2026-10-16T11:00:00Z'), a('bad')], { now, days: 3 });
-  assert.deepEqual(r.days, ['2026-10-14', '2026-10-15', '2026-10-16']);
-  assert.deepEqual(r.counts, [0, 1, 2]);
-  assert.deepEqual(anchorsPerDay([], { now, days: 2 }).counts, [0, 0]);
-});
