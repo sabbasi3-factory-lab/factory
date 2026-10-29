@@ -17,8 +17,10 @@
 // Then 140: the owner asked for the page to say what a task is, so a one-line caption (14 words)
 // sits under the Tasks heading; nothing else was trimmed to make room. 135 would fit the caption
 // alone, but the "modern product look" theme also brings Details and the footer (6 words) above
-// the fold on the live page (26 tasks): 120 + 14 + 6 = 140.
-export const BUDGETS = Object.freeze({ foldWords: 140, totalWords: 250, sentenceWords: 8, foldY: 900 });
+// the fold on the live page (26 tasks): 120 + 14 + 6 = 140. Then 135: the soft redesign turns the
+// five sentences into KPI cards (label, number, caption), which say the same in about 28 fewer
+// words; the header subtitle, the area counts and the overall progress add about 15 back.
+export const BUDGETS = Object.freeze({ foldWords: 135, totalWords: 250, sentenceWords: 8, foldY: 900 });
 
 /** Truthy once the dashboard has rendered its data (app.js sets data-ready="1"). */
 export const READY_EXPR = "document.documentElement.dataset.ready === '1'";
@@ -168,7 +170,7 @@ export function measureGlance({ foldY = 900, maxSentenceWords = 8 } = {}) {
 }
 
 /**
- * The layout: the status line, the scoreboard (and its five items), the task board and Details,
+ * The layout: the status pill, the KPI cards (the five items), the task board and Details,
  * as document rectangles ({ id, top, bottom, left, width }, in px from the top of the page), so a
  * test can check what sits above the fold.
  */

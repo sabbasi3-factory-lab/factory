@@ -97,7 +97,28 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     });
   }
 
-  test('quiet: the status line and the scoreboard read as plain sentences', async () => {
+  test('390x844: the Settings popover opens inside the viewport, with the icon buttons on the right', async () => {
+    await open('1');
+    await page.setViewport(390, 844);
+    try {
+      const r = await page.evaluate(`(() => {
+        const d = document.getElementById('settings');
+        d.open = true;
+        const f = document.getElementById('token-form').getBoundingClientRect();
+        const a = document.querySelector('.actions').getBoundingClientRect();
+        const out = { left: Math.round(f.left), right: Math.round(f.right), width: innerWidth, actionsRight: Math.round(a.right) };
+        d.open = false;
+        return out;
+      })()`);
+      const detail = JSON.stringify(r);
+      assert.ok(r.left >= 0 && r.right <= r.width, `the Settings form stays on screen: ${detail}`);
+      assert.ok(r.width - r.actionsRight <= 24, `the actions stay right-aligned: ${detail}`);
+    } finally {
+      await page.setViewport(1440, 900);
+    }
+  });
+
+  test('quiet: the status pill and the KPI cards read as labelled phrases', async () => {
     await open('quiet');
     await page.setViewport(1440, 900);
     const r = await page.evaluate(`(() => {
@@ -115,20 +136,20 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     })()`);
     assert.equal(r.status, 'Healthy · switched off · nothing needs you · Dry run · Sample');
     assert.deepEqual(r.score, [
-      'Shipped: 3 of 3 tasks / 2 routine + 1 core / gh-aw Outcomes not available yet',
-      'Speed: about 15 min per task / Oct 15 → 16',
-      'Running cost: about $0.00',
-      'Hands-off: — gh-aw Outcomes not available yet / 0 manual steps; not live yet',
-      'Quality: 0 reverts · reviewer blocked 0 changes · 1 safety drill passed (0 defects fixed)',
+      'Shipped / 3/3 tasks / 2 routine · 1 core / gh-aw Outcomes not available yet',
+      'Speed / 15 min / per task · Oct 15 → 16',
+      'Running cost / $0.00 / agent runs',
+      'Hands-off / — / gh-aw Outcomes not available yet / 0 manual steps; not live yet',
+      'Quality / 0 reverts / 0 changes blocked · 1 drill passed',
     ]);
-    assert.deepEqual(r.bigs, [1, 1, 1, 1, 1], 'one big number per sentence');
+    assert.deepEqual(r.bigs, [1, 1, 1, 1, 1], 'one big number per card');
     assert.equal(r.costTip, "Build cost unavailable: buildCost missing from the sample. Run: the real and drill split needs gh-aw Outcomes, not available yet.");
     assert.equal(r.drillsHref, 'https://github.com/sabbasi3-factory-lab/factory/blob/main/docs/JOURNAL.md');
     assert.deepEqual(r.tiles, [
       ['casual-time-parser: done', '#i-ok'], ['month-name-parser: done', '#i-ok'], ['iso-format-parser: done', '#i-ok'],
     ]);
     assert.deepEqual(r.groups, ['Casual', 'Months', 'Common parsers']);
-    assert.equal(r.legend, '', 'one state only: the shipped sentence says it');
+    assert.equal(r.legend, '', 'one state only: the progress bar says it');
     // Switched off is the deliberate safe state: muted, not the alert colour.
     const colour = await page.evaluate(`(() => { const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
       return [getComputedStyle(document.getElementById('state-part')).color, probe('var(--muted)'), probe('var(--alert)')]; })()`);
@@ -243,12 +264,14 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
   });
 
   for (const fx of FIXTURES) {
-    test(`${fx.name}: layout at 1440x900: the status line and the five sentences above the fold, then the board, then Details`, async () => {
+    test(`${fx.name}: layout at 1440x900: the status pill and the five KPI cards above the fold, then the tasks, then Details`, async () => {
       await open(fx.param);
       await page.setViewport(1440, 900);
       const L = await page.call(measureLayout);
       const detail = JSON.stringify(L);
       assert.equal(L.items.length, 5, detail);
+      assert.equal(new Set(L.items.map((it) => it.top)).size, 1, `five KPI cards in one row: ${detail}`);
+      assert.ok(Math.max(...L.items.map((it) => it.width)) - Math.min(...L.items.map((it) => it.width)) <= 1, `equal cards: ${detail}`);
       assert.ok(L.status.bottom <= L.score.top, detail);
       for (const it of L.items) assert.ok(it.bottom <= BUDGETS.foldY, `every scoreboard sentence is above the fold: ${detail}`);
       assert.ok(L.board.top > L.score.bottom && L.details.top > L.board.bottom, `scoreboard, board, Details, top to bottom: ${detail}`);
@@ -280,7 +303,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     await page.setViewport(1440, 900);
     const r = await page.evaluate(`(() => [...document.querySelectorAll('#board .tile')].map((t) => ({
       label: t.getAttribute('aria-label'), icon: t.querySelector('use').getAttribute('href'), href: t.getAttribute('href'),
-      color: getComputedStyle(t).borderLeftColor, tip: document.getElementById(t.getAttribute('aria-describedby'))?.textContent ?? '' })))()`);
+      color: getComputedStyle(t.querySelector('.tile-i')).color, tip: document.getElementById(t.getAttribute('aria-describedby'))?.textContent ?? '' })))()`);
     assert.deepEqual(r.map((t) => [t.label, t.icon]), [
       ['iso-date: waiting', '#i-wait'], ['ordinal: done', '#i-ok'], ['weekday-parser: done', '#i-ok'], ['casual-date: running', '#i-play'],
       ['time-expression: needs you', '#i-warn'], ['month-parser: running', '#i-play'], ['range: waiting', '#i-wait'], ['relative: needs you', '#i-warn'],
@@ -303,7 +326,19 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       return { text: c.innerText.trim(), shown: r.height > 0, below: r.top >= document.getElementById('board-h').getBoundingClientRect().bottom && r.bottom <= document.getElementById('board').getBoundingClientRect().top,
         tip: document.getElementById('board-info-tip').textContent }; })()`);
     assert.deepEqual(def, { text: 'Task = one chrono-node parser or refiner, in Rust. One contract, one issue, one PR.', shown: true, below: true,
-      tip: "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a tile to view its issue; icons show state." });
+      tip: "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a chip to view its issue; icons show state." });
+    // Progress: the overall bar (2 of 8 done), then each area's count and thin bar, in board order.
+    const prog = await page.evaluate(`(() => { const bar = document.querySelector('#board-progress [role="progressbar"]'); const fill = (b) => Math.round(100 * b.querySelector('.bar-fill').getBoundingClientRect().width / b.getBoundingClientRect().width);
+      return { text: document.getElementById('board-progress').innerText.replace(/\\s+/g, ' ').trim(), now: bar.getAttribute('aria-valuenow'), max: bar.getAttribute('aria-valuemax'), label: bar.getAttribute('aria-label'), fill: fill(bar),
+        groups: [...document.querySelectorAll('#board .group')].map((g) => [g.querySelector('.group-h').textContent, g.querySelector('.group-count').textContent, fill(g.querySelector('.bar'))]) }; })()`);
+    assert.deepEqual(prog, { text: '2 of 8 done', now: '2', max: '8', label: 'Tasks done', fill: 25,
+      groups: [['Common parsers', '0/1', 0], ['Numeric', '1/1', 100], ['Casual', '1/3', 33], ['Months', '0/2', 0], ['Relative', '0/1', 0]] });
+    // Chips are quiet: no full-width bars; a done chip is neutral, the others take their soft tone.
+    const chips = await page.evaluate(`(() => { const t = [...document.querySelectorAll('#board .tile')]; const probe = (v) => { const e = document.createElement('i'); e.style.backgroundColor = v; document.body.append(e); const c = getComputedStyle(e).backgroundColor; e.remove(); return c; };
+      return { maxShare: Math.max(...t.map((x) => x.getBoundingClientRect().width / x.closest('.group').getBoundingClientRect().width)),
+        bg: Object.fromEntries(['done', 'running', 'needs', 'waiting'].map((st) => [st, getComputedStyle(document.querySelector('#board .tile--' + st)).backgroundColor === probe(st === 'done' ? 'var(--panel)' : 'var(--' + (st === 'running' ? 'info' : st === 'needs' ? 'needs' : 'warn') + '-bg)')])) }; })()`);
+    assert.ok(chips.maxShare < 0.9, `chips are not full-width bars: ${JSON.stringify(chips)}`);
+    assert.deepEqual(chips.bg, { done: true, running: true, needs: true, waiting: true });
     // Keyboard: a tile takes focus and shows its tooltip.
     const tip = await page.evaluate("(() => { document.querySelector('#board .tile').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
     assert.equal(tip, 'common/iso-date: ready, waiting for a free slot. Core task; select to view issue #47.');
@@ -325,11 +360,11 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(r.status, 'Healthy · working on 2 tasks: casual-date, month-parser · 2 tasks need you: #45, #46 · Sample');
     assert.deepEqual(r.running, ['https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/44', 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/issues/43']);
     assert.deepEqual(r.score, [
-      'Shipped: 2 of 8 tasks / 2 routine + 0 core / gh-aw Outcomes: 2 PRs accepted, 0 rejected, 1 pending',
-      'Speed: about 77 min per task / Oct 15 → 16',
-      'Total cost: about $1,121 / = $1,110 one-time build + $10.97 running · about $5.49 per accepted PR',
-      'Hands-off: 1 of 2 PRs merged with no human edits (gh-aw zero-touch) / 1 manual step after go-live',
-      'Quality: 0 reverts · reviewer blocked 0 changes · 2 safety drills passed (1 defect fixed)',
+      'Shipped / 2/8 tasks / 2 routine · 0 core / gh-aw: 2 accepted · 0 rejected · 1 pending',
+      'Speed / 77 min / per task · Oct 15 → 16',
+      'Total cost / $1,121 / $1,110 build + $10.97 run / $5.49 per accepted PR',
+      'Hands-off / 1/2 / PRs with no human edits / 1 manual step',
+      'Quality / 0 reverts / 0 changes blocked · 2 drills passed',
     ]);
     // The link opens Details at the list of steps.
     assert.equal(r.stepsLink, '#human-steps');
@@ -491,27 +526,27 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       const item = (k) => document.querySelector('.score--' + k);
       const tipOf = (el) => document.getElementById(el.getAttribute('aria-describedby')).textContent;
       return { cost: [...item('cost').querySelectorAll('p')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim()), costTip: tipOf(item('cost')),
-        quality: item('quality').querySelector('p').innerText.replace(/\\s+/g, ' ').trim(), qualityTip: tipOf(item('quality')) };
+        quality: [...item('quality').querySelectorAll('p')].map((p) => p.innerText.replace(/\\s+/g, ' ').trim()), qualityTip: tipOf(item('quality')) };
     })()`);
-    assert.deepEqual(r.cost, ['Running cost: about $10.97', '$10.97 tasks · about $5.49 per accepted PR']);
+    assert.deepEqual(r.cost, ['Running cost', '$10.97', '$10.97 tasks', '$5.49 per accepted PR']);
     assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\. Run: /);
-    assert.equal(r.quality, 'Quality: 0 reverts · reviewer blocked 0 changes');
+    assert.deepEqual(r.quality, ['Quality', '0 reverts', '0 changes blocked']);
     assert.equal(r.qualityTip, 'Reverts and changes the reviewer blocked before merge count real work only. Drill record unavailable: drills: unexpected extra.');
     await open('1', { force: true });
   });
 
-  test('both themes: the dark theme really changes the colours, and the tiles stay told apart', async () => {
+  test('both themes: the dark theme really changes the colours, and the task chips stay told apart', async () => {
     await open('1');
     const colours = async (scheme) => {
       await page.setColorScheme(scheme);
       return page.evaluate(`(() => ({ bg: getComputedStyle(document.body).backgroundColor,
-        tiles: [...new Set([...document.querySelectorAll('#board .tile')].map((t) => getComputedStyle(t).borderLeftColor))].length }))()`);
+        tiles: [...new Set([...document.querySelectorAll('#board .tile-i')].map((t) => getComputedStyle(t).color))].length }))()`);
     };
     const dark = await colours('dark');
     const light = await colours('light');
     assert.notEqual(dark.bg, light.bg);
-    assert.equal(dark.bg, 'rgb(15, 17, 21)');
-    assert.equal(light.bg, 'rgb(247, 248, 250)');
+    assert.equal(dark.bg, 'rgb(14, 17, 23)');
+    assert.equal(light.bg, 'rgb(245, 246, 250)');
     assert.equal(dark.tiles, 4);
     assert.equal(light.tiles, 4);
   });
@@ -531,15 +566,25 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
         document.querySelector('a.skip').focus();
         return {
           fg: worst('var(--fg)'), muted: worst('var(--muted)'), accent: worst('var(--accent)'),
-          tinted: Math.min(ratio('var(--ok)', 'var(--ok-bg)'), ratio('var(--warn)', 'var(--warn-bg)'), ratio('var(--alert)', 'var(--alert-bg)'), ratio('var(--accent)', 'var(--accent-bg)'), ratio('var(--muted)', 'var(--panel-2)')),
+          tinted: Math.min(ratio('var(--ok)', 'var(--ok-bg)'), ratio('var(--warn)', 'var(--warn-bg)'), ratio('var(--alert)', 'var(--alert-bg)'), ratio('var(--needs)', 'var(--needs-bg)'),
+            ratio('var(--info)', 'var(--info-bg)'), ratio('var(--accent)', 'var(--accent-bg)'), ratio('var(--muted)', 'var(--panel-2)')),
+          // The status pill and the chips: text-colour text on every soft tint.
+          onTint: worst('var(--fg)', ['var(--ok-bg)', 'var(--warn-bg)', 'var(--needs-bg)', 'var(--info-bg)', 'var(--accent-bg)']),
+          // Icons (KPI icons on their tinted circles, chip state icons on the cards): 3:1 or more.
+          icons: Math.min(ratio('var(--ok)', 'var(--panel)'), ratio('var(--info)', 'var(--panel)'), ratio('var(--needs)', 'var(--panel)'), ratio('var(--warn)', 'var(--panel)'), ratio('var(--accent)', 'var(--accent-bg)')),
           logo: ratio('var(--on-accent)', 'var(--accent)'),
+          // Stage fills (the time chart and its legend in Details): 3:1 on the card and on the chart track.
+          stages: Object.fromEntries(['ready', 'picked', 'running', 'pr-open', 'checks', 'queued', 'merged', 'deployed']
+            .map((st) => [st, Math.round(100 * Math.min(ratio('var(--s-' + st + ')', 'var(--panel)'), ratio('var(--s-' + st + ')', 'var(--panel-2)'))) / 100])),
         };
       })()`);
       await press('Tab');
       const ring = await page.evaluate(`(() => { const s = getComputedStyle(document.activeElement); const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
         return { style: s.outlineStyle, width: parseFloat(s.outlineWidth), isAccent: s.outlineColor === probe('var(--accent)') }; })()`);
       const detail = `${scheme}: ${JSON.stringify({ ...r, ring })}`;
-      assert.ok(r.fg >= 4.5 && r.muted >= 4.5 && r.accent >= 4.5 && r.tinted >= 4.5, detail);
+      assert.ok(r.fg >= 4.5 && r.muted >= 4.5 && r.accent >= 4.5 && r.tinted >= 4.5 && r.onTint >= 4.5, detail);
+      assert.ok(r.icons >= 3, detail);
+      assert.deepEqual(Object.entries(r.stages).filter(([, v]) => v < 3), [], `every stage fill is 3:1 or more: ${detail}`);
       assert.ok(r.logo >= 3, detail);
       assert.deepEqual([ring.style, ring.width >= 2, ring.isAccent], ['solid', true, true], detail);
     }

@@ -9,7 +9,7 @@ import {
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
   allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, parseOutcomesFile, outcomesReadDue, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
-  isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
+  boardProgress, isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -950,7 +950,7 @@ function initTips() {
 
 // "loading" is neutral on purpose: before the first load nothing is known to be wrong.
 const TONE = { ok: 'ok', warn: 'warn', alert: 'alert', info: 'info', loading: 'muted' };
-const LEVEL_ICON = { ok: 'ok', warn: 'warn', alert: 'fail', info: 'dot', loading: null };
+const LEVEL_ICON = { ok: 'dot', warn: 'warn', alert: 'fail', info: 'dot', loading: null };
 const HB_WARN = formatLimit(DEFAULTS.heartbeatWarnMin);
 const HB_ALERT = formatLimit(DEFAULTS.heartbeatAlertMin);
 const VF_WARN = formatLimit(VERIFIER_LIMITS.warnMin);
@@ -1037,8 +1037,8 @@ function renderHeader(m, v, needs) {
     meta.push(getToken() ? 'your token' : 'no token');
   }
   const age = state.lastOkAt == null ? null : compactAge(Date.now() - state.lastOkAt);
-  // The clock icon and the tooltip say "updated"; the visible text is just the age.
-  $('updated-text').textContent = age ? `${age} ago` : state.error ? 'not updated' : 'loading…';
+  // "updated 13s ago"; the tooltip says where from and the API requests left.
+  $('updated-text').textContent = age ? `updated ${age} ago` : state.error ? 'not updated' : 'loading…';
   const r = state.rate;
   setTip('updated', `${age ? `Data updated ${age} ago` : 'Data not loaded yet'}, from the audit log on GitHub.${!FIXTURE && r ? ` ${r.remaining} of ${r.limit} API requests left this hour.` : ''}`);
   if (version) meta.push(`factory version ${version}`);
@@ -1116,10 +1116,19 @@ function setPart(id, part, tipText) {
   if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
 }
 
+// The status pill takes one soft tone: rose when something is down or needs you, sand for a
+// warning, neutral while loading or switched off, else sage.
+function setGlanceTone(tone) {
+  const el = document.querySelector('.glance');
+  const cls = `glance glance--${tone}`;
+  if (el.className !== cls) el.className = cls;
+}
+
 function renderParts(m, v, needs, health) {
   if (!state.loaded || !m || !v) {
     setPart('state-part', null);
     setPart('needs-part', null);
+    setGlanceTone(health?.level === 'alert' ? 'alert' : health?.level === 'warn' ? 'warn' : 'muted');
     return;
   }
   const p = statusParts({
@@ -1142,10 +1151,13 @@ function renderParts(m, v, needs, health) {
           : 'No hand-offs or PR reviews are waiting for you. Closed issues and PRs are left out.';
   setPart('state-part', p.state, stateTip);
   setPart('needs-part', p.needs, needsTip);
+  const levels = [health.level, p.state.level, p.needs.level];
+  setGlanceTone(levels.includes('alert') ? 'alert' : items.length ? 'needs' : levels.includes('warn') ? 'warn'
+    : health.level === 'loading' || p.state.level === 'info' ? 'muted' : 'ok');
 }
 
 // ---------------------------------------------------------------------------
-// Scoreboard: five sentences, each with one big number; definitions in the tooltips
+// KPI cards: five labelled numbers, each with a caption; definitions in the tooltips
 
 function scoreSig(v) {
   return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known, v.cost.spend,
@@ -1153,19 +1165,20 @@ function scoreSig(v) {
     v.outcomesSum, outcomesStale(v.outcomes, now())];
 }
 
+// One KPI card: a tinted icon and a muted label, the big number with its unit, then the captions.
+const CARD_ICON = { shipped: ['ok', 'ok'], speed: ['bolt', 'info'], cost: ['coin', 'warn'], hands: ['person', 'accent'], quality: ['shield', 'ok'] };
+
 function scoreItem(item, tipText) {
-  // The sentence's leading label ("Shipped:") is muted, so the big number stands out.
-  const main = segNodes(item.main);
-  const label = typeof main[0] === 'string' ? main[0].match(/^[^:]+:/) : null;
-  if (label) main.splice(0, 1, h('span', { class: 'lbl' }, label[0]), main[0].slice(label[0].length));
+  const [iconName, tone] = CARD_ICON[item.key] ?? ['dot', 'accent'];
   return tip(h('li', { class: `score-item score--${item.key}`, 'data-row-key': item.key },
-    h('p', { class: 'score-main' }, main),
+    h('p', { class: 'score-label' }, h('span', { class: `kpi-i kpi-i--${tone}` }, icon(iconName)), item.label),
+    h('p', { class: 'score-main' }, segNodes(item.main)),
     item.subs.map((sub) => h('p', { class: 'score-sub' }, segNodes(sub)))), tipText);
 }
 
 function renderScore(v) {
   if (!state.loaded) {
-    replaceSection('score', h('li', { class: 'score-item' }, h('p', { class: 'score-main' }, h('b', { class: 'big' }, '…'))));
+    replaceSection('score', h('li', { class: 'score-item score-item--loading' }, h('p', { class: 'score-main' }, h('b', { class: 'big' }, '…'))));
     return;
   }
   const st = state.statics;
@@ -1333,27 +1346,43 @@ function taskIssuesLine() {
   return 'Reading the task issues…';
 }
 
+/** A progress bar: a track and a fill whose width (set through the CSSOM) is the percentage. */
+function progressBar(done, total, pct, { label = null, thin = false } = {}) {
+  const attrs = label
+    ? { class: 'bar', role: 'progressbar', 'aria-label': label, 'aria-valuemin': '0', 'aria-valuemax': String(total), 'aria-valuenow': String(done), 'aria-valuetext': `${done} of ${total} done` }
+    : { class: 'bar', 'aria-hidden': 'true' };
+  if (thin) attrs.class += ' bar--thin';
+  return h('div', attrs, withWidth(h('span', { class: `bar-fill${done === total && total ? ' bar-fill--full' : ''}` }), pct));
+}
+
 function renderBoard(v) {
   const b = v.board;
   const mm = state.meta;
   const legend = $('board-legend');
-  // With every task in one state the "Tasks done" number already says it; the tiles' icons and
-  // labels carry the state either way.
+  const progress = $('board-progress');
+  // With every task in one state the progress bar already says it; the chips' icons and labels
+  // carry the state either way.
   const present = TASK_STATES.filter((st) => b.counts[st]);
   legend.replaceChildren(...(state.loaded && present.length > 1 ? present.map((st) => h('span', { class: `lg lg--${st}` }, icon(STATE_ICON[st]), `${b.counts[st]} ${TASK_STATE_LABELS[st]}`)) : []));
-  setTip('board-info', "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a tile to view its issue; icons show state.");
-  if (!state.loaded) {
-    replaceSection('board', empty('… Loading'));
+  setTip('board-info', "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a chip to view its issue; icons show state.");
+  if (!state.loaded || !b.total) {
+    progress.hidden = true;
+    progress.replaceChildren();
+    replaceSection('board', empty(!state.loaded ? '… Loading' : mm.status === 'pending' ? '… Reading the task map' : 'No tasks yet'));
     return;
   }
-  if (!b.total) {
-    replaceSection('board', empty(mm.status === 'pending' ? '… Reading the task map' : 'No tasks yet'));
-    return;
-  }
+  const p = boardProgress(b);
+  progress.hidden = false;
+  progress.replaceChildren(
+    h('p', { class: 'progress-text' }, h('b', { class: 'progress-n' }, `${p.done} of ${p.total}`), ' done'),
+    progressBar(p.done, p.total, p.pct, { label: 'Tasks done' }));
   replaceSection('board',
     mm.status === 'error' ? tip(h('p', { class: 'board-note' }, icon('warn'), 'Task map unavailable'), `${shortError(mm.error)}. Showing the tasks seen in the audit log.`) : null,
     b.groups.map((g, i) => h('div', { class: 'group', role: 'group', 'aria-labelledby': `group-${i}` },
-      h('h3', { class: 'group-h', id: `group-${i}` }, g.label),
+      h('div', { class: 'group-top' },
+        h('h3', { class: 'group-h', id: `group-${i}` }, g.label),
+        h('span', { class: 'group-count' }, `${p.groups[i].done}/${p.groups[i].total}`)),
+      progressBar(p.groups[i].done, p.groups[i].total, p.groups[i].pct, { thin: true }),
       h('ul', { class: 'tiles' }, g.tasks.map(boardTile)))));
 }
 

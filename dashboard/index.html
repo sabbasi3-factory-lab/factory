@@ -17,7 +17,7 @@
     <symbol id="i-factory" viewBox="0 0 24 24"><path d="M3 21V10l5 3V9l5 3V8l5 3V4h3v17z"/><path d="M7 17h2M12 17h2M17 17h1"/></symbol>
     <symbol id="i-ok" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
     <symbol id="i-fail" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
-    <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></symbol>
+    <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="currentColor"/></symbol>
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5 2.5 20h19z"/><path d="M12 9.5v5M12 17.2v.3"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.8 4.5 5.8v5.7c0 4.6 3.1 8 7.5 9.7 4.4-1.7 7.5-5.1 7.5-9.7V5.8z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></symbol>
     <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2.5 12h4l2.2-5.5 4.6 11 2.2-5.5h6"/></symbol>
@@ -44,57 +44,61 @@
     <div class="hbar">
       <div class="brand">
         <span class="logo" aria-hidden="true"><svg class="i"><use href="#i-factory"></use></svg></span>
-        <h1 class="sr-only">Factory control room</h1>
-        <span id="updated" class="updated has-tip" tabindex="0" aria-describedby="updated-tip"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="updated-text">loading…</span><svg class="i i-info" aria-hidden="true"><use href="#i-info"></use></svg><span id="updated-tip" class="tip-src" hidden></span></span>
+        <h1 class="title">Factory<span class="sr-only"> control room</span></h1>
+        <span class="subtitle">chrono-node → Rust</span>
       </div>
-      <div class="actions">
-        <button id="refresh" class="btn btn--icon has-tip" type="button" aria-label="Refresh now" data-tip="Refresh now"><svg class="i" aria-hidden="true"><use href="#i-refresh"></use></svg></button>
-        <button id="theme" class="btn btn--icon has-tip" type="button" aria-label="Switch to the dark theme" data-tip="Switch to the dark theme"><svg class="i" aria-hidden="true"><use href="#i-theme"></use></svg></button>
-        <details id="settings">
-          <summary class="btn btn--icon has-tip" aria-label="Settings" data-tip="Settings: optional token, polling"><svg class="i" aria-hidden="true"><use href="#i-gear"></use></svg></summary>
-          <form id="token-form" class="token-form">
-            <label for="token">Read-only GitHub token (optional)</label>
-            <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" placeholder="not set">
-            <div class="row">
-              <button class="btn" type="submit">Save token</button>
-              <button class="btn" id="forget" type="button">Forget token</button>
-            </div>
-            <p class="hint">Never required. Raises the API limit from 60 to 5,000 requests an hour. It stays in this browser's localStorage and is sent only to api.github.com, never to raw.githubusercontent.com. Use a fine-grained token with public read-only access and no other permissions.</p>
-            <p class="hint" id="poll-hint"></p>
-            <p class="hint" id="meta-settings"></p>
-            <p class="hint">Source: <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a>, audit branch. Add <code>?fixture=1</code> (busy) or <code>?fixture=quiet</code> to the address for sample data.</p>
-          </form>
-        </details>
+      <div class="hright">
+        <p class="glance glance--muted" aria-label="Factory at a glance">
+          <span id="health" class="chip chip--info" tabindex="0">Checking</span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span id="state-part" class="part" hidden></span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span id="needs-part" class="part" hidden></span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span id="dry-badge" class="chip" tabindex="0" hidden></span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span id="mode-badge" class="chip chip--info" tabindex="0" hidden></span>
+        </p>
+        <span id="updated" class="updated has-tip" tabindex="0" aria-describedby="updated-tip"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg><span id="updated-text">loading…</span><span id="updated-tip" class="tip-src" hidden></span></span>
+        <div class="actions">
+          <button id="refresh" class="btn btn--icon has-tip" type="button" aria-label="Refresh now" data-tip="Refresh now"><svg class="i" aria-hidden="true"><use href="#i-refresh"></use></svg></button>
+          <button id="theme" class="btn btn--icon has-tip" type="button" aria-label="Switch to the dark theme" data-tip="Switch to the dark theme"><svg class="i" aria-hidden="true"><use href="#i-theme"></use></svg></button>
+          <details id="settings">
+            <summary class="btn btn--icon has-tip" aria-label="Settings" data-tip="Settings: optional token, polling"><svg class="i" aria-hidden="true"><use href="#i-gear"></use></svg></summary>
+            <form id="token-form" class="token-form">
+              <label for="token">Read-only GitHub token (optional)</label>
+              <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" placeholder="not set">
+              <div class="row">
+                <button class="btn" type="submit">Save token</button>
+                <button class="btn" id="forget" type="button">Forget token</button>
+              </div>
+              <p class="hint">Never required. Raises the API limit from 60 to 5,000 requests an hour. It stays in this browser's localStorage and is sent only to api.github.com, never to raw.githubusercontent.com. Use a fine-grained token with public read-only access and no other permissions.</p>
+              <p class="hint" id="poll-hint"></p>
+              <p class="hint" id="meta-settings"></p>
+              <p class="hint">Source: <a id="repo-link" href="https://github.com/sabbasi3-factory-lab/chrono-node-rs/tree/audit">sabbasi3-factory-lab/chrono-node-rs</a>, audit branch. Add <code>?fixture=1</code> (busy) or <code>?fixture=quiet</code> to the address for sample data.</p>
+            </form>
+          </details>
+        </div>
       </div>
-      <p class="glance" aria-label="Factory at a glance">
-        <span id="health" class="chip chip--info" tabindex="0">Checking</span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span id="state-part" class="part" hidden></span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span id="needs-part" class="part" hidden></span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span id="dry-badge" class="chip" tabindex="0" hidden></span>
-        <span class="sep" aria-hidden="true">·</span>
-        <span id="mode-badge" class="chip chip--info" tabindex="0" hidden></span>
-      </p>
       <p id="status" class="sr-only" role="status" aria-live="polite"></p>
     </div>
   </header>
 
   <main id="main" class="wrap">
-    <section aria-labelledby="score-h" class="panel score-panel">
+    <section aria-labelledby="score-h" class="score-panel">
       <h2 id="score-h" class="sr-only">Results</h2>
       <ul id="score" class="score" tabindex="-1"></ul>
     </section>
 
-    <section aria-labelledby="board-h">
+    <section aria-labelledby="board-h" class="panel tasks">
       <div class="sec-h">
         <h2 id="board-h"><svg class="i" aria-hidden="true"><use href="#i-grid"></use></svg>Tasks</h2>
         <p id="board-legend" class="board-legend"></p>
         <button type="button" class="info has-tip" aria-label="About the task board" aria-describedby="board-info-tip"><svg class="i" aria-hidden="true"><use href="#i-info"></use></svg><span id="board-info-tip" class="tip-src" hidden></span></button>
       </div>
       <p id="board-caption" class="board-caption">Task = one chrono-node parser or refiner, in Rust. One contract, one issue, one PR.</p>
-      <div id="board" class="panel board" tabindex="-1"></div>
+      <div id="board-progress" class="progress" hidden></div>
+      <div id="board" class="board" tabindex="-1"></div>
     </section>
 
     <section aria-labelledby="details-h" class="folds">
