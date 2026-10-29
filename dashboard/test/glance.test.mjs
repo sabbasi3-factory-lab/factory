@@ -342,19 +342,18 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       return out;
     })()`);
     assert.deepEqual(o.rows.slice(0, 3), [['accepted', '2', '0', '2', '0'], ['rejected', '0', '1', '0', '1'], ['pending', '1', '0', '3', '0']]);
-    assert.match(o.text, /Last evaluated \d+[smhd] ago; last checked unchanged \d+[smhd] ago\./);
+    assert.match(o.text, /Last evaluated \d+[smhd] ago\. gh-aw v0\.92\.0, 7 runs\./);
     assert.match(o.text, /gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost\./);
-    // `gh aw outcomes` takes an agent run id (the newest real coder run with a PR), not the collector's.
-    assert.match(o.text, /Reproduce for one agent run: gh aw outcomes 4102, or any run id below\. Collected by the snapshot run\./);
+    // `gh aw outcomes` takes an agent run id (the newest real coder run with a PR).
+    assert.match(o.text, /Reproduce for one agent run: gh aw outcomes 4102, or any run id below\. 1 malformed entry skipped\./);
     assert.match(o.text, /over the 4 of 4 measured real runs that have both figures/);
-    assert.doesNotMatch(o.text, /gh aw outcomes 9001/);
     assert.equal(o.runs, 7);
     // Repairs are ours (Outcomes can't see them): plain sentences in Details, drills apart.
     assert.match(o.about, /Repairs 1 repair: 0 fixed the PR, 1 still running\. Safety drills: No repairs\./);
-    assert.match(o.text, /1 malformed snapshot ignored\. 1 malformed entry skipped\./);
-    // The run-to-task join is the Outcomes snapshot now: no Actions API request at all.
+    // The sample reads its own outcomes.json, same-origin; no Actions API request at all.
     const urls = await page.evaluate("performance.getEntriesByType('resource').map((e) => e.name)");
     assert.deepEqual(urls.filter((u) => /\/actions\//.test(u)), []);
+    assert.ok(urls.some((u) => /test\/fixtures\/outcomes\.json$/.test(u)));
   });
 
   test('tooltips are reachable by Tab, show on focus and hide on Escape', async () => {

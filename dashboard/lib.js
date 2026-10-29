@@ -1653,7 +1653,7 @@ export function stageSummary(rows, { now = Date.now(), days = MEDIAN_DAYS } = {}
   return { rows: out, median: med, maxMs: Math.max(0, totalMs, ...out.map((r) => r.totalMs)), insight, days };
 }
 
-// --- Cost: spend snapshots (full cost) joined to tasks through the gh-aw Outcomes snapshot -----
+// --- Cost: spend snapshots (full cost) joined to tasks through gh-aw Outcomes (outcomes.json) ---
 
 export const AGENT_WORKFLOWS = Object.freeze(['implement', 'repair', 'review']);
 
@@ -1682,12 +1682,12 @@ export function runSpend(events) {
 
 /**
  * The full cost per task: every run's latest measured AI credits from the spend snapshots (agent
- * plus threat detection), joined by run id to the runs of the newest gh-aw Outcomes snapshot
+ * plus threat detection), joined by run id to the runs of gh-aw Outcomes (outcomes.json)
  * (`outcomeRuns`: its normalized `runs`, or null without one). A run is a safety drill when the
- * snapshot says so (or its task is drill/*); a run the snapshot doesn't list, or that names no
+ * file says so (or its task is drill/*); a run the file doesn't list, or that names no
  * task (review runs today), counts as real work not tied to a task.
  *
- * Returns { known (a snapshot was given), total, perTask: [{ task, aic, runs }] (non-drill, highest
+ * Returns { known (outcomes.json was read), total, perTask: [{ task, aic, runs }] (non-drill, highest
  * first), drillAic, unattributed, unattributedRuns, perDay: { days, aic }, byWorkflow: { implement,
  * repair, review, unknown: { runs, measured, aic } }, unknownRunIds, measuredRuns, spend, agentCompare }.
  * `total` is every measured run.
@@ -2244,7 +2244,7 @@ const TIER_WORD = { auto: 'routine', 'auto-strict': 'core' };
 /**
  * "Shipped: 26 of 26 tasks" / "18 routine + 8 core" / "gh-aw
  * Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (real work; `outcomes` is outcomesSummary(),
- * or null without a snapshot).
+ * or null without outcomes.json).
  */
 export function shippedItem(board, outcomes = null) {
   const done = board?.counts?.done ?? 0;
@@ -2288,7 +2288,7 @@ function dateSpan(a, b) {
  * "$11.42 tasks + $4.89 drills · about $0.44 per accepted PR". Without drill cost the per-PR
  * clause joins the second line (real tasks are then the whole run cost). `build` is a
  * validateBuildCost() result; `cost` a costJoin() result: the run total always counts (it's the
- * spend snapshots); the real/drill split and the per-PR cost need the Outcomes snapshot
+ * spend snapshots); the real/drill split and the per-PR cost need gh-aw Outcomes
  * (`cost.known`) and `acceptedPrs`, the real PRs it accepted. Run cost not tied to a task counts
  * as real tasks. With real agent runs but no spend measurement (`cost.spend` "missing") the run
  * cost is "not available yet"; with no real run at all it's a known $0.00.
@@ -2338,91 +2338,61 @@ export function handsOffItem(outcomes, steps, href = '#human-steps') {
   return { key: 'hands', main, subs: [sub] };
 }
 
-// --- gh-aw Outcomes: the newest outcomes_snapshot -------------------------------------------
+// --- gh-aw Outcomes: outcomes.json on the source repo's `outcomes` branch ------------------
 
 export const OUTCOME_STATUSES = Object.freeze(['accepted', 'rejected', 'pending', 'ignored', 'unknown']);
 export const OUTCOMES_STALE_MS = 48 * HOUR_MS;
 
 /**
- * One outcomes_snapshot payload, normalized, or null when it isn't usable (no `runs` list, no
- * source run id, no evaluation time). Runs without a numeric run_id, a workflow, a boolean
- * `drill` or an `items` list, and items without a type or status, are dropped and counted in
- * `dropped`. An optional `diagnosis` is kept; review runs may name a task.
+ * Whether outcomes.json should be read now: at most every `maxMs`, or after `minMs` once the audit
+ * head has moved. A head change is remembered (`st.headDirty`) until the next read, so one seen
+ * shortly after a read still brings the next read forward. The caller clears it when it reads.
  */
-export function parseOutcomesSnapshot(payload) {
-  if (!plainObject(payload) || !Array.isArray(payload.runs) || !(Number.isSafeInteger(payload.source_run_id) && payload.source_run_id > 0)) return null;
-  const evaluatedAt = parseTime(payload.evaluated_at);
-  if (evaluatedAt == null) return null;
+export function outcomesReadDue(st, headChanged, now, { maxMs, minMs }) {
+  if (headChanged) st.headDirty = true;
+  const age = st.attemptedAt == null ? Infinity : now - st.attemptedAt;
+  return age >= maxMs || (st.headDirty === true && age >= minMs);
+}
+
+/**
+ * outcomes.json, normalized, or null when it isn't usable (no `runs` array). A tolerant check:
+ * runs without a numeric `run_id` or an `items` array, and items that aren't objects, are skipped
+ * and counted in `dropped`; unknown fields are ignored.
+ */
+export function parseOutcomesFile(data) {
+  if (!plainObject(data) || !Array.isArray(data.runs)) return null;
   let dropped = 0;
   const runs = [];
-  for (const r of payload.runs) {
-    if (!plainObject(r) || !isNum(r.run_id) || !isStr(r.workflow) || typeof r.drill !== 'boolean' || !Array.isArray(r.items)) {
+  for (const r of data.runs) {
+    if (!plainObject(r) || !isNum(r.run_id) || !Array.isArray(r.items)) {
       dropped++;
       continue;
     }
-    const items = [];
-    for (const it of r.items) {
-      if (!plainObject(it) || !isStr(it.type) || !isStr(it.outcome_status) || !(it.zero_touch === true || it.zero_touch === false || it.zero_touch == null)) {
-        dropped++;
-        continue;
-      }
-      items.push({ type: it.type, url: isStr(it.object_url) ? it.object_url : null, status: it.outcome_status, evidence: isStr(it.evidence_strength) ? it.evidence_strength : null, zeroTouch: it.zero_touch ?? null });
-    }
-    runs.push({
-      runId: r.run_id, workflow: r.workflow, task: isStr(r.task) ? r.task : null, drill: r.drill, createdAt: parseTime(r.created_at),
-      aic: isNum(r.aic) ? r.aic : null, conclusion: isStr(r.conclusion) ? r.conclusion : null, eval: isStr(r.eval) ? r.eval : null,
-      evaluatedAt: parseTime(r.evaluated_at), items, diagnosis: r.diagnosis ?? null,
-    });
+    const items = r.items.filter(plainObject).map((it) => ({
+      type: isStr(it.type) ? it.type : null, url: isStr(it.object_url) ? it.object_url : null,
+      status: isStr(it.outcome_status) ? it.outcome_status : 'unknown', zeroTouch: typeof it.zero_touch === 'boolean' ? it.zero_touch : null,
+    }));
+    dropped += r.items.length - items.length;
+    runs.push({ runId: r.run_id, workflow: isStr(r.workflow) ? r.workflow : 'unknown', task: isStr(r.task) ? r.task : null, drill: r.drill === true, aic: isNum(r.aic) ? r.aic : null, items });
   }
-  return {
-    sourceRunId: payload.source_run_id, sourceRunAttempt: isNum(payload.source_run_attempt) ? payload.source_run_attempt : null,
-    ghAwVersion: isStr(payload.gh_aw_version) ? payload.gh_aw_version : null, mode: isStr(payload.mode) ? payload.mode : null,
-    evaluatedAt, runs, dropped, summary: plainObject(payload.summary) ? payload.summary : null,
-  };
+  return { generatedAt: parseTime(data.generated_at), ghAwVersion: isStr(data.gh_aw_version) ? data.gh_aw_version : null, runs, dropped };
+}
+
+/** Whether outcomes.json was generated over 48 h ago. */
+export function outcomesStale(file, now = Date.now()) {
+  return file?.generatedAt != null && now - file.generatedAt > OUTCOMES_STALE_MS;
 }
 
 /**
- * The newest usable outcomes_snapshot in the log (each is complete, so only it is read) and when
- * it was last re-checked: the newest `outcomes_checked` marker after it whose `same_as_run_id` is
- * its source run. Returns { snapshot, at, checkedAt, lastAt, ignored } or null without one.
- */
-export function latestOutcomes(events) {
-  let found = null;
-  let ignored = 0;
-  for (const ev of events || []) {
-    if (ev?.type !== 'outcomes_snapshot') continue;
-    const snap = parseOutcomesSnapshot(ev.payload);
-    const at = parseTime(ev.timestamp);
-    if (!snap || at == null) {
-      ignored++;
-      continue;
-    }
-    if (!found || at >= found.at) found = { snapshot: snap, at };
-  }
-  if (!found) return null;
-  let checkedAt = null;
-  for (const ev of events || []) {
-    const t = parseTime(ev?.timestamp);
-    if (ev?.type === 'outcomes_checked' && t != null && t >= found.at && ev.payload?.same_as_run_id === found.snapshot.sourceRunId && (checkedAt == null || t > checkedAt)) checkedAt = t;
-  }
-  return { ...found, checkedAt, lastAt: Math.max(found.snapshot.evaluatedAt, checkedAt ?? -Infinity), ignored };
-}
-
-/** Whether the newest Outcomes snapshot (latestOutcomes()) is over 48 h old with no check since. */
-export function outcomesStale(latest, now = Date.now()) {
-  return !!latest && now - latest.lastAt > OUTCOMES_STALE_MS;
-}
-
-/**
- * Counts from a parsed snapshot, real work and safety drills apart (a run is a drill when the
- * snapshot says so, or its task is drill/*): `prs` counts `create_pull_request` items by status
+ * Counts from parsed outcomes.json, real work and safety drills apart (a run is a drill when the
+ * file says so, or its task is drill/*): `prs` counts `create_pull_request` items by status
  * (accepted, rejected, pending, other) and by raw status (`prStatus`), `items` every item by status, `zeroTouch` the accepted PRs
  * gh-aw marked zero-touch.
  */
-export function outcomesSummary(snapshot) {
+export function outcomesSummary(file) {
   const blank = () => ({ prs: { accepted: 0, rejected: 0, pending: 0, other: 0 }, prStatus: {}, items: {}, zeroTouch: 0, runs: 0 });
   const out = { real: blank(), drills: blank() };
-  for (const r of snapshot?.runs ?? []) {
+  for (const r of file?.runs ?? []) {
     const side = r.drill || isDrill(r.task) ? out.drills : out.real;
     side.runs++;
     for (const it of r.items) {

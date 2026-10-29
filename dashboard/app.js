@@ -8,7 +8,7 @@ import {
   fallbackCatalog, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
-  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, latestOutcomes, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
+  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, parseOutcomesFile, outcomesReadDue, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
   isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
@@ -24,7 +24,7 @@ const THEME_KEY = 'factory-dashboard.theme';
 // for the task map, the contracts, the task issues, the build cost and the drill record, so sample
 // mode makes no GitHub call.
 const FIXTURES = Object.freeze({
-  1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl', meta: 'test/fixtures/sample-meta.json' },
+  1: { events: 'test/fixtures/sample.jsonl', anchors: 'test/fixtures/anchors.jsonl', meta: 'test/fixtures/sample-meta.json', outcomes: 'test/fixtures/outcomes.json' },
   quiet: { events: 'test/fixtures/quiet.jsonl', anchors: 'test/fixtures/quiet-anchors.jsonl', meta: 'test/fixtures/quiet-meta.json' },
 });
 const MISSING_BRANCH_POLL_S = 300;
@@ -109,6 +109,8 @@ const state = {
   fixtureMeta: null,
   // build-cost.json and drills.json, deployed with the page: validateBuildCost/validateDrills results.
   statics: { build: null, drills: null, attemptedAt: null },
+  // gh-aw Outcomes: parsed outcomes.json from the last good read, or null; refreshed like the PR lists.
+  outcomes: { file: null, error: null, fetchedAt: null, attemptedAt: null, headDirty: false },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -665,6 +667,28 @@ async function maybeRefreshStatics() {
   state.dataVersion++;
 }
 
+// outcomes.json from the source repo's `outcomes` branch (a raw download: no API cost), on the
+// PR lists' cadence; the sample reads its own copy. Never throws: a missing or invalid file keeps
+// the last good one, or none ("gh-aw Outcomes not available yet").
+async function maybeRefreshOutcomes(headChanged) {
+  const o = state.outcomes;
+  if (!outcomesReadDue(o, headChanged, Date.now(), { maxMs: PR_MAX_AGE_MS, minMs: PR_MIN_AGE_MS })) return;
+  o.attemptedAt = Date.now();
+  o.headDirty = false;
+  const url = FIXTURE ? FIXTURES[FIXTURE_PARAM]?.outcomes : `${RAW}/${REPO}/outcomes/outcomes.json`;
+  try {
+    if (!url) throw new Error('none in this sample');
+    const res = await fetch(url, { cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const file = parseOutcomesFile(await res.json().catch(() => null));
+    if (!file) throw new Error('not a valid outcomes file');
+    Object.assign(o, { file, error: null, fetchedAt: Date.now() });
+  } catch (err) {
+    o.error = `outcomes.json: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  state.dataVersion++;
+}
+
 async function tick() {
   clearTimeout(state.timer);
   if (state.busy) return;
@@ -677,6 +701,7 @@ async function tick() {
       await maybeRefreshMeta();
       await maybeRefreshTaskIssues();
       await maybeRefreshStatics();
+      await maybeRefreshOutcomes(false);
     } else if (document.visibilityState === 'hidden' && state.loaded) {
       delayS = POLL_S; // don't spend requests on a hidden tab
     } else {
@@ -689,6 +714,7 @@ async function tick() {
         await maybeRefreshMeta();
         await maybeRefreshTaskIssues();
         await maybeRefreshStatics();
+        await maybeRefreshOutcomes(state.headSha !== headBefore);
       }
     }
     state.error = null;
@@ -734,10 +760,10 @@ function buildView(m) {
   const catalog = state.meta.catalog ?? (state.meta.status === 'error' ? fallbackCatalog(state.events) : []);
   const board = taskBoard(state.events, catalog, { open: openNumbers(), asOf: openNumbersAt(), needsItems: m.needsYou.items, issues: state.taskIssues.map });
   const dispatch = latestDispatchState(state.events);
-  // gh-aw Outcomes: the newest snapshot judges the agents' PRs and maps runs to tasks; the full
-  // cost (agent plus threat detection) comes from the spend snapshots, joined by run id.
-  const outcomes = latestOutcomes(state.events);
-  const cost = costJoin(state.events, outcomes?.snapshot.runs ?? null, { now: t, days: MEDIAN_DAYS });
+  // gh-aw Outcomes (outcomes.json) judges the agents' PRs and maps runs to tasks; the full cost
+  // (agent plus threat detection) comes from the spend snapshots, joined by run id.
+  const outcomes = state.outcomes.file;
+  const cost = costJoin(state.events, outcomes?.runs ?? null, { now: t, days: MEDIAN_DAYS });
   const done = board.tasks.filter((x) => x.state === 'done');
   const doneIds = done.map((x) => x.id);
   const doneTimes = done.map((x) => x.since).filter(isNum);
@@ -752,7 +778,7 @@ function buildView(m) {
     doneSpan: doneTimes.length ? [Math.min(...doneTimes), Math.max(...doneTimes)] : null,
     steps: humanSteps(state.events),
     outcomes,
-    outcomesSum: outcomes ? outcomesSummary(outcomes.snapshot) : null,
+    outcomesSum: outcomes ? outcomesSummary(outcomes) : null,
     quality: qualityStats(state.events),
     human: humanTouch(state.events, { now: t, days: HUMAN_DAYS }),
     live: liveness(state.events, { now: t, inFlight: board.counts.running > 0, dispatch }),
@@ -803,7 +829,7 @@ function render({ full = false } = {}) {
   renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
   renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
-  renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.lastAt, v?.cost.agentCompare], withMetrics((mm, vv) => renderOutcomes(vv)), full);
+  renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.generatedAt, state.outcomes.error, v?.cost.agentCompare], withMetrics((mm, vv) => renderOutcomes(vv)), full);
   renderIf('about', [loaded, v && scoreSig(v), state.partialHistory, state.records.length], withMetrics((mm, vv) => renderAbout(vv)), full);
   renderIf('human', [loaded, v?.human], withMetrics((mm, vv) => renderHuman(vv)), full);
   renderIf('live', [loaded, v && liveSig(m, v)], withMetrics((mm, vv) => renderLive(mm, vv)), full);
@@ -1124,7 +1150,7 @@ function renderParts(m, v, needs, health) {
 function scoreSig(v) {
   return [v.board.counts, v.board.byTier, v.board.total, v.toMerged.medianMs, v.toMerged.count, v.doneSpan, v.cost.total, v.cost.drillAic, v.cost.known, v.cost.spend,
     v.taskCost, v.quality, v.steps.total, state.statics.build, state.statics.drills, state.taskIssues.error, state.taskIssues.map != null,
-    v.outcomesSum, v.outcomes && outcomesStale(v.outcomes, now())];
+    v.outcomesSum, outcomesStale(v.outcomes, now())];
 }
 
 function scoreItem(item, tipText) {
@@ -1149,9 +1175,9 @@ function renderScore(v) {
   const drills = st.drills;
   const partial = state.partialHistory ? `Only the last ${DAYS} days of the audit log could be loaded.` : null;
   const os = v.outcomesSum;
-  const stale = v.outcomes && outcomesStale(v.outcomes, now()) ? `gh-aw Outcomes last evaluated ${relativeTime(v.outcomes.lastAt, now())}, so they may be out of date.` : null;
+  const stale = outcomesStale(v.outcomes, now()) ? `gh-aw Outcomes last evaluated ${relativeTime(v.outcomes.generatedAt, now())}, so they may be out of date.` : null;
   replaceSection('score',
-    scoreItem(shippedItem(b, os), `${state.taskIssues.map && !state.taskIssues.error ? 'Tasks ported from JavaScript to Rust whose issue is closed as completed.' : "Tasks merged per the audit log; the task-issue list couldn't be read."} ${stale ?? (os ? 'gh-aw Outcomes judges each agent PR; real work only, drills separate.' : 'gh-aw Outcomes, which judges each agent PR, has no snapshot yet.')}`),
+    scoreItem(shippedItem(b, os), `${state.taskIssues.map && !state.taskIssues.error ? 'Tasks ported from JavaScript to Rust whose issue is closed as completed.' : "Tasks merged per the audit log; the task-issue list couldn't be read."} ${stale ?? (os ? 'gh-aw Outcomes judges each agent PR; real work only, drills separate.' : 'gh-aw Outcomes, which judges each agent PR, is not available yet.')}`),
     scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1], done: doneReal }),
       itm.count ? `Median time from a task's start to its merge, over ${itm.count} of ${doneReal} done tasks. ${partial ?? 'Dates are the first and last finishes.'}`
         : `Start and merge times for these tasks aren't in the audit log. ${partial ?? 'Details explains how speed is measured.'}`),
@@ -1161,7 +1187,7 @@ function renderScore(v) {
     ].join(' ')),
     scoreItem(handsOffItem(os, steps), os
       ? `gh-aw counts a PR as zero-touch if no person edited it. ${stale ?? partial ?? 'Manual steps outside the PR are counted separately below.'}`
-      : 'gh-aw Outcomes, which marks PRs no person edited, has no snapshot yet. Manual steps outside the PR are counted below.'),
+      : 'gh-aw Outcomes, which marks PRs no person edited, is not available yet. Manual steps outside the PR are counted below.'),
     scoreItem(qualityItem(v.quality, drills), `Reverts and changes the reviewer blocked before merge count real work only. ${drills?.ok ? `Drill results are from the build journal, as of ${shortDate(drills.value.asOf)}.` : `Drill record unavailable: ${shortError(drills?.error ?? 'not read yet')}.`}`));
 }
 
@@ -1193,13 +1219,13 @@ function renderAbout(v) {
     entry('Shipped', 'A task is done when its issue is closed as completed; while its issue is open, when the controller closes it after the merge; without the issue list, when the audit log shows the merge.',
       `Routine tasks (tier auto) merge by themselves once their checks pass; core tasks (tier auto-strict) also need the reviewer agent and the strict gates.`,
       `Now: ${Object.entries(b.byTier).map(([k, x]) => `${k} ${x.done} of ${x.total}`).join(', ')}.`, 'Safety drills (drill/*) are not tasks.', 'The tasks port chrono\'s JavaScript parsers and refiners to Rust.', taskIssuesLine(),
-      v.outcomesSum ? `gh-aw Outcomes: how gh-aw judged each real coder PR (${OUTCOME_STATUSES.slice(0, 3).join(', ')}); drills are counted apart, in Outcomes (gh-aw).` : 'gh-aw Outcomes: no snapshot in the audit log yet.'),
+      v.outcomesSum ? `gh-aw Outcomes: how gh-aw judged each real coder PR (${OUTCOME_STATUSES.slice(0, 3).join(', ')}); drills are counted apart, in Outcomes (gh-aw).` : 'gh-aw Outcomes: not available yet.'),
     entry('Speed', `The median time from a task's start (its first auto_ready, else its first agent run) to its merge, over ${itm.count} of ${b.counts.done} done tasks whose start and merge are in the log.`,
       v.doneSpan ? `First finish ${iso(v.doneSpan[0])}, last ${iso(v.doneSpan[1])}.` : null, 'Minutes up to 90, then hours.'),
     entry('Total cost', build ? `Build: ${Math.round(build.aiUnits).toLocaleString('en-US')} AI credits (${formatUsd(build.usd * 100)}), research, design, coordination and build sessions, from ${build.source}, as of ${build.asOf}.` : `Build cost unavailable: ${st.build?.error ?? 'not read yet'}.`,
       `Run: the latest measured AI credits of each of the factory's agent runs${since ? ` since ${since}` : ''}, from the controller's spend snapshots; 1 AI credit = $0.01.`,
       c.known && c.measuredRuns ? `By agent: ${Object.entries(names).map(([k, n]) => `${n} ${formatUsd(c.byWorkflow[k].aic)} over ${plural(c.byWorkflow[k].measured, 'run')}`).join(', ')}.` : null,
-      c.known && c.measuredRuns ? `Safety drills ${formatUsd(c.drillAic)}; runs not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}, mostly reviewer runs) count as real tasks. Runs are matched to tasks and drills by the gh-aw Outcomes snapshot.` : 'Without a gh-aw Outcomes snapshot the run cost has no real and drill split.',
+      c.known && c.measuredRuns ? `Safety drills ${formatUsd(c.drillAic)}; runs not tied to a task (${formatUsd(c.unattributed)}, ${plural(c.unattributedRuns, 'run')}, mostly reviewer runs) count as real tasks. Runs are matched to tasks and drills by gh-aw Outcomes.` : 'Without gh-aw Outcomes the run cost has no real and drill split.',
       v.taskCost.medianAic != null ? `Median full cost per done task: ${formatUsd(v.taskCost.medianAic)} over ${plural(v.taskCost.count, 'task')} (coder and repair runs; reviewer runs aren't tied to tasks yet).` : null,
       "gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost."),
     entry('Hands-off', 'gh-aw Outcomes marks an accepted PR zero-touch when no person edited it. Manual steps outside the PR are ours, from the audit log:'),
@@ -1211,12 +1237,12 @@ function renderAbout(v) {
       'A repair fixed the PR when the PR merged next; it was handed to a person when a hand-off came first.'),
     entry('Quality', 'Reverts: merges the factory undid automatically after main broke. Changes blocked: hand-offs because the reviewer agent objected before the merge. Both leave out safety drills.',
       drills?.ok ? `Safety drills: ${drills.value.runs.map((r) => `${r.id} ${r.result}${r.note ? ` (${r.note})` : ''}`).join(', ')}; ${plural(drills.value.defects, 'defect')} found and fixed. From ${drills.value.source}, as of ${drills.value.asOf}.` : `Drill record unavailable: ${drills?.error ?? 'not read yet'}.`),
-    entry('Data', 'Everything comes from GitHub, read-only: the audit log, the task map and contracts, the task issues and the open PRs. gh-aw Outcomes results arrive in the audit log as outcomes_snapshot events. The build cost and drill record are files published with this page. Every event is re-hashed and its chain checked in your browser.')));
+    entry('Data', 'Everything comes from GitHub, read-only: the audit log, the task map and contracts, the task issues and the open PRs. gh-aw Outcomes results come from outcomes.json on the source repo\'s outcomes branch. The build cost and drill record are files published with this page. Every event is re-hashed and its chain checked in your browser.')));
 }
 
 const WORKFLOW_WORD = Object.freeze({ implement: 'coder', repair: 'repair', review: 'reviewer' });
 
-// Details: the gh-aw Outcomes snapshot, as a per-status table (real work vs safety drills).
+// Details: gh-aw Outcomes (outcomes.json), as a per-status table (real work vs safety drills).
 function renderOutcomes(v) {
   const L = v.outcomes;
   if (!state.loaded) {
@@ -1224,7 +1250,7 @@ function renderOutcomes(v) {
     return;
   }
   if (!L) {
-    replaceSection('outcomes', empty('gh-aw Outcomes not available yet: the audit log has no Outcomes snapshot.'));
+    replaceSection('outcomes', empty(`gh-aw Outcomes not available yet${state.outcomes.error ? ` (${state.outcomes.error})` : ''}.`));
     return;
   }
   const s = v.outcomesSum;
@@ -1234,22 +1260,22 @@ function renderOutcomes(v) {
   const ac = c.agentCompare;
   const ratio = ac.agent > 0 ? ac.full / ac.agent : null;
   const runUrl = (id) => `${GH}/${REPO}/actions/runs/${id}`;
-  const runs = L.snapshot.runs;
+  const runs = L.runs;
   // `gh aw outcomes` takes an agent run id: the newest real coder run that opened a PR, else any.
   const isPr = (r) => r.items.some((x) => x.type === 'create_pull_request');
   const real = runs.filter((r) => !(r.drill === true || isDrill(r.task)));
   const example = [...real].reverse().find((r) => r.workflow === 'implement' && isPr(r)) ?? real.at(-1) ?? runs.at(-1);
   replaceSection('outcomes',
-    h('p', { class: 'hint' }, `gh-aw Outcomes judges what each agent run produced (PRs, comments, checks): accepted, rejected, pending and so on. Last evaluated `, timeEl(L.snapshot.evaluatedAt),
-      L.checkedAt != null ? ['; last checked unchanged ', timeEl(L.checkedAt)] : null, `. gh-aw ${L.snapshot.ghAwVersion ?? '?'}, ${plural(s.real.runs + s.drills.runs, 'run')}.`),
+    h('p', { class: 'hint' }, `gh-aw Outcomes judges what each agent run produced (PRs, comments, checks): accepted, rejected, pending and so on. Last evaluated `,
+      L.generatedAt != null ? timeEl(L.generatedAt) : 'at an unknown time', `. gh-aw ${L.ghAwVersion ?? '?'}, ${plural(s.real.runs + s.drills.runs, 'run')}.`,
+      state.outcomes.error ? ` The latest read failed (${state.outcomes.error}); this is the last good copy.` : ''),
     table('gh-aw Outcomes by status', ['Status', 'Real PRs', 'Drill PRs', 'All real outputs', 'All drill outputs'], rows, { numeric: [1, 2, 3, 4] }),
     h('p', { class: 'hint' }, `Hands-off: ${s.real.zeroTouch} of ${s.real.prs.accepted} accepted real PRs are zero-touch (no person edited them).`),
     h('p', { class: 'hint' }, "gh-aw's own credit figure excludes the threat-detection job; this page uses the full cost.",
       ratio ? ` For real runs the full cost is about ${ratio.toFixed(2)}× gh-aw's (${Math.round(ac.full).toLocaleString('en-US')} vs ${Math.round(ac.agent).toLocaleString('en-US')} AI credits, over the ${ac.runs} of ${plural(ac.of, 'measured real run')} that have both figures).` : ''),
     example ? h('p', { class: 'hint' }, 'Reproduce for one agent run: ', h('code', {}, `gh aw outcomes ${example.runId}`), ', or ', h('a', { href: '#outcome-runs' }, 'any run id below'), '.') : null,
-    h('p', { class: 'hint' }, 'Collected by the ', link(runUrl(L.snapshot.sourceRunId), 'snapshot run'), '.',
-      L.ignored ? ` ${plural(L.ignored, 'malformed snapshot')} ignored.` : '', L.snapshot.dropped ? ` ${plural(L.snapshot.dropped, 'malformed entry')} skipped.` : ''),
-    h('details', { class: 'fold fold--sub', id: 'outcome-runs-fold' }, h('summary', {}, `Agent runs in the snapshot (${runs.length})`),
+    L.dropped ? h('p', { class: 'hint' }, `${plural(L.dropped, 'malformed entry')} skipped.`) : null,
+    h('details', { class: 'fold fold--sub', id: 'outcome-runs-fold' }, h('summary', {}, `Agent runs (${runs.length})`),
       h('ul', { class: 'recent', id: 'outcome-runs', tabindex: '-1' }, [...runs].reverse().map((r) => h('li', { 'data-row-key': `r${r.runId}` },
         h('span', { class: 'recent-t' }, link(runUrl(r.runId), String(r.runId)), ` · ${WORKFLOW_WORD[r.workflow] ?? r.workflow}${r.task ? ` · ${shortTaskName(r.task)}` : ''}${r.drill === true || isDrill(r.task) ? ' (drill)' : ''}`),
         h('span', { class: 'recent-at' }, r.items.map((x) => x.status).join(', ') || 'no outputs'))))));

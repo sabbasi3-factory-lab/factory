@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  JOURNAL_URL, OUTCOMES_STALE_MS, costItem, costJoin, earliestSpendDay, handsOffItem, healthSummary, humanSteps, latestOutcomes, outcomesStale, outcomesSummary, parseOutcomesSnapshot, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
+  JOURNAL_URL, OUTCOMES_STALE_MS, costItem, costJoin, earliestSpendDay, handsOffItem, healthSummary, humanSteps, outcomesStale, outcomesSummary, parseOutcomesFile, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
   shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
 } from '../lib.js';
 
@@ -279,47 +279,37 @@ test('hands-off: N of M PRs merged with no human edits (gh-aw zero-touch), and o
 // --- gh-aw Outcomes ----------------------------------------------------------------------------
 
 const PRURL = (n) => `https://github.com/sabbasi3-factory-lab/chrono-node-rs/pull/${n}`;
-const oitem = (type, status, zeroTouch = null, n = null) => ({ type, object_url: n ? PRURL(n) : null, outcome_status: status, evidence_strength: 'strong', zero_touch: zeroTouch });
-const orun = (run_id, workflow, task, drill, items, extra = {}) => ({ run_id, workflow, task, drill, created_at: '2026-10-27T10:00:00Z', aic: 10, conclusion: 'success', eval: 'ok', evaluated_at: '2026-10-28T21:26:38Z', items, ...extra });
-const opayload = (source_run_id, runs, evaluated_at = '2026-10-28T21:26:38Z') => ({ source_run_id, source_run_attempt: 1, gh_aw_version: 'v0.92.0', evaluated_at, mode: 'full', runs, summary: {} });
+const oitem = (type, status, zeroTouch = null, n = null) => ({ type, object_url: n ? PRURL(n) : null, outcome_status: status, zero_touch: zeroTouch });
+const orun = (run_id, workflow, task, drill, items, extra = {}) => ({ run_id, workflow, title: 'x', created_at: '2026-10-27T10:00:00Z', aic: 10, task, drill, items, ...extra });
+const ofile = (runs, generated_at = '2026-10-28T21:26:38Z') => ({ generated_at, gh_aw_version: 'v0.92.0', runs, summary: {} });
 
-test('outcomes: parse and validate a snapshot; malformed runs and items are skipped; diagnosis and tasked reviews are accepted', () => {
-  const p = parseOutcomesSnapshot(opayload(40771939035, [
-    orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'accepted', true, 54), { type: 'add_comment' }, oitem('add_comment', 'pending')]),
-    orun(2, 'review', 'en/a', false, [oitem('create_check_run', 'unknown')], { diagnosis: { cause: 'x' } }),
-    { run_id: 'x', workflow: 'implement', drill: false, items: [] },
-    orun(3, 'implement', null, 'yes', []),
+test('outcomes.json: a tolerant check; runs without a numeric run_id or items are skipped; unknown fields ignored', () => {
+  const f = parseOutcomesFile(ofile([
+    orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'accepted', true, 54), 'junk', { type: 'add_comment' }], { diagnosis: { cause: 'x' }, extra: 1 }),
+    orun(2, 'review', null, false, [oitem('create_check_run', 'unknown')], { aic: null }),
+    { run_id: 'x', workflow: 'implement', items: [] },
+    { run_id: 3, workflow: 'implement' },
+    { run_id: 4, items: [] }, // no workflow, no drill: tolerated
   ]));
-  assert.equal(p.sourceRunId, 40771939035);
-  assert.equal(p.ghAwVersion, 'v0.92.0');
-  assert.deepEqual(p.runs.map((r) => [r.runId, r.workflow, r.task, r.items.length]), [[1, 'implement', 'en/a', 2], [2, 'review', 'en/a', 1]]);
-  assert.deepEqual(p.runs[1].diagnosis, { cause: 'x' });
-  assert.equal(p.dropped, 3, 'two bad runs and one bad item');
-  assert.deepEqual(p.runs[0].items[0], { type: 'create_pull_request', url: PRURL(54), status: 'accepted', evidence: 'strong', zeroTouch: true });
-  for (const bad of [null, [], {}, { ...opayload(1, []), runs: 'x' }, { ...opayload(1, []), source_run_id: 0 }, { ...opayload(1, []), evaluated_at: 'soon' }]) assert.equal(parseOutcomesSnapshot(bad), null);
+  assert.equal(f.generatedAt, at('2026-10-28T21:26:38Z'));
+  assert.equal(f.ghAwVersion, 'v0.92.0');
+  assert.deepEqual(f.runs.map((r) => [r.runId, r.workflow, r.task, r.drill, r.aic, r.items.length]), [[1, 'implement', 'en/a', false, 10, 2], [2, 'review', null, false, null, 1], [4, 'unknown', null, false, null, 0]]);
+  assert.deepEqual(f.runs[0].items, [{ type: 'create_pull_request', url: PRURL(54), status: 'accepted', zeroTouch: true }, { type: 'add_comment', url: null, status: 'unknown', zeroTouch: null }]);
+  assert.equal(f.dropped, 3, 'two bad runs and one bad item');
+  for (const bad of [null, [], {}, 'x', { runs: 'x' }]) assert.equal(parseOutcomesFile(bad), null);
+  assert.deepEqual(parseOutcomesFile({ runs: [] }), { generatedAt: null, ghAwVersion: null, runs: [], dropped: 0 });
+  // Stale: generated over 48 h ago; an unknown time is never called stale.
+  assert.equal(outcomesStale(f, f.generatedAt + OUTCOMES_STALE_MS), false);
+  assert.equal(outcomesStale(f, f.generatedAt + OUTCOMES_STALE_MS + 1), true);
+  assert.equal(outcomesStale(parseOutcomesFile({ runs: [] }), Date.now()), false);
+  assert.equal(outcomesStale(null, Date.now()), false);
 });
 
-test('outcomes: the newest usable snapshot wins, malformed ones are ignored, and the checked marker sets freshness', () => {
-  const events = [
-    ev('outcomes_snapshot', '2026-10-28T20:00:00Z', opayload(1, [orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'pending', null, 1)])], '2026-10-28T19:59:00Z')),
-    ev('outcomes_snapshot', '2026-10-28T21:28:20Z', opayload(2, [orun(1, 'implement', 'en/a', false, [oitem('create_pull_request', 'accepted', true, 1)])], '2026-10-28T21:26:38Z')),
-    ev('outcomes_snapshot', '2026-10-28T22:00:00Z', { source_run_id: 3, evaluated_at: '2026-10-28T22:00:00Z' }), // no runs: ignored
-    ev('outcomes_checked', '2026-10-28T21:31:19Z', { same_as_run_id: 2, source_run_id: 4 }),
-    ev('outcomes_checked', '2026-10-28T23:00:00Z', { same_as_run_id: 1, source_run_id: 5 }), // about an older snapshot
-  ];
-  const L = latestOutcomes(events);
-  assert.equal(L.snapshot.sourceRunId, 2);
-  assert.equal(L.ignored, 1);
-  assert.equal(L.checkedAt, at('2026-10-28T21:31:19Z'));
-  assert.equal(L.lastAt, at('2026-10-28T21:31:19Z'));
-  assert.equal(latestOutcomes([]), null);
-  assert.equal(latestOutcomes(events.slice(2, 3)), null);
-  // Stale: over 48 h since the evaluation and no checked marker since.
-  assert.equal(outcomesStale(L, L.lastAt + OUTCOMES_STALE_MS), false);
-  assert.equal(outcomesStale(L, L.lastAt + OUTCOMES_STALE_MS + 1), true);
-  const checkedLater = latestOutcomes([...events, ev('outcomes_checked', '2026-10-30T21:00:00Z', { same_as_run_id: 2 })]);
-  assert.equal(outcomesStale(checkedLater, at('2026-10-31T00:00:00Z')), false);
-  assert.equal(outcomesStale(null, Date.now()), false);
+test('outcomes.json: the real sample from the source repo parses, real work and drills apart', () => {
+  const s = outcomesSummary(parseOutcomesFile(JSON.parse(readFileSync(new URL('./fixtures/outcomes-live-sample.json', import.meta.url), 'utf8'))));
+  assert.deepEqual(s.real.prs, { accepted: 26, rejected: 1, pending: 0, other: 0 });
+  assert.equal(s.real.zeroTouch, 25);
+  assert.deepEqual(s.drills.prs, { accepted: 3, rejected: 9, pending: 0, other: 0 });
 });
 
 test('outcomes: real work and safety drills apart; PRs by status; zero-touch only for accepted PRs (live shape)', () => {
@@ -331,7 +321,7 @@ test('outcomes: real work and safety drills apart; PRs by status; zero-touch onl
   for (let i = 0; i < 12; i++) runs.push(orun(300 + i, 'implement', `drill/d${i}`, true, [oitem('create_pull_request', i < 3 ? 'accepted' : 'rejected', i < 2 ? true : null, 400 + i)]));
   runs.push(orun(320, 'review', 'drill/d0', false, [oitem('create_check_run', 'unknown')])); // a drill by its task name
   runs.push(orun(321, 'implement', 'en/odd', false, [oitem('create_pull_request', 'ignored', null, 500)]));
-  const s = outcomesSummary(parseOutcomesSnapshot(opayload(9, runs)));
+  const s = outcomesSummary(parseOutcomesFile(ofile(runs)));
   assert.deepEqual(s.real.prs, { accepted: 26, rejected: 1, pending: 0, other: 1 });
   assert.equal(s.real.zeroTouch, 25);
   assert.deepEqual(s.drills.prs, { accepted: 3, rejected: 9, pending: 0, other: 0 });

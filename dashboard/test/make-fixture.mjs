@@ -9,8 +9,9 @@
 //   cadence GitHub's scheduler really delivers (every 2 to 8 h, not hourly), plus three
 //   tasks done earlier, so the board reads "all done".
 // - fixtures/sample-meta.json and quiet-meta.json: the task map, contracts, task issues, build
-//   cost and drill record each sample uses instead of GitHub. The busy sample's log also has a
-//   gh-aw outcomes_snapshot; the quiet one has none ("gh-aw Outcomes not available yet").
+//   cost and drill record each sample uses instead of GitHub.
+// - fixtures/outcomes.json: the busy sample's gh-aw Outcomes file; the quiet sample has none
+//   ("gh-aw Outcomes not available yet").
 //
 //   node dashboard/test/make-fixture.mjs
 //
@@ -27,6 +28,7 @@ export const QUIET_ANCHORS_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quie
 // Stand-ins for the task map, the contracts, the task issues, the build cost and the drill record,
 // so sample mode reads nothing from GitHub: { taskmap, contracts: { id: yaml }, issues, buildCost?, drills }.
 export const META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/sample-meta.json', import.meta.url));
+export const OUTCOMES_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/outcomes.json', import.meta.url));
 export const QUIET_META_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/quiet-meta.json', import.meta.url));
 // The preview pins its clock 12 min after the last event, so ages and "today" read as
 // they would live.
@@ -49,27 +51,24 @@ function uuid(seed) {
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}`;
 }
 
-// The busy sample's gh-aw Outcomes snapshot: PR 6 accepted (not zero-touch: the owner reviewed
+// The busy sample's outcomes.json: PR 6 accepted (not zero-touch: the owner reviewed
 // and enqueued it), PR 7 accepted zero-touch, PR 8 pending under repair, casual-date's run still
 // without outputs, a reviewer run with no task, a drill PR rejected, and one malformed run.
-function outcomesFixture() {
+export function buildOutcomes() {
   const PR = (n) => `https://github.com/sabbasi3-factory-lab/chrono-node-rs/pull/${n}`;
-  const item = (type, url, status, zeroTouch = null, evidence = 'strong') => ({ type, object_url: url, outcome_status: status, evidence_strength: evidence, zero_touch: zeroTouch });
-  const run = (run_id, workflow, task, drill, created_at, aic, items) => ({ run_id, workflow, task, drill, created_at, aic, conclusion: 'success', eval: 'ok', evaluated_at: '2026-10-16T10:58:00Z', items });
+  const item = (type, url, status, zeroTouch = null) => ({ type, object_url: url, outcome_status: status, zero_touch: zeroTouch });
+  const run = (run_id, workflow, task, drill, created_at, aic, items) => ({ run_id, workflow, title: `${workflow} ${task ?? 'one factory PR'}`, created_at, aic, task, drill, items });
   const runs = [
-    run(4001, 'implement', 'en/ordinal', false, '2026-10-15T14:00:09Z', 179, [item('create_pull_request', PR(6), 'accepted', false), item('add_comment', null, 'pending', null, 'medium')]),
+    run(4001, 'implement', 'en/ordinal', false, '2026-10-15T14:00:09Z', 179, [item('create_pull_request', PR(6), 'accepted', false), item('add_comment', null, 'pending')]),
     run(4101, 'implement', 'en/weekday-parser', false, '2026-10-16T08:06:08Z', 200, [item('create_pull_request', PR(7), 'accepted', true)]),
     run(4102, 'implement', 'en/month-parser', false, '2026-10-16T09:01:07Z', 262, [item('create_pull_request', PR(8), 'pending')]),
     run(4103, 'repair', 'en/month-parser', false, '2026-10-16T10:00:08Z', null, [item('push_to_pull_request_branch', PR(8), 'pending')]),
     run(4104, 'implement', 'en/casual-date', false, '2026-10-16T10:31:06Z', null, []),
-    run(4105, 'review', null, false, '2026-10-16T08:51:10Z', 61, [item('create_check_run', null, 'unknown', null, 'none')]),
+    run(4105, 'review', null, false, '2026-10-16T08:51:10Z', 61, [item('create_check_run', null, 'unknown')]),
     run(4200, 'implement', 'drill/repair-ok', true, '2026-10-15T10:00:00Z', 150, [item('create_pull_request', PR(3), 'rejected')]),
     { run_id: 'not-a-number', workflow: 'implement', drill: false, items: [] },
   ];
-  return {
-    source_run_id: 9001, source_run_attempt: 1, gh_aw_version: 'v0.92.0', evaluated_at: '2026-10-16T10:58:00Z', mode: 'full', runs,
-    summary: { runs: runs.length, accepted: 2, rejected: 1, pending: 3, unknown: 1 },
-  };
+  return { generated_at: '2026-10-16T10:58:00Z', gh_aw_version: 'v0.92.0', runs, summary: { accepted: 2, rejected: 1, pending: 3, unknown: 1 } };
 }
 
 const hb = (hour, runId, openPrs, decisions) => ({
@@ -119,8 +118,6 @@ const STEPS = [
   ['2026-10-16T08:50:30Z', { type: 'review_dispatched', task: 'en/weekday-parser', issue: 42, pr: 7, head_sha: hex('h7'), run_id: 3006, effect: 'dispatch_workflow:review', reason: 'review_needed' }],
   ['2026-10-16T08:52:00Z', { type: 'queued', pr: 7, actor: CONTROLLER, at: '2026-10-16T08:51:51Z' }],
   ['2026-10-16T09:00:06Z', hb('2026-10-16T09', 2025, 1, 6)],
-  // A malformed gh-aw Outcomes snapshot (no runs list): ignored.
-  ['2026-10-16T09:00:15Z', { type: 'outcomes_snapshot', source_run_id: 9000, evaluated_at: '2026-10-16T09:00:10Z', gh_aw_version: 'v0.92.0', mode: 'full' }],
   ['2026-10-16T09:00:20Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 1307, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 900, status: 'reserved' }], runs_total: 3 }],
   ['2026-10-16T09:00:30Z', { type: 'picked', task: 'en/month-parser', issue: 43, effect: 'pick', reason: 'priority' }],
   ['2026-10-16T09:01:00Z', { type: 'dispatched', task: 'en/month-parser', issue: 43, attempt: 1, contract_sha: hex('c43', 7), workflow: 'implement', run_id: 4102, model: 'pinned-model-a', effect: 'dispatch', reason: 'ready' }],
@@ -139,10 +136,8 @@ const STEPS = [
   ['2026-10-16T10:50:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:49:51Z' }],
   ['2026-10-16T10:55:00Z', { type: 'dequeued', pr: 9, actor: CONTROLLER, at: '2026-10-16T10:54:40Z' }],
   ['2026-10-16T10:58:00Z', { type: 'queued', pr: 9, actor: OWNER, at: '2026-10-16T10:57:30Z' }],
-  ['2026-10-16T10:58:30Z', { type: 'outcomes_snapshot', ...outcomesFixture() }],
   ['2026-10-16T10:59:00Z', { type: 'auto_ready', task: 'common/iso-date', issue: 47, reason: 'deps_merged' }],
   ['2026-10-16T11:00:00Z', { type: 'spend_snapshot', day: '2026-10-16', aic_today: 2617, runs: [{ run_id: 4101, aic: 312, status: 'measured' }, { run_id: 4105, aic: 95, status: 'measured' }, { run_id: 4102, aic: 410, status: 'measured' }, { run_id: 4103, aic: 900, status: 'reserved' }, { run_id: 4104, aic: 900, status: 'reserved' }], runs_total: 5 }],
-  ['2026-10-16T11:00:01Z', { type: 'outcomes_checked', source_run_id: 9002, source_run_attempt: 1, same_as_run_id: 9001, runs_hash: 'sha256:' + hex('runs', 64) }],
   ['2026-10-16T11:00:03Z', hb('2026-10-16T11', 2027, 3, 13)],
 ];
 
@@ -389,6 +384,8 @@ export function buildQuietMeta() {
 }
 
 export const metaText = (meta) => JSON.stringify(meta, null, 2) + '\n';
+// outcomes.json with one run per line, so the fixture stays short and diffs well.
+export const outcomesText = ({ runs, ...head }) => `${JSON.stringify(head).slice(0, -1)},"runs":[\n${runs.map((r) => JSON.stringify(r)).join(',\n')}\n]}\n`;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const lines = buildFixtureLines();
@@ -405,5 +402,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log(`wrote ${quietAnchors.length} anchors to dashboard/test/fixtures/quiet-anchors.jsonl`);
   writeFileSync(META_FIXTURE_PATH, metaText(buildMeta()));
   writeFileSync(QUIET_META_FIXTURE_PATH, metaText(buildQuietMeta()));
-  console.log('wrote dashboard/test/fixtures/sample-meta.json and quiet-meta.json');
+  writeFileSync(OUTCOMES_FIXTURE_PATH, outcomesText(buildOutcomes()));
+  console.log('wrote dashboard/test/fixtures/sample-meta.json, quiet-meta.json and outcomes.json');
 }
