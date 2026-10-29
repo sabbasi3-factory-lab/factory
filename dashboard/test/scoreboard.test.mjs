@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  JOURNAL_URL, OUTCOMES_STALE_MS, costItem, costJoin, earliestSpendDay, handsOffItem, healthSummary, humanSteps, outcomesStale, outcomesSummary, parseOutcomesFile, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
+  JOURNAL_URL, OUTCOMES_STALE_MS, RUN_ROW_LABEL, compactCount, costItem, moneyTable, costJoin, earliestSpendDay, handsOffItem, healthSummary, humanSteps, outcomesStale, outcomesSummary, parseOutcomesFile, issueToMerged, plainDuration, plainProblem, qualityItem, segText,
   shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
 } from '../lib.js';
 
@@ -47,8 +47,10 @@ test('build-cost.json: the committed file is valid; every field is required and 
   assert.equal(committed.ok, true, committed.error);
   assert.ok(Math.abs(file.usd - file.ai_units / 100) <= 1, `usd ${file.usd} should be ai_units / 100 (${file.ai_units / 100})`);
   assert.ok(file.ai_units > 0 && file.as_of >= '2026-10-27', 'a real, current build figure');
+  // Where the money went: the committed breakdown adds up to the build figure exactly.
+  if (file.breakdown) assert.equal(file.breakdown.reduce((a, r) => a + r.ai_units, 0), file.ai_units, 'breakdown sums to ai_units');
   const sample = { ai_units: 111000, usd: 1110, as_of: '2026-10-27', source: 'build journal (coordinator + build sessions)' };
-  assert.deepEqual(validateBuildCost(sample), { ok: true, value: { aiUnits: 111000, usd: 1110, asOf: '2026-10-27', source: 'build journal (coordinator + build sessions)' } });
+  assert.deepEqual(validateBuildCost(sample), { ok: true, value: { aiUnits: 111000, usd: 1110, asOf: '2026-10-27', source: 'build journal (coordinator + build sessions)', breakdown: null, tokens: null, model: null } });
   const bad = (patch, msg) => {
     const r = validateBuildCost({ ...sample, ...patch });
     assert.equal(r.ok, false, JSON.stringify(patch));
@@ -64,6 +66,71 @@ test('build-cost.json: the committed file is valid; every field is required and 
   const { usd: _usd, ...missing } = sample;
   assert.match(validateBuildCost(missing).error, /missing usd/);
   for (const notObject of [null, [], 'x', 3]) assert.deepEqual(validateBuildCost(notObject), { ok: false, error: 'not a JSON object' });
+});
+
+test('build-cost.json: the optional breakdown, tokens and model are checked; unknown keys are still rejected', () => {
+  const base = { ai_units: 300, usd: 3, as_of: '2026-10-27', source: 'journal' };
+  const full = { ...base, breakdown: [{ who: 'Research', ai_units: 100 }, { who: 'Build session: x', ai_units: 200 }], tokens: { input: 2e9, output: 6e6, calls: 10 }, model: 'm' };
+  assert.deepEqual(validateBuildCost(full).value, {
+    aiUnits: 300, usd: 3, asOf: '2026-10-27', source: 'journal',
+    breakdown: [{ who: 'Research', aiUnits: 100 }, { who: 'Build session: x', aiUnits: 200 }], tokens: { input: 2e9, output: 6e6, calls: 10 }, model: 'm',
+  });
+  assert.equal(validateBuildCost({ ...base, tokens: { input: 1 } }).ok, true, 'each token count is optional');
+  const bad = (patch, msg) => {
+    const r = validateBuildCost({ ...full, ...patch });
+    assert.equal(r.ok, false, JSON.stringify(patch));
+    assert.match(r.error, msg);
+  };
+  bad({ breakdown: [] }, /breakdown is not a non-empty list/);
+  bad({ breakdown: { who: 'x', ai_units: 1 } }, /breakdown is not a non-empty list/);
+  bad({ breakdown: ['x'] }, /breakdown\[0\] is not an object/);
+  bad({ breakdown: [{ who: '', ai_units: 1 }] }, /breakdown\[0\]\.who is not a non-empty string of at most 80 characters/);
+  bad({ breakdown: [{ who: 'x'.repeat(81), ai_units: 1 }] }, /breakdown\[0\]\.who is not/);
+  assert.equal(validateBuildCost({ ...full, breakdown: [{ who: 'x'.repeat(80), ai_units: 1 }] }).ok, true, '80 characters is fine');
+  bad({ breakdown: [{ who: 'x', ai_units: -1 }] }, /breakdown\[0\]\.ai_units is not a number ≥ 0/);
+  bad({ breakdown: [{ who: 'x', ai_units: '1' }] }, /breakdown\[0\]\.ai_units is not a number ≥ 0/);
+  bad({ breakdown: [{ who: 'x' }] }, /breakdown\[0\]: missing ai_units/);
+  bad({ breakdown: [{ who: 'x', ai_units: 1, usd: 1 }] }, /breakdown\[0\]: unexpected usd/);
+  bad({ tokens: 'many' }, /tokens is not an object/);
+  bad({ tokens: { input: -1 } }, /tokens\.input is not a number ≥ 0/);
+  bad({ tokens: { cached: 1 } }, /tokens: unexpected cached/);
+  bad({ model: '' }, /model is not a non-empty string/);
+  bad({ models: 'x' }, /unexpected models/);
+  // The breakdown's sum isn't the validator's job: a daily ai_units update keeps the build cost.
+  assert.equal(validateBuildCost({ ...full, ai_units: 301 }).ok, true);
+});
+
+test('token counts read short: billions to one decimal, millions and thousands whole', () => {
+  assert.deepEqual([2279000000, 6209000, 12345, 3e9, 999, null].map(compactCount), ['2.3B', '6M', '12K', '3B', '999', '—']);
+});
+
+test('where the money went: breakdown rows, the running cost, shares of the total, and the fail-soft cases', () => {
+  const file = read('build-cost.json');
+  const committed = moneyTable(validateBuildCost(file), 1632);
+  // The committed file (no pinned values): one row per breakdown entry, then the factory's runs.
+  assert.deepEqual(committed.rows.map((r) => r.who), [...file.breakdown.map((r) => r.who), RUN_ROW_LABEL]);
+  assert.equal(committed.total, file.ai_units + 1632);
+  assert.ok(Math.abs(committed.rows.reduce((a, r) => a + r.share, 0) - 100) <= 2, 'rounded shares add up to about 100');
+  // Exact shares on fixed numbers.
+  const build = validateBuildCost({ ai_units: 131487, usd: 1315, as_of: '2026-10-28', source: 'j', breakdown: [
+    { who: 'Research', ai_units: 20460 }, { who: 'Coordinator', ai_units: 48151 }, { who: 'Build session', ai_units: 62876 }] });
+  const t = moneyTable(build, 1632);
+  assert.deepEqual(t.rows.map((r) => [r.key, r.aic, r.share]), [['b0', 20460, 15], ['b1', 48151, 36], ['b2', 62876, 47], ['run', 1632, 1]]);
+  assert.deepEqual([t.total, t.runKnown], [133119, true]);
+  // The run cost unknown: "—" for that row (no amount, no share), left out of the total.
+  const unknown = moneyTable(build, null);
+  assert.deepEqual(unknown.rows.at(-1), { key: 'run', who: RUN_ROW_LABEL, aic: null, share: null });
+  assert.deepEqual([unknown.total, unknown.runKnown, unknown.rows[2].share], [131487, false, 48]);
+  assert.equal(moneyTable(build, Number.NaN).runKnown, false);
+  // A dry run: a known $0.00 run cost.
+  assert.deepEqual(moneyTable(build, 0).rows.at(-1).share, 0);
+  // No breakdown, or no valid build cost: the section is hidden.
+  assert.equal(moneyTable(validateBuildCost({ ai_units: 1, usd: 0, as_of: '2026-10-28', source: 'j' }), 1632), null);
+  assert.equal(moneyTable({ ok: false, error: 'x' }, 1632), null);
+  assert.equal(moneyTable(null, 1632), null);
+  // All zero: shares are 0, never NaN.
+  const zero = moneyTable(validateBuildCost({ ai_units: 0, usd: 0, as_of: '2026-10-28', source: 'j', breakdown: [{ who: 'x', ai_units: 0 }] }), 0);
+  assert.deepEqual(zero.rows.map((r) => r.share), [0, 0]);
 });
 
 test('drills.json: the committed record is 12 passed runs with 6 defects; every field is checked', () => {

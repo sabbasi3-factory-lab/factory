@@ -2064,19 +2064,78 @@ const keyProblems = (obj, required, optional = []) => {
 const plainObject = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
 
 /**
- * build-cost.json: exactly { ai_units, usd, as_of, source }. Strict: extra keys are rejected (a
- * renamed field must not be silently ignored); ai_units and usd are finite numbers ≥ 0, as_of a
- * real "YYYY-MM-DD" date, source a non-empty string. Returns { ok: true, value: { aiUnits, usd,
- * asOf, source } } or { ok: false, error }.
+ * build-cost.json: { ai_units, usd, as_of, source } and, optionally, { breakdown, tokens, model }.
+ * Strict: other keys are rejected (a renamed field must not be silently ignored); ai_units and usd
+ * are finite numbers ≥ 0, as_of a real "YYYY-MM-DD" date, source a non-empty string; breakdown a
+ * non-empty list of { who: a non-empty string of at most 80 characters, ai_units: a number ≥ 0 };
+ * tokens an object of numbers ≥ 0 (input, output, calls; each optional); model a non-empty string.
+ * The breakdown's sum isn't checked here (a daily one-line update of ai_units must not hide the
+ * build cost); the committed file's sum is checked by a test. Returns { ok: true, value: { aiUnits,
+ * usd, asOf, source, breakdown, tokens, model } } (absent optional parts are null) or { ok: false, error }.
  */
 export function validateBuildCost(data) {
   if (!plainObject(data)) return { ok: false, error: 'not a JSON object' };
-  const errors = keyProblems(data, ['ai_units', 'usd', 'as_of', 'source']);
+  const errors = keyProblems(data, ['ai_units', 'usd', 'as_of', 'source'], ['breakdown', 'tokens', 'model']);
   for (const k of ['ai_units', 'usd']) if (k in data && !(isNum(data[k]) && data[k] >= 0)) errors.push(`${k} is not a number ≥ 0`);
   if ('as_of' in data && !validDay(data.as_of)) errors.push('as_of is not a YYYY-MM-DD date');
   if ('source' in data && !isStr(data.source)) errors.push('source is not a non-empty string');
+  if ('breakdown' in data) {
+    if (!Array.isArray(data.breakdown) || !data.breakdown.length) errors.push('breakdown is not a non-empty list');
+    else {
+      data.breakdown.forEach((r, i) => {
+        if (!plainObject(r)) return errors.push(`breakdown[${i}] is not an object`);
+        for (const e of keyProblems(r, ['who', 'ai_units'])) errors.push(`breakdown[${i}]: ${e}`);
+        if ('who' in r && !(isStr(r.who) && r.who.length <= 80)) errors.push(`breakdown[${i}].who is not a non-empty string of at most 80 characters`);
+        if ('ai_units' in r && !(isNum(r.ai_units) && r.ai_units >= 0)) errors.push(`breakdown[${i}].ai_units is not a number ≥ 0`);
+        return null;
+      });
+    }
+  }
+  if ('tokens' in data) {
+    if (!plainObject(data.tokens)) errors.push('tokens is not an object');
+    else {
+      for (const e of keyProblems(data.tokens, [], ['input', 'output', 'calls'])) errors.push(`tokens: ${e}`);
+      for (const [k, v] of Object.entries(data.tokens)) if (!(isNum(v) && v >= 0)) errors.push(`tokens.${k} is not a number ≥ 0`);
+    }
+  }
+  if ('model' in data && !isStr(data.model)) errors.push('model is not a non-empty string');
   if (errors.length) return { ok: false, error: errors.join('; ') };
-  return { ok: true, value: { aiUnits: data.ai_units, usd: data.usd, asOf: data.as_of, source: data.source } };
+  return {
+    ok: true,
+    value: {
+      aiUnits: data.ai_units, usd: data.usd, asOf: data.as_of, source: data.source,
+      breakdown: data.breakdown ? data.breakdown.map((r) => ({ who: r.who, aiUnits: r.ai_units })) : null,
+      tokens: data.tokens ? { ...data.tokens } : null,
+      model: data.model ?? null,
+    },
+  };
+}
+
+/** A token count in short form: billions to one decimal ("2.3B"), millions and thousands whole ("6M", "12K"). */
+export function compactCount(n) {
+  if (!isNum(n)) return '—';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1).replace(/\.0$/, '')}B`;
+  const unit = [[1e6, 'M'], [1e3, 'K']].find(([d]) => n >= d);
+  return unit ? `${Math.round(n / unit[0])}${unit[1]}` : String(Math.round(n));
+}
+
+export const RUN_ROW_LABEL = 'Factory agents: the actual port';
+
+/**
+ * "Where the money went": the build breakdown rows, the factory's own agent runs, and a total.
+ * `build` is a validateBuildCost() result; `runAic` the full running cost in AI credits (the same
+ * figure the Total-cost card adds), or null when unknown. Returns null without a breakdown (the
+ * section is hidden). Each row is { key, who, aic, share } with share the rounded percentage of
+ * the total (null for an unknown run cost, which is left out of the total: `runKnown` false).
+ */
+export function moneyTable(build, runAic) {
+  const parts = build?.ok ? build.value.breakdown : null;
+  if (!parts?.length) return null;
+  const runKnown = isNum(runAic) && runAic >= 0;
+  const rows = [...parts.map((p, i) => ({ key: `b${i}`, who: p.who, aic: p.aiUnits })), { key: 'run', who: RUN_ROW_LABEL, aic: runKnown ? runAic : null }];
+  const total = rows.reduce((a, r) => a + (r.aic ?? 0), 0);
+  for (const r of rows) r.share = r.aic == null ? null : total > 0 ? Math.round((r.aic / total) * 100) : 0;
+  return { rows, total, runKnown, tokens: build.value.tokens, model: build.value.model };
 }
 
 /**

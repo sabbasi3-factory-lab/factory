@@ -13,7 +13,7 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `app.js` | UI: polling, rendering, settings |
 | `lib.js` | Pure logic: canonical JSON, SHA-256 checks, chain check, metrics, verifier anchors. Runs in the browser and in Node |
 | `style.css` | Layout and the theme (below); light and dark (system setting, or the Theme button, remembered in `localStorage`) |
-| `build-cost.json` | What it cost to build the factory (research, design, coordination and build sessions), from the build journal: `{ "ai_units", "usd", "as_of", "source" }`. Deployed with the page and read same-origin |
+| `build-cost.json` | What it cost to build the factory (research, design, coordination and build sessions), from the build journal: `{ "ai_units", "usd", "as_of", "source" }`, optionally with `"breakdown": [{ "who", "ai_units" }]` (who spent it; it must sum to `ai_units`, which a test checks), `"tokens": { "input", "output", "calls" }` and `"model"`. Other keys are rejected. Deployed with the page and read same-origin |
 | `drills.json` | The safety-drill record from the build journal: `{ "as_of", "source", "defects_found_and_fixed", "runs": [{ "id", "result": "pass" or "fail", "note"? }] }`. Deployed with the page and read same-origin |
 | `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board and its progress, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five KPI cards, the two JSON files and the human-steps rule) |
 | `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts, task issues, build cost and drill record each sample uses instead of GitHub. It also writes `outcomes.json`, the busy sample's gh-aw Outcomes file (read same-origin; the quiet sample has none, to show the fallback). `outcomes-live-sample.json` is a real file from the source repo, for the parser test |
@@ -74,6 +74,13 @@ Top to bottom:
 
   The wording is tight because of the fold budget; the tooltips and Details carry the
   qualifiers (real work only, before merge, ported from JavaScript to Rust).
+- **Where the money went** (a slim fold right under the KPI cards, closed; hidden when
+  `build-cost.json` has no `breakdown`): a table of AI units, dollars and share of the total,
+  one row per breakdown entry ("Build session" has a glossary tooltip), then "Factory agents: the
+  actual port" (the same running cost the Total-cost card adds; "—" and left out of the total,
+  with a note, when it isn't known) and the total, which matches the Total-cost card. Below it, why
+  ("2.3B input vs 6M output tokens", from `tokens`) and what a leaner run would cost. Its long
+  lines are inline-block clauses, so each run stays within 8 words (`moneyTable()` in `lib.js`).
 - **Tasks** (one card): the heading with a state legend when more than one state is present, a
   one-line caption saying what a task is: "Task = one chrono-node parser or refiner, in Rust. One
   contract, one issue, one PR." (a task is one upstream chrono-node step ported to one Rust file,

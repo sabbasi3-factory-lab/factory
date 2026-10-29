@@ -500,6 +500,8 @@ test('recent activity: one line per task (its latest event), noise skipped', () 
 
 test('the meta stand-ins are current, and the busy sample shows every board state and a cost join', () => {
   assert.equal(readFileSync(META_FIXTURE_PATH, 'utf8'), metaText(buildMeta()), 'run: node dashboard/test/make-fixture.mjs');
+  const sampleBuild = buildMeta().buildCost;
+  assert.equal(sampleBuild.breakdown.reduce((x, r) => x + r.ai_units, 0), sampleBuild.ai_units, 'the busy sample\'s breakdown sums to its build figure');
   assert.equal(readFileSync(QUIET_META_FIXTURE_PATH, 'utf8'), metaText(buildQuietMeta()), 'run: node dashboard/test/make-fixture.mjs');
   const meta = buildMeta();
   const events = parseJsonl(readFileSync(FIXTURE_PATH, 'utf8'), 'sample.jsonl').map((r) => r.event);
