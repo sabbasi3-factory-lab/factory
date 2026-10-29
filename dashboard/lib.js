@@ -2344,6 +2344,17 @@ export const OUTCOME_STATUSES = Object.freeze(['accepted', 'rejected', 'pending'
 export const OUTCOMES_STALE_MS = 48 * HOUR_MS;
 
 /**
+ * Whether outcomes.json should be read now: at most every `maxMs`, or after `minMs` once the audit
+ * head has moved. A head change is remembered (`st.headDirty`) until the next read, so one seen
+ * shortly after a read still brings the next read forward. The caller clears it when it reads.
+ */
+export function outcomesReadDue(st, headChanged, now, { maxMs, minMs }) {
+  if (headChanged) st.headDirty = true;
+  const age = st.attemptedAt == null ? Infinity : now - st.attemptedAt;
+  return age >= maxMs || (st.headDirty === true && age >= minMs);
+}
+
+/**
  * outcomes.json, normalized, or null when it isn't usable (no `runs` array). A tolerant check:
  * runs without a numeric `run_id` or an `items` array, and items that aren't objects, are skipped
  * and counted in `dropped`; unknown fields are ignored.

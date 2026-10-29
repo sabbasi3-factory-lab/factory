@@ -8,7 +8,7 @@ import {
   fallbackCatalog, formatDuration, formatLimit, formatUsd, healthSummary, heartbeatTimes, humanTouch, issueToMerged, latestDispatchState, limitsText,
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
-  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, parseOutcomesFile, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
+  allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, parseOutcomesFile, outcomesReadDue, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
   isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
@@ -110,7 +110,7 @@ const state = {
   // build-cost.json and drills.json, deployed with the page: validateBuildCost/validateDrills results.
   statics: { build: null, drills: null, attemptedAt: null },
   // gh-aw Outcomes: parsed outcomes.json from the last good read, or null; refreshed like the PR lists.
-  outcomes: { file: null, error: null, fetchedAt: null, attemptedAt: null },
+  outcomes: { file: null, error: null, fetchedAt: null, attemptedAt: null, headDirty: false },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -672,9 +672,9 @@ async function maybeRefreshStatics() {
 // the last good one, or none ("gh-aw Outcomes not available yet").
 async function maybeRefreshOutcomes(headChanged) {
   const o = state.outcomes;
-  const age = o.attemptedAt == null ? Infinity : Date.now() - o.attemptedAt;
-  if (!(age >= PR_MAX_AGE_MS || (headChanged && age >= PR_MIN_AGE_MS))) return;
+  if (!outcomesReadDue(o, headChanged, Date.now(), { maxMs: PR_MAX_AGE_MS, minMs: PR_MIN_AGE_MS })) return;
   o.attemptedAt = Date.now();
+  o.headDirty = false;
   const url = FIXTURE ? FIXTURES[FIXTURE_PARAM]?.outcomes : `${RAW}/${REPO}/outcomes/outcomes.json`;
   try {
     if (!url) throw new Error('none in this sample');

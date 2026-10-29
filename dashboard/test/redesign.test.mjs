@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
-  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, parseOutcomesFile, outcomesSummary,
+  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, parseOutcomesFile, outcomesReadDue, outcomesSummary,
   stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
 import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, OUTCOMES_FIXTURE_PATH, buildMeta, buildOutcomes, buildQuietMeta, metaText, outcomesText } from './make-fixture.mjs';
@@ -590,4 +590,17 @@ test('no sample fixture yields a negative stage duration (stages are reached in 
       if (r.totalMs != null) assert.ok(r.totalMs >= 0, `${path}: ${r.key} total`);
     }
   }
+});
+
+test('outcomes.json read cadence: a head change after a read is remembered until the next read', () => {
+  const opts = { maxMs: 15 * 60e3, minMs: 5 * 60e3 };
+  const st = { attemptedAt: null, headDirty: false };
+  assert.equal(outcomesReadDue(st, false, 0, opts), true); // never read
+  st.attemptedAt = 0; st.headDirty = false; // read at minute 0
+  assert.equal(outcomesReadDue(st, true, 1 * 60e3, opts), false); // head moved at minute 1: too soon
+  assert.equal(outcomesReadDue(st, false, 4 * 60e3, opts), false);
+  assert.equal(outcomesReadDue(st, false, 5 * 60e3, opts), true); // still remembered: read at minute 5, not 15
+  st.attemptedAt = 5 * 60e3; st.headDirty = false; // read; flag cleared
+  assert.equal(outcomesReadDue(st, false, 11 * 60e3, opts), false);
+  assert.equal(outcomesReadDue(st, false, 20 * 60e3, opts), true); // max age
 });
