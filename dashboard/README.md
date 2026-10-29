@@ -12,7 +12,7 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `index.html` | Page structure and the Content-Security-Policy |
 | `app.js` | UI: polling, rendering, settings |
 | `lib.js` | Pure logic: canonical JSON, SHA-256 checks, chain check, metrics, verifier anchors. Runs in the browser and in Node |
-| `style.css` | Layout; light and dark themes (system setting, or the Theme button, remembered in `localStorage`) |
+| `style.css` | Layout and the theme (below); light and dark (system setting, or the Theme button, remembered in `localStorage`) |
 | `build-cost.json` | What it cost to build the factory (research, design, coordination and build sessions), from the build journal: `{ "ai_units", "usd", "as_of", "source" }`. Deployed with the page and read same-origin |
 | `drills.json` | The safety-drill record from the build journal: `{ "as_of", "source", "defects_found_and_fixed", "runs": [{ "id", "result": "pass" or "fail", "note"? }] }`. Deployed with the page and read same-origin |
 | `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five sentences, the two JSON files and the human-steps rule) |
@@ -32,6 +32,15 @@ Details, "How these numbers work". The tooltip is 14 px text, line-height 1.55, 
 "in 22m"); exact UTC times are only in titles and Details. The visible page avoids jargon (no
 AIC, auto-strict, dispatch or heartbeat).
 
+The theme is a "modern product look": neutral surfaces (light: an `#f7f8fa` page with white
+cards; dark: `#0f1115` with `#171a21` cards), hairline borders, a soft two-layer shadow in light
+and an inner highlight in dark, an 8 px spacing grid, 16 px card and 8 px tile and chip corners,
+and the system UI font stack (Inter only if it's installed; no web fonts). One accent colour
+(`#5b5bd6` light, `#9d9cf7` dark) is used for links, focus rings, the logo, highlights and the
+"running" state; green, amber, red and grey mean states only. Text, muted text and accent links
+are at 4.5:1 or more on every surface in both themes, and focus rings and icons at 3:1 or more.
+Hover and focus transitions take 150 ms and are off under `prefers-reduced-motion`.
+
 Top to bottom:
 
 - **Header:** the data's age ("12s ago", tooltip: when it was checked, API requests left,
@@ -43,7 +52,8 @@ Top to bottom:
   issues), else "idle"; then what needs you: "nothing needs you", or "2 tasks need you: #28,
   #33" (linked, after the closed rule), "checking reviews…" or "review list unavailable".
   "Dry run" and "Sample" chips show when they apply.
-- **Scoreboard:** five sentences, each with one big number:
+- **Scoreboard** (the hero card: an accent hairline on top, a faint accent wash, a 3 + 2 grid at
+  desktop widths, one column on phones): five sentences, each with one big number:
   1. "Shipped: 26 of 26 tasks", under it "18 routine + 8 core" and the gh-aw Outcomes result for
      real work, "gh-aw Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (else "gh-aw Outcomes
      not available yet");
@@ -55,10 +65,15 @@ Top to bottom:
   5. "Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects
      fixed)", real work only, the drills linked to the build journal.
 
-  The wording is tight because of the 120-word fold budget; the tooltips and Details carry the
+  The wording is tight because of the 140-word fold budget; the tooltips and Details carry the
   qualifiers (real work only, before merge, ported from JavaScript to Rust).
-- **Task board:** one tile per task of the task map, grouped by its contract area, with a state
-  colour and icon (✓ done, ▶ running, ⚠ needs you, ⧗ waiting); a legend shows when more than one
+- **Task board:** under the Tasks heading, a one-line caption says what a task is: "Task = one
+  chrono-node parser or refiner, in Rust. One contract, one issue, one PR." (a task is one
+  upstream chrono-node step ported to one Rust file, with one contract `contracts/<id>.yaml`, one
+  issue labelled `factory:task` and normally one agent PR; safety drills and infrastructure PRs
+  aren't tasks; the info tooltip, the Shipped tooltip and Details, "What's a task", say so too).
+  Then one tile per task of the task map, grouped by its contract area, with a state
+  colour bar and icon (✓ done, ▶ running, ⚠ needs you, ⧗ waiting); a legend shows when more than one
   state is present. A tile links to its issue; its tooltip has the task id, tier, state and since
   when.
 - **Details** (one fold, closed): how these numbers work (the definitions and the data scope),
@@ -131,8 +146,9 @@ the macOS app. Without one it's skipped locally and fails when `CI` is set. It s
 `dashboard/` on an ephemeral local port, opens both `?fixture=1` and `?fixture=quiet` at
 1440×900 and 390×844 and checks these budgets on each:
 
-- at most 120 visible words above the fold at 1440×900 (the owner's results-scoreboard
-  request; it was 80, then 150 for the earlier one-screen layout);
+- at most 140 visible words above the fold at 1440×900 (it was 80, then 150 for the earlier
+  one-screen layout, then 120 for the owner's results scoreboard; 140 adds the owner's
+  "what's a task" caption, and Details and the footer now fit above the fold on the live page);
 - at most 250 visible words in total (closed `<details>`, hidden elements and tooltips
   don't count);
 - no visible sentence longer than 8 words. The scoreboard sentences are longer, so each number
@@ -146,7 +162,7 @@ then one closed Details fold), the exact status line and sentences of both sampl
 invalid build cost or drill record drops only its part with the reason in the tooltip, that the
 "manual steps" link opens Details at the list, that no raw ISO time or jargon is visible, that
 sample mode makes no GitHub request, the task board's state icons, colours, links and tooltips,
-both themes, tooltips on keyboard focus, "View all" with Enter and Space, focus surviving a
+both themes (and their contrast, focus rings and reduced motion), the task caption, tooltips on keyboard focus, "View all" with Enter and Space, focus surviving a
 re-render, no link text starting with "Open", nothing red or amber while the sample is held back,
 the liveness and health tooltips' observed cadence, and a clean console. On failure it prints the
 offending words and sentences.

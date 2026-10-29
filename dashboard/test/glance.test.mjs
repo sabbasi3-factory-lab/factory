@@ -298,6 +298,12 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(r.find((t) => t.label === 'range: waiting').href, 'https://github.com/sabbasi3-factory-lab/chrono-node-rs/blob/main/contracts/en/range.yaml');
     assert.deepEqual(await page.evaluate("[...document.querySelectorAll('#board .group-h')].map((g) => g.textContent)"), ['Common parsers', 'Numeric', 'Casual', 'Months', 'Relative']);
     assert.equal(await page.evaluate("document.getElementById('board-legend').innerText.replace(/\\s+/g, ' ').trim()"), '2 done 2 running 2 needs you 2 waiting');
+    // The owner asked for what a task is, on the page: a caption under the heading, and the info tooltip.
+    const def = await page.evaluate(`(() => { const c = document.getElementById('board-caption'); const r = c.getBoundingClientRect();
+      return { text: c.innerText.trim(), shown: r.height > 0, below: r.top >= document.getElementById('board-h').getBoundingClientRect().bottom && r.bottom <= document.getElementById('board').getBoundingClientRect().top,
+        tip: document.getElementById('board-info-tip').textContent }; })()`);
+    assert.deepEqual(def, { text: 'Task = one chrono-node parser or refiner, in Rust. One contract, one issue, one PR.', shown: true, below: true,
+      tip: "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a tile to view its issue; icons show state." });
     // Keyboard: a tile takes focus and shows its tooltip.
     const tip = await page.evaluate("(() => { document.querySelector('#board .tile').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
     assert.equal(tip, 'common/iso-date: ready, waiting for a free slot. Core task; select to view issue #47.');
@@ -349,6 +355,8 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.match(o.text, /over the 4 of 4 measured real runs that have both figures/);
     assert.equal(o.runs, 7);
     // Repairs are ours (Outcomes can't see them): plain sentences in Details, drills apart.
+    // What a task is, in Details: one parser or refiner, one contract, issue and PR; drills and infrastructure PRs aren't tasks.
+    assert.match(o.about, /What's a task A task is one upstream chrono-node step, a parser or a refiner, ported to one Rust file\. Each has one contract \(contracts\/<id>\.yaml\), one GitHub issue labelled factory:task and normally one agent PR; there are 8: 7 routine \(English\) and 1 core \(shared\)\. Safety drills and plain infrastructure PRs are not tasks\./);
     assert.match(o.about, /Repairs 1 repair: 0 fixed the PR, 1 still running\. Safety drills: No repairs\./);
     // The sample reads its own outcomes.json, same-origin; no Actions API request at all.
     const urls = await page.evaluate("performance.getEntriesByType('resource').map((e) => e.name)");
@@ -374,7 +382,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.equal(await page.evaluate("document.getElementById('tip').hidden"), true);
     // A scoreboard sentence is focusable and its tooltip has the definitions.
     const tileTip = await page.evaluate("(() => { const k = document.querySelector('#score .score-item'); k.focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
-    assert.equal(tileTip, 'Tasks ported from JavaScript to Rust whose issue is closed as completed. gh-aw Outcomes judges each agent PR; real work only, drills separate.');
+    assert.equal(tileTip, 'Task = one chrono-node parser or refiner in Rust; done when its issue closes as completed. gh-aw Outcomes judges each agent PR; real work only.');
     // The hands-off sentence: gh-aw's zero-touch, in the owner's words.
     const handsTip = await page.evaluate("(() => { document.querySelector('.score--hands').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
     assert.equal(handsTip, 'gh-aw counts a PR as zero-touch if no person edited it. Manual steps outside the PR are counted separately below.');
@@ -502,9 +510,48 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     const dark = await colours('dark');
     const light = await colours('light');
     assert.notEqual(dark.bg, light.bg);
-    assert.equal(dark.bg, 'rgb(13, 17, 23)');
+    assert.equal(dark.bg, 'rgb(15, 17, 21)');
+    assert.equal(light.bg, 'rgb(247, 248, 250)');
     assert.equal(dark.tiles, 4);
     assert.equal(light.tiles, 4);
+  });
+
+  test('both themes: text, muted text, accent links, state colours and the focus ring meet contrast; motion respects reduced-motion', async () => {
+    await open('1');
+    await page.setViewport(1440, 900);
+    for (const scheme of ['light', 'dark']) {
+      await page.setColorScheme(scheme);
+      const r = await page.evaluate(`(() => {
+        const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+        const rgb = (c) => c.match(/[\\d.]+/g).slice(0, 3).map(Number);
+        const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+        const ratio = (x, y) => { const [a, b] = [lum(rgb(probe(x))), lum(rgb(probe(y)))]; return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+        const surfaces = ['var(--bg)', 'var(--panel)', 'var(--panel-2)', 'var(--accent-wash)'];
+        const worst = (fg, bgs = surfaces) => Math.min(...bgs.map((b) => ratio(fg, b)));
+        document.querySelector('a.skip').focus();
+        return {
+          fg: worst('var(--fg)'), muted: worst('var(--muted)'), accent: worst('var(--accent)'),
+          tinted: Math.min(ratio('var(--ok)', 'var(--ok-bg)'), ratio('var(--warn)', 'var(--warn-bg)'), ratio('var(--alert)', 'var(--alert-bg)'), ratio('var(--accent)', 'var(--accent-bg)'), ratio('var(--muted)', 'var(--panel-2)')),
+          logo: ratio('var(--on-accent)', 'var(--accent)'),
+        };
+      })()`);
+      await press('Tab');
+      const ring = await page.evaluate(`(() => { const s = getComputedStyle(document.activeElement); const probe = (v) => { const e = document.createElement('i'); e.style.color = v; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+        return { style: s.outlineStyle, width: parseFloat(s.outlineWidth), isAccent: s.outlineColor === probe('var(--accent)') }; })()`);
+      const detail = `${scheme}: ${JSON.stringify({ ...r, ring })}`;
+      assert.ok(r.fg >= 4.5 && r.muted >= 4.5 && r.accent >= 4.5 && r.tinted >= 4.5, detail);
+      assert.ok(r.logo >= 3, detail);
+      assert.deepEqual([ring.style, ring.width >= 2, ring.isAccent], ['solid', true, true], detail);
+    }
+    await page.setColorScheme('light');
+    const transition = () => page.evaluate("getComputedStyle(document.querySelector('#board .tile')).transitionDuration");
+    assert.match(await transition(), /0\.15s/);
+    await page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }, { name: 'prefers-reduced-motion', value: 'reduce' }] });
+    try {
+      assert.match(await transition(), /^0s(, 0s)*$/);
+    } finally {
+      await page.setColorScheme('light');
+    }
   });
 
   test('status-line links keep keyboard focus when the page refreshes', async () => {
