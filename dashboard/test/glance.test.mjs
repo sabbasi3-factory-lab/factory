@@ -157,6 +157,61 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.notEqual(colour[0], colour[2]);
   });
 
+  test('sample: "Where the money went" is closed under the KPI cards; open, it has the four rows, a total and two short lines', async () => {
+    await open('1');
+    await page.setViewport(1440, 900);
+    const closed = await page.evaluate(`(() => { const m = document.getElementById('money'); const s = m.querySelector('summary'); const r = s.getBoundingClientRect();
+      return { open: m.open, hidden: m.hidden, summary: s.innerText.trim(), visible: r.height > 0 && r.bottom <= innerHeight }; })()`);
+    assert.deepEqual(closed, { open: false, hidden: false, summary: 'Where the money went', visible: true });
+    const before = await measure(1440, 900);
+    assert.ok(before.aboveFoldByPlace.some((g) => g.text === 'Where the money went'), 'the closed summary counts above the fold');
+    await page.evaluate("document.getElementById('money').open = true");
+    try {
+      const r = await page.evaluate(`(() => {
+        const flat = (el) => el.innerText.replace(/\\s+/g, ' ').trim();
+        const body = document.getElementById('money-body');
+        const gloss = body.querySelector('.gloss');
+        return {
+          head: [...body.querySelectorAll('thead th')].map(flat),
+          rows: [...body.querySelectorAll('tbody tr')].map((tr) => [...tr.cells].map(flat)),
+          total: [...body.querySelectorAll('tfoot tr > *')].map(flat),
+          lines: [...body.querySelectorAll('p')].map(flat),
+          gloss: [gloss.innerText.trim(), document.getElementById(gloss.getAttribute('aria-describedby')).textContent],
+        };
+      })()`);
+      assert.deepEqual(r.head, ['Spent on', 'AI units', '$', 'share']);
+      assert.deepEqual(r.rows, [
+        ['Research (gh-aw deep dive, deck, audits)', '18,000', '$180', '16%'],
+        ['Coordinator: planning, reviews, merges, deck & journal', '40,000', '$400', '36%'],
+        ['Build session: wrote the factory (87 PRs)', '53,000', '$530', '47%'],
+        ['Factory agents: the actual port', '1,097', '$10.97', '1%'],
+      ]);
+      // The total is the Total-cost card's figure.
+      assert.deepEqual(r.total, ['Total', '112,097', '$1,121', '100%']);
+      assert.equal(await page.evaluate("document.querySelector('.score--cost .big').textContent"), '$1,121');
+      assert.deepEqual(r.lines, [
+        'Why: most cost was re-reading long conversations (1.9B input vs 5M output tokens) on a premium model.',
+        'A leaner run (fresh sessions, a cheaper model for routine work, fewer PRs) would be about $350–500.',
+      ]);
+      assert.deepEqual(r.gloss, ['Build session', "The Copilot coding session that wrote the factory's own code (controller, gates, workflows, dashboard)."]);
+      // Open, its lines keep the 8-word run rule (and the page its total budget).
+      const m = await measure(1440, 900);
+      assert.deepEqual(m.longSentences, [], report('money open', m, { fold: false, total: false }));
+      assert.ok(m.totalWords <= BUDGETS.totalWords, report('money open', m, { fold: false, sentences: false }));
+      // Keyboard: the glossary term takes focus and shows its tooltip.
+      const tipText = await page.evaluate("(() => { document.querySelector('#money .gloss').focus(); const t = document.getElementById('tip'); return t.hidden ? null : t.textContent; })()");
+      assert.equal(tipText, r.gloss[1]);
+      await press('Escape');
+    } finally {
+      await page.evaluate("document.getElementById('money').open = false");
+    }
+  });
+
+  test('quiet: without a build-cost breakdown "Where the money went" is hidden', async () => {
+    await open('quiet');
+    assert.equal(await page.evaluate("document.getElementById('money').hidden"), true);
+  });
+
   test('quiet: Details shows the observed cadence and the health rule; the tooltips stay short', async () => {
     await open('quiet');
     await page.setViewport(1440, 900);
@@ -277,7 +332,14 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       assert.ok(L.board.top > L.score.bottom && L.details.top > L.board.bottom, `scoreboard, board, Details, top to bottom: ${detail}`);
       assert.ok(L.tiles > 0, detail);
       assert.equal(await page.evaluate("[...document.querySelectorAll('main details')].filter((d) => d.open).length"), 0, 'Details starts closed');
-      assert.equal(await page.evaluate("document.querySelectorAll('main > section > details').length"), 1, 'one Details fold holds the rest');
+      assert.equal(await page.evaluate("document.querySelectorAll('main > section > details:not(#money)').length"), 1, 'one Details fold holds the rest');
+      // "Where the money went" sits right under the KPI cards, outside Details (hidden without a breakdown).
+      const money = await page.evaluate(`(() => { const m = document.getElementById('money'); const r = m.getBoundingClientRect();
+        return { hidden: m.hidden, inDetails: !!m.closest('#details'), top: Math.round(r.top + scrollY), bottom: Math.round(r.bottom + scrollY) }; })()`);
+      if (!money.hidden) {
+        assert.equal(money.inDetails, false, detail);
+        assert.ok(money.top >= L.score.bottom && money.bottom <= L.board.top && money.bottom <= BUDGETS.foldY, `money fold between the cards and the tasks, above the fold: ${JSON.stringify(money)} ${detail}`);
+      }
     });
 
     test(`${fx.name}: no raw ISO time is visible; times are relative`, async () => {
@@ -531,6 +593,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     assert.deepEqual(r.cost, ['Running cost', '$10.97', '$10.97 tasks', '$5.49 per accepted PR']);
     assert.match(r.costTip, /^Build cost unavailable: buildCost: usd is not a number ≥ 0\. Run: /);
     assert.deepEqual(r.quality, ['Quality', '0 reverts', '0 changes blocked']);
+    assert.equal(await page.evaluate("document.getElementById('money').hidden"), true, 'no valid build cost: no breakdown');
     assert.equal(r.qualityTip, 'Reverts and changes the reviewer blocked before merge count real work only. Drill record unavailable: drills: unexpected extra.');
     await open('1', { force: true });
   });

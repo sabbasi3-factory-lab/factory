@@ -352,7 +352,16 @@ export function buildMeta() {
     taskmap: taskmapYaml(SAMPLE_TASKS),
     contracts: Object.fromEntries(SAMPLE_TASKS.map(([id, area, deps, block]) => [id, contractYaml(id, area, deps, block)])),
     // build-cost.json and drills.json stand-ins (one drill failed, to show the count is computed).
-    buildCost: { ai_units: 111000, usd: 1110, as_of: '2026-10-15', source: 'sample build journal' },
+    buildCost: {
+      ai_units: 111000, usd: 1110, as_of: '2026-10-15', source: 'sample build journal',
+      breakdown: [
+        { who: 'Research (gh-aw deep dive, deck, audits)', ai_units: 18000 },
+        { who: 'Coordinator: planning, reviews, merges, deck & journal', ai_units: 40000 },
+        { who: 'Build session: wrote the factory (87 PRs)', ai_units: 53000 },
+      ],
+      tokens: { input: 1900000000, output: 5100000, calls: 5000 },
+      model: 'sample-model',
+    },
     drills: {
       as_of: '2026-10-15', source: 'docs/JOURNAL.md', defects_found_and_fixed: 1,
       runs: [{ id: 'D1', result: 'pass', note: 'after 1 manual replay' }, { id: 'D2', result: 'fail', note: 'gate missed' }, { id: 'D3', result: 'pass' }],

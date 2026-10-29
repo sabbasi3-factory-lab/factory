@@ -333,6 +333,16 @@ h2 svg.i { width: 16px; height: 16px; color: var(--muted); }
 .score-sub a.run { color: var(--accent); }
 .score-sub .dot { margin: 0 1px; }
 
+/* ---- Where the money went: a slim closed fold under the KPI cards ------------- */
+.money { margin-top: 12px; }
+.money > summary { padding: 10px 20px; font-size: 14px; font-weight: 500; }
+.money > summary svg.i { color: var(--warn); }
+.money-body { padding: 16px 20px 20px; }
+.money-body .table-wrap { max-width: 760px; }
+.money-body tfoot th, .money-body tfoot td { font-weight: 600; border-top: 1px solid var(--line-strong); border-bottom: 0; background: var(--panel); }
+.money-body tfoot th { text-align: left; }
+.gloss { text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+
 /* ---- Tasks: one card; overall progress, then a grid of area sub-cards with quiet chips ---- */
 .tasks { padding: 18px 24px 12px; }
 .sec-h { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; min-height: 24px; }

@@ -9,7 +9,7 @@ import {
   liveness, medianTaskCost, observedCadence, parseAnchors, parseContract, parseJsonl, parseTaskmap, parseTime, qualityStats, recentActivity,
   relativeTime, reviewItems, shortDuration, shortTaskName, stageSummary, stageTimes, statusSummary,
   allDayPaths, eventsInWindow, plainProblem, plainReason, segText, costItem, earliestSpendDay, handsOffItem, humanSteps, parseOutcomesFile, outcomesReadDue, outcomesStale, outcomesSummary, OUTCOME_STATUSES, qualityItem, shippedItem, shortDate, speedItem, statusParts, validateBuildCost, validateDrills,
-  boardProgress, isDrill, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
+  RUN_ROW_LABEL, boardProgress, compactCount, isDrill, moneyTable, repairSentence, subjectLabel, summarizePr, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap, timelineFor, utcDay, VERIFIER_LIMITS, verifierReason, verifierStatus, verifyChain,
 } from './lib.js';
 
 const REPO = 'sabbasi3-factory-lab/chrono-node-rs';
@@ -827,6 +827,7 @@ function render({ full = false } = {}) {
   const loaded = state.loaded;
   const known = FIXTURE || prsKnown();
   renderIf('score', [loaded, v && scoreSig(v)], withMetrics((mm, vv) => renderScore(vv)), full);
+  renderIf('money-body', [loaded, state.statics.build, v && runningAic(v)], withMetrics((mm, vv) => renderMoney(vv)), full);
   renderIf('board', [loaded, state.meta.status, state.meta.error, state.taskIssues.error, state.taskIssues.map != null, v?.board.tasks.map((x) => [x.id, x.state, x.since, x.reason, x.issue, x.tier, x.prs])], withMetrics((mm, vv) => renderBoard(vv)), full);
   renderIf('human-steps', [loaded, v?.steps], withMetrics((mm, vv) => renderSteps(vv)), full);
   renderIf('outcomes', [loaded, v?.outcomesSum, v?.outcomes?.generatedAt, state.outcomes.error, v?.cost.agentCompare], withMetrics((mm, vv) => renderOutcomes(vv)), full);
@@ -1206,6 +1207,50 @@ function renderScore(v) {
       ? `gh-aw counts a PR as zero-touch if no person edited it. ${stale ?? partial ?? 'Manual steps outside the PR are counted separately below.'}`
       : 'gh-aw Outcomes, which marks PRs no person edited, is not available yet. Manual steps outside the PR are counted below.'),
     scoreItem(qualityItem(v.quality, drills), `Reverts and changes the reviewer blocked before merge count real work only. ${drills?.ok ? `Drill results are from the build journal, as of ${shortDate(drills.value.asOf)}.` : `Drill record unavailable: ${shortError(drills?.error ?? 'not read yet')}.`}`));
+}
+
+// ---------------------------------------------------------------------------
+// Where the money went: a closed fold under the KPI cards (the build breakdown, the factory's own
+// agent runs and a total). Hidden without a breakdown in build-cost.json.
+
+/** The run cost the Total-cost card adds (AI credits), or null when it isn't known. */
+function runningAic(v) {
+  const c = v.cost;
+  return c && c.spend !== 'missing' && isNum(c.total) ? c.total : null;
+}
+
+const MONEY_GLOSSARY = Object.freeze({
+  'Build session': "The Copilot coding session that wrote the factory's own code (controller, gates, workflows, dashboard).",
+});
+
+function moneyWho(who) {
+  const term = Object.keys(MONEY_GLOSSARY).find((k) => who.startsWith(k));
+  return term ? [tip(h('span', { class: 'gloss' }, term), MONEY_GLOSSARY[term]), who.slice(term.length)] : who;
+}
+
+// Long sentences are split into inline-block clauses (each ≤ 8 words) without changing the wording.
+const clauses = (...parts) => parts.flatMap((p, i) => [...(i ? [' '] : []), h('span', { class: 'run' }, p)]);
+
+function renderMoney(v) {
+  const fold = $('money');
+  const t = state.loaded ? moneyTable(state.statics.build, runningAic(v)) : null;
+  fold.hidden = !t;
+  if (!t) {
+    replaceSection('money-body');
+    return;
+  }
+  const units = (n) => (n == null ? '—' : Math.round(n).toLocaleString('en-US'));
+  const rows = t.rows.map((r) => row(r.key, r.key === 'run' ? RUN_ROW_LABEL : moneyWho(r.who), units(r.aic), r.aic == null ? '—' : formatUsd(r.aic), r.share == null ? '—' : `${r.share}%`));
+  const foot = h('tfoot', {}, h('tr', { 'data-row-key': 'total' },
+    h('th', { scope: 'row' }, 'Total'), h('td', {}, units(t.total)), h('td', {}, formatUsd(t.total)), h('td', {}, t.total > 0 ? '100%' : '—')));
+  const tok = t.tokens;
+  replaceSection('money-body',
+    table('Where the money went', ['Spent on', 'AI units', '$', 'share'], rows, { foot, numeric: [1, 2, 3] }),
+    t.runKnown ? null : h('p', { class: 'hint' }, "The factory's running cost isn't known right now, so the total leaves it out."),
+    isNum(tok?.input) && isNum(tok?.output)
+      ? h('p', { class: 'hint money-why' }, clauses('Why: most cost was re-reading long conversations', `(${compactCount(tok.input)} input vs ${compactCount(tok.output)} output tokens)`, 'on a premium model.'))
+      : null,
+    h('p', { class: 'hint' }, clauses('A leaner run (fresh sessions,', 'a cheaper model for routine work, fewer PRs)', 'would be about $350–500.')));
 }
 
 /** The first problem of an error message, at most 10 words, for a short tooltip. */
