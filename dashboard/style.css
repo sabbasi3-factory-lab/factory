@@ -36,14 +36,15 @@
   --shadow: 0 1px 2px rgb(16 24 40 / 0.04), 0 4px 12px rgb(16 24 40 / 0.04);
   --shadow-hover: 0 1px 2px rgb(16 24 40 / 0.05), 0 6px 18px rgb(16 24 40 / 0.07);
   --shadow-pop: 0 2px 4px rgb(16 24 40 / 0.06), 0 12px 32px rgb(16 24 40 / 0.12);
-  --s-ready: #9aa1b0;
-  --s-picked: #7c8496;
-  --s-running: #5b8fd0;
-  --s-pr-open: #8f7ad6;
-  --s-checks: #c9a34a;
-  --s-queued: #d08a5c;
-  --s-merged: #5ba582;
-  --s-deployed: #3f8a67;
+  /* Stage fills: at least 3:1 on the card and on the chart track (panel and panel-2). */
+  --s-ready: #7a8192;
+  --s-picked: #5f6779;
+  --s-running: #3f78c0;
+  --s-pr-open: #7a63c8;
+  --s-checks: #9a7623;
+  --s-queued: #b26a3c;
+  --s-merged: #3f8a67;
+  --s-deployed: #2f7254;
   --radius: 12px;
   --radius-sm: 8px;
   --ease: 150ms ease;
@@ -499,6 +500,8 @@ tr.detail td { background: var(--panel); }
 @media (max-width: 760px) {
   .score { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hright { margin-left: 0; justify-content: flex-start; width: 100%; }
+  /* The icon buttons stay on the right, so the Settings popover (right: 0) opens inside the screen. */
+  .hright .actions { margin-left: auto; }
   .glance { border-radius: 14px; }
 }
 @media (max-width: 700px) {

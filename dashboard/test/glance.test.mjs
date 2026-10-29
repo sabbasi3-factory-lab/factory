@@ -97,6 +97,27 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
     });
   }
 
+  test('390x844: the Settings popover opens inside the viewport, with the icon buttons on the right', async () => {
+    await open('1');
+    await page.setViewport(390, 844);
+    try {
+      const r = await page.evaluate(`(() => {
+        const d = document.getElementById('settings');
+        d.open = true;
+        const f = document.getElementById('token-form').getBoundingClientRect();
+        const a = document.querySelector('.actions').getBoundingClientRect();
+        const out = { left: Math.round(f.left), right: Math.round(f.right), width: innerWidth, actionsRight: Math.round(a.right) };
+        d.open = false;
+        return out;
+      })()`);
+      const detail = JSON.stringify(r);
+      assert.ok(r.left >= 0 && r.right <= r.width, `the Settings form stays on screen: ${detail}`);
+      assert.ok(r.width - r.actionsRight <= 24, `the actions stay right-aligned: ${detail}`);
+    } finally {
+      await page.setViewport(1440, 900);
+    }
+  });
+
   test('quiet: the status pill and the KPI cards read as labelled phrases', async () => {
     await open('quiet');
     await page.setViewport(1440, 900);
@@ -552,6 +573,9 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
           // Icons (KPI icons on their tinted circles, chip state icons on the cards): 3:1 or more.
           icons: Math.min(ratio('var(--ok)', 'var(--panel)'), ratio('var(--info)', 'var(--panel)'), ratio('var(--needs)', 'var(--panel)'), ratio('var(--warn)', 'var(--panel)'), ratio('var(--accent)', 'var(--accent-bg)')),
           logo: ratio('var(--on-accent)', 'var(--accent)'),
+          // Stage fills (the time chart and its legend in Details): 3:1 on the card and on the chart track.
+          stages: Object.fromEntries(['ready', 'picked', 'running', 'pr-open', 'checks', 'queued', 'merged', 'deployed']
+            .map((st) => [st, Math.round(100 * Math.min(ratio('var(--s-' + st + ')', 'var(--panel)'), ratio('var(--s-' + st + ')', 'var(--panel-2)'))) / 100])),
         };
       })()`);
       await press('Tab');
@@ -560,6 +584,7 @@ describe('glance: rendered sample pages', { skip, timeout: 180000 }, () => {
       const detail = `${scheme}: ${JSON.stringify({ ...r, ring })}`;
       assert.ok(r.fg >= 4.5 && r.muted >= 4.5 && r.accent >= 4.5 && r.tinted >= 4.5 && r.onTint >= 4.5, detail);
       assert.ok(r.icons >= 3, detail);
+      assert.deepEqual(Object.entries(r.stages).filter(([, v]) => v < 3), [], `every stage fill is 3:1 or more: ${detail}`);
       assert.ok(r.logo >= 3, detail);
       assert.deepEqual([ring.style, ring.width >= 2, ring.isAccent], ['solid', true, true], detail);
     }
