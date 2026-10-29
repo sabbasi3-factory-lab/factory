@@ -6,10 +6,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
-  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, latestOutcomes, outcomesSummary,
+  parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, parseOutcomesFile, outcomesSummary,
   stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
-import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, buildMeta, buildQuietMeta, metaText } from './make-fixture.mjs';
+import { FIXTURE_NOW, FIXTURE_PATH, META_FIXTURE_PATH, QUIET_FIXTURE_PATH, QUIET_META_FIXTURE_PATH, OUTCOMES_FIXTURE_PATH, buildMeta, buildOutcomes, buildQuietMeta, metaText, outcomesText } from './make-fixture.mjs';
 
 const at = (iso) => Date.parse(iso);
 const MIN = 60000;
@@ -490,14 +490,15 @@ test('the meta stand-ins are current, and the busy sample shows every board stat
   const m = deriveMetrics(events, { now });
   const board = taskBoard(events, catalog, { needsItems: m.needsYou.items });
   assert.deepEqual(board.counts, { done: 2, running: 2, needs: 2, waiting: 2 });
-  const outcomes = latestOutcomes(events);
-  assert.equal(outcomes.ignored, 1, 'the malformed snapshot is ignored');
-  const cost = costJoin(events, outcomes.snapshot.runs, { now });
-  // The reviewer run (95) has no task in the snapshot: real work, not tied to a task.
+  const outcomes = parseOutcomesFile(JSON.parse(readFileSync(OUTCOMES_FIXTURE_PATH, 'utf8')));
+  assert.equal(readFileSync(OUTCOMES_FIXTURE_PATH, 'utf8'), outcomesText(buildOutcomes()), 'run: node dashboard/test/make-fixture.mjs');
+  assert.equal(outcomes.dropped, 1, 'the malformed run is skipped');
+  const cost = costJoin(events, outcomes.runs, { now });
+  // The reviewer run (95) has no task in outcomes.json: real work, not tied to a task.
   assert.deepEqual(cost.perTask.map((r) => [r.task, r.aic]), [['en/month-parser', 410], ['en/weekday-parser', 312], ['en/ordinal', 280]]);
   assert.deepEqual([cost.total, cost.unattributed, cost.drillAic], [1097, 95, 0]);
   assert.deepEqual(medianTaskCost(cost, board.tasks.filter((t) => t.state === 'done').map((t) => t.id)), { medianAic: 296, count: 2 });
-  const s = outcomesSummary(outcomes.snapshot);
+  const s = outcomesSummary(outcomes);
   assert.deepEqual([s.real.prs, s.real.zeroTouch, s.drills.prs], [{ accepted: 2, rejected: 0, pending: 1, other: 0 }, 1, { accepted: 0, rejected: 1, pending: 0, other: 0 }]);
   const q = qualityStats(events);
   assert.deepEqual([q.reverts, q.objections, q.repairs.total, q.repairs.pending], [0, 0, 1, 1]);

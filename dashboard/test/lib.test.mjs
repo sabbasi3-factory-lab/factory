@@ -497,7 +497,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
 
   const fresh = statusSummary({ ...base, heartbeat: hbAt(12) });
   assert.equal(fresh.level, 'ok');
-  assert.equal(fresh.text, 'Data fresh · 57 events · audit head abcdef0 · controller heartbeat ok');
+  assert.equal(fresh.text, 'Data fresh · 54 events · audit head abcdef0 · controller heartbeat ok');
 
   assert.equal(statusSummary({ ...base, heartbeat: hbAt(480) }).level, 'ok');
   const late = statusSummary({ ...base, heartbeat: hbAt(481) });
@@ -525,7 +525,7 @@ test('status line never reads as healthy while the heartbeat is late, stale or m
   const err = statusSummary({ ...base, error: 'GitHub API error (HTTP 502).', heartbeat: hbAt(12) });
   assert.equal(err.level, 'alert');
   assert.match(err.text, /^Problem: GitHub API error \(HTTP 502\)\. Showing the last data loaded · controller heartbeat ok$/);
-  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 57 events · /);
+  assert.match(statusSummary({ ...base, fixture: true, heartbeat: hbAt(12) }).text, /^Sample data · 54 events · /);
 
   assert.equal(formatAge(null), 'unknown');
   assert.equal(formatAge(119.9), '119 min');
