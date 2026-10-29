@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  AREA_LABELS, areaLabel, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
+  AREA_LABELS, areaLabel, boardProgress, costJoin, deriveMetrics, dropClosed, fallbackCatalog, formatUsd, humanTouch, isClosedRef, issueToMerged, liveness, medianTaskCost,
   parseContract, parseJsonl, parseTaskmap, qualityStats, realAgentRuns, recentActivity, repairSentence, repairStats, relativeTime, runSpend, shortDuration, shortTaskName, parseOutcomesFile, outcomesReadDue, outcomesSummary,
   stageSummary, stageTimes, summarizeTaskIssue, taskBoard, taskCatalog, taskIssueMap,
 } from '../lib.js';
@@ -224,6 +224,27 @@ test('board states: done, running, needs you and waiting (dependency, ready, not
   // A new attempt after a merge reopens the task.
   const reopened = taskBoard([...events, ev('dispatched', '2026-10-27T14:00:00Z', { task: 'common/a', issue: 1, attempt: 2 })], catalog, {});
   assert.equal(reopened.tasks[0].state, 'running');
+});
+
+test('task progress: done of total overall and per area, in board order, with whole percentages', () => {
+  const events = [
+    ev('merged', '2026-10-27T10:30:00Z', { task: 'common/a', pr: 11, merged_at: '2026-10-27T10:29:00Z' }),
+    ev('merged', '2026-10-27T10:40:00Z', { task: 'en/b', pr: 12, merged_at: '2026-10-27T10:39:00Z' }),
+    ev('dispatched', '2026-10-27T11:00:00Z', { task: 'en/c', issue: 3, attempt: 1 }),
+  ];
+  const b = taskBoard(events, cat('common/a', 'en/b', 'en/c', 'en/d', 'common/e'));
+  assert.deepEqual(boardProgress(b), {
+    done: 2, total: 5, pct: 40,
+    groups: [
+      { area: 'common-parsers', label: 'Common parsers', done: 1, total: 2, pct: 50 },
+      { area: 'en-casual', label: 'Casual', done: 1, total: 3, pct: 33 },
+    ],
+  });
+  // Every task done: 100%; no tasks (or no board): 0 of 0 at 0%, never NaN.
+  const all = taskBoard([...events, ev('merged', '2026-10-27T12:00:00Z', { task: 'en/c', pr: 13, merged_at: '2026-10-27T12:00:00Z' })], cat('en/b', 'en/c'));
+  assert.deepEqual([boardProgress(all).pct, boardProgress(all).groups.map((g) => [g.done, g.total, g.pct])], [100, [[2, 2, 100]]]);
+  assert.deepEqual(boardProgress(taskBoard([], [])), { done: 0, total: 0, pct: 0, groups: [] });
+  assert.deepEqual(boardProgress(null), { done: 0, total: 0, pct: 0, groups: [] });
 });
 
 // --- bug 2: the cost join ------------------------------------------------------------------

@@ -1575,6 +1575,21 @@ export function taskBoard(events, catalog, { open = null, asOf = null, needsItem
   return { tasks, counts, byTier, groups, total: tasks.length, readyWaiting: tasks.filter((t) => t.ready).length };
 }
 
+/**
+ * Progress for the Tasks card: done of total overall and per area (in board order), each with a
+ * whole-number percentage (0 when there are no tasks). `board` is a taskBoard() result.
+ */
+export function boardProgress(board) {
+  const pct = (done, total) => (total ? Math.round((done / total) * 100) : 0);
+  const done = board?.counts?.done ?? 0;
+  const total = board?.total ?? 0;
+  const groups = (board?.groups ?? []).map((g) => {
+    const d = g.tasks.filter((t) => t.state === 'done').length;
+    return { area: g.area, label: g.label, done: d, total: g.tasks.length, pct: pct(d, g.tasks.length) };
+  });
+  return { done, total, pct: pct(done, total), groups };
+}
+
 /** The newest dispatch_state payload with a usable timestamp, or null. */
 export function latestDispatchState(events) {
   let last = null;
@@ -2237,41 +2252,44 @@ export function statusParts({ health = null, heartbeatAt = null, killSwitch = nu
   return { state, needs };
 }
 
-// --- The five scoreboard sentences ----------------------------------------------------------------
+// --- The five KPI cards ----------------------------------------------------------------------------
+// Each card is { key, label, main, subs }: a short label ("Shipped"), the value line (one big number
+// and its unit) and one or two caption lines, so every number reads as label + number + caption.
 
 const TIER_WORD = { auto: 'routine', 'auto-strict': 'core' };
 
 /**
- * "Shipped: 26 of 26 tasks" / "18 routine + 8 core" / "gh-aw
- * Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (real work; `outcomes` is outcomesSummary(),
- * or null without outcomes.json).
+ * Shipped: "26/26 tasks" / "18 routine · 8 core" / "gh-aw: 26 accepted · 1 rejected" (real work;
+ * pending only when there are some; `outcomes` is outcomesSummary(), or null without outcomes.json).
  */
 export function shippedItem(board, outcomes = null) {
   const done = board?.counts?.done ?? 0;
   const total = board?.total ?? 0;
   const tiers = Object.entries(board?.byTier ?? {}).sort(([a], [b]) => (a === 'auto' ? -1 : b === 'auto' ? 1 : a.localeCompare(b)));
-  const parts = tiers.flatMap(([tier, x], i) => [...(i ? [T('+')] : []), NUM(`${x.done} ${TIER_WORD[tier] ?? (tier === 'unknown' ? 'other' : tier)}`)]);
+  const parts = tiers.flatMap(([tier, x], i) => [...(i ? [SEP] : []), NUM(`${x.done} ${TIER_WORD[tier] ?? (tier === 'unknown' ? 'other' : tier)}`)]);
   const p = outcomes?.real?.prs;
   const line = p
-    ? [T('gh-aw Outcomes:'), NUM(`${p.accepted} PR${p.accepted === 1 ? '' : 's'} accepted`), T(','), NUM(`${p.rejected} rejected`), T(','), NUM(`${p.pending} pending`)]
+    ? [T('gh-aw:'), NUM(`${p.accepted} accepted`), SEP, NUM(`${p.rejected} rejected`), ...(p.pending ? [SEP, NUM(`${p.pending} pending`)] : [])]
     : [T('gh-aw Outcomes not available yet')];
   return {
     key: 'shipped',
-    main: [T('Shipped:'), BIG(`${done} of ${total}`), T(total === 1 ? 'task' : 'tasks')],
+    label: 'Shipped',
+    main: [BIG(`${done}/${total}`), T(total === 1 ? 'task' : 'tasks')],
     subs: [...(total ? [parts] : []), line],
   };
 }
 
 /**
- * "Speed: about 9 min per task" / "Oct 22 → Oct 27". With done tasks but no start-to-merge times
- * in the log, the timing is "unavailable" (never "no task merged yet").
+ * Speed: "10 min" / "per task · Oct 22 → 27". With done tasks but no start-to-merge times in the
+ * log, the timing is "unavailable" (never "no task merged yet").
  */
 export function speedItem({ medianMs = null, count = 0, firstAt = null, lastAt = null, done = 0 } = {}) {
-  if (!count || medianMs == null) return { key: 'speed', main: [T('Speed:'), BIG('—'), T(done ? 'timing unavailable' : 'no task merged yet')], subs: [] };
+  if (!count || medianMs == null) return { key: 'speed', label: 'Speed', main: [BIG('—')], subs: [[T(done ? 'timing unavailable' : 'no task merged yet')]] };
   return {
     key: 'speed',
-    main: [T('Speed: about'), BIG(plainDuration(medianMs)), T('per task')],
-    subs: firstAt != null && lastAt != null ? [dateSpan(firstAt, lastAt)] : [],
+    label: 'Speed',
+    main: [BIG(plainDuration(medianMs))],
+    subs: [[T('per task'), ...(firstAt != null && lastAt != null ? [SEP, ...dateSpan(firstAt, lastAt)] : [])]],
   };
 }
 
@@ -2284,58 +2302,51 @@ function dateSpan(a, b) {
 }
 
 /**
- * "Total cost: about $1,126" / "= $1,110 one-time build + $16.32 running" /
- * "$11.42 tasks + $4.89 drills · about $0.44 per accepted PR". Without drill cost the per-PR
- * clause joins the second line (real tasks are then the whole run cost). `build` is a
+ * Total cost: "$1,331" / "$1,315 build + $16.32 run" / "$0.46 per accepted PR". `build` is a
  * validateBuildCost() result; `cost` a costJoin() result: the run total always counts (it's the
- * spend snapshots); the real/drill split and the per-PR cost need gh-aw Outcomes
- * (`cost.known`) and `acceptedPrs`, the real PRs it accepted. Run cost not tied to a task counts
- * as real tasks. With real agent runs but no spend measurement (`cost.spend` "missing") the run
- * cost is "not available yet"; with no real run at all it's a known $0.00.
+ * spend snapshots); the per-PR cost needs gh-aw Outcomes (`cost.known`) and `acceptedPrs`, the
+ * real PRs it accepted (drill runs are left out of it; run cost not tied to a task counts as real
+ * tasks). Without a build cost the card is "Running cost", with the real and drill split. With real
+ * agent runs but no spend measurement (`cost.spend` "missing") the run cost is "not available
+ * yet"; with no real run at all it's a known $0.00.
  */
 export function costItem({ build = null, cost = null, acceptedPrs = null } = {}) {
   const b = build?.ok ? build.value : null;
+  const card = (label, big, subs, perPr = null) => ({ key: 'cost', label, main: [BIG(big)], subs, perPr });
   if (cost?.spend === 'missing') {
     // Real agent runs but no spend measurement yet: unavailable, never a $0.00 run cost.
     return b
-      ? { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build'), SEP, T('running cost not available yet')]], perPr: null }
-      : { key: 'cost', main: [T('Running cost:'), BIG('—'), T('not available yet')], subs: [], perPr: null };
+      ? card('Total cost', formatUsd(b.usd * 100), [[NUM(formatUsd(b.usd * 100)), T('build'), SEP, T('run cost not available yet')]])
+      : card('Running cost', '—', [[T('not available yet')]]);
   }
   const run = cost ? cost.total : null;
   const drills = cost?.drillAic ?? 0;
   const real = cost ? cost.total - drills : null;
   const perPr = cost?.known && acceptedPrs ? real / acceptedPrs : null;
   const known = cost?.known && cost.measuredRuns;
-  const per = perPr != null ? [SEP, T('about'), NUM(formatUsd(perPr)), T('per accepted PR')] : [];
-  const split = known && (drills > 0 || !b)
-    ? [NUM(formatUsd(real)), T('tasks'), ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('drills')] : []), ...per]
-    : null;
-  if (b && run != null) {
-    return {
-      key: 'cost',
-      main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100 + run))],
-      subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build +'), NUM(formatUsd(run)), T('running'), ...(known && !split ? per : [])], ...(split ? [split] : [])],
-      perPr,
-    };
+  const per = perPr != null ? [[NUM(formatUsd(perPr)), T('per accepted PR')]] : [];
+  if (b && run != null) return card('Total cost', formatUsd(b.usd * 100 + run), [[NUM(formatUsd(b.usd * 100)), T('build +'), NUM(formatUsd(run)), T('run')], ...per], perPr);
+  if (b) return card('Total cost', formatUsd(b.usd * 100), [[NUM(formatUsd(b.usd * 100)), T('build'), SEP, T('run cost not available right now')]], perPr);
+  if (run != null) {
+    const split = known ? [[NUM(formatUsd(real)), T('tasks'), ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('drills')] : [])]] : [[T('agent runs')]];
+    return card('Running cost', formatUsd(run), [...split, ...per], perPr);
   }
-  if (b) return { key: 'cost', main: [T('Total cost: about'), BIG(formatUsd(b.usd * 100))], subs: [[T('='), NUM(formatUsd(b.usd * 100)), T('one-time build'), SEP, T('running cost not available right now')]], perPr };
-  if (run != null) return { key: 'cost', main: [T('Running cost: about'), BIG(formatUsd(run))], subs: split ? [split] : [], perPr };
-  return { key: 'cost', main: [T('Total cost:'), BIG('—'), T('not available right now')], subs: [], perPr };
+  return card('Total cost', '—', [[T('not available right now')]], perPr);
 }
 
 /**
- * "Hands-off: 25 of 26 PRs merged with no human edits (gh-aw zero-touch)" / "2 manual steps after
- * go-live" (ours, linked to the list; the human effort outside the PR). `outcomes` is outcomesSummary() or null.
+ * Hands-off: "25/26" / "PRs with no human edits" (gh-aw zero-touch, of the accepted real PRs) /
+ * "2 manual steps" (ours, after go-live, linked to the list: the human effort outside the PR).
+ * `outcomes` is outcomesSummary() or null.
  */
 export function handsOffItem(outcomes, steps, href = '#human-steps') {
   const p = outcomes?.real?.prs;
-  const main = p
-    ? [T('Hands-off:'), BIG(`${outcomes.real.zeroTouch} of ${p.accepted}`), T(`PR${p.accepted === 1 ? '' : 's'} merged with no human edits`), NUM('(gh-aw zero-touch)')]
-    : [T('Hands-off:'), BIG('—'), T('gh-aw Outcomes not available yet')];
   const sub = steps?.goLive
-    ? [NUM(String(steps.total)), { t: 'link', text: steps.total === 1 ? 'manual step' : 'manual steps', href }, T('after go-live')]
+    ? [NUM(String(steps.total)), { t: 'link', text: steps.total === 1 ? 'manual step' : 'manual steps', href }]
     : [NUM('0'), T('manual steps; not live yet')];
-  return { key: 'hands', main, subs: [sub] };
+  return p
+    ? { key: 'hands', label: 'Hands-off', main: [BIG(`${outcomes.real.zeroTouch}/${p.accepted}`)], subs: [[T(`PR${p.accepted === 1 ? '' : 's'} with no human edits`)], sub] }
+    : { key: 'hands', label: 'Hands-off', main: [BIG('—')], subs: [[T('gh-aw Outcomes not available yet')], sub] };
 }
 
 // --- gh-aw Outcomes: outcomes.json on the source repo's `outcomes` branch ------------------
@@ -2408,21 +2419,19 @@ export function outcomesSummary(file) {
 }
 
 /**
- * "Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects fixed)",
- * real work only (drills are left out of the reverts and blocks; the tooltip says so). The drills clause needs a valid drills.json (`drills`, a
- * validateDrills() result); without it the clause is left out.
+ * Quality: "0 reverts" / "1 change blocked · 12 drills passed", real work only (drills are left out
+ * of the reverts and the changes the reviewer blocked; the tooltip says so). The drills clause
+ * needs a valid drills.json (`drills`, a validateDrills() result) and links to the build journal;
+ * without it the clause is left out.
  */
 export function qualityItem(q, drills = null) {
   const r = q?.reverts ?? 0;
   const k = q?.objections ?? 0;
   return {
     key: 'quality',
-    main: [
-      T('Quality:'), BIG(String(r)), T(`revert${r === 1 ? '' : 's'}`), SEP,
-      T('reviewer blocked'), NUM(`${k} change${k === 1 ? '' : 's'}`),
-      ...(drills?.ok ? [SEP, { t: 'link', text: `${drills.passed} safety drill${drills.passed === 1 ? '' : 's'} passed`, href: JOURNAL_URL },
-        NUM(`(${drills.value.defects} defect${drills.value.defects === 1 ? '' : 's'} fixed)`)] : []),
-    ],
-    subs: [],
+    label: 'Quality',
+    main: [BIG(String(r)), T(`revert${r === 1 ? '' : 's'}`)],
+    subs: [[NUM(`${k} change${k === 1 ? '' : 's'} blocked`),
+      ...(drills?.ok ? [SEP, { t: 'link', text: `${drills.passed} drill${drills.passed === 1 ? '' : 's'} passed`, href: JOURNAL_URL }] : [])]],
   };
 }
