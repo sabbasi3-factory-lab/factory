@@ -15,7 +15,7 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `style.css` | Layout and the theme (below); light and dark (system setting, or the Theme button, remembered in `localStorage`) |
 | `build-cost.json` | What it cost to build the factory (research, design, coordination and build sessions), from the build journal: `{ "ai_units", "usd", "as_of", "source" }`. Deployed with the page and read same-origin |
 | `drills.json` | The safety-drill record from the build journal: `{ "as_of", "source", "defects_found_and_fixed", "runs": [{ "id", "result": "pass" or "fail", "note"? }] }`. Deployed with the page and read same-origin |
-| `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five sentences, the two JSON files and the human-steps rule) |
+| `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board and its progress, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five KPI cards, the two JSON files and the human-steps rule) |
 | `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts, task issues, build cost and drill record each sample uses instead of GitHub. It also writes `outcomes.json`, the busy sample's gh-aw Outcomes file (read same-origin; the quiet sample has none, to show the fallback). `outcomes-live-sample.json` is a real file from the source repo, for the parser test |
 | `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
@@ -24,58 +24,67 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 
 ## Layout
 
-A results scoreboard first, operations second. Every number sits in a sentence that says what
-it is. Tooltips (hover, or Tab to focus; Escape closes) say in at most two short sentences (25
+A calm product dashboard on one screen at 1440x900: a header bar, a row of five KPI cards, the
+Tasks card, then Details. Every number sits in a labelled phrase (label, number, caption).
+Tooltips (hover, or Tab to focus; Escape closes) say in at most two short sentences (25
 words) what a number is and where it comes from; definitions, rules and lists are visible text in
 Details, "How these numbers work". The tooltip is 14 px text, line-height 1.55, 320 px wide with
 12 px padding, at 4.5:1 contrast or more in both themes. Times are relative ("12m ago",
 "in 22m"); exact UTC times are only in titles and Details. The visible page avoids jargon (no
 AIC, auto-strict, dispatch or heartbeat).
 
-The theme is a "modern product look": neutral surfaces (light: an `#f7f8fa` page with white
-cards; dark: `#0f1115` with `#171a21` cards), hairline borders, a soft two-layer shadow in light
-and an inner highlight in dark, an 8 px spacing grid, 16 px card and 8 px tile and chip corners,
-and the system UI font stack (Inter only if it's installed; no web fonts). One accent colour
-(`#5b5bd6` light, `#9d9cf7` dark) is used for links, focus rings, the logo, highlights and the
-"running" state; green, amber, red and grey mean states only. Text, muted text and accent links
-are at 4.5:1 or more on every surface in both themes, and focus rings and icons at 3:1 or more.
-Hover and focus transitions take 150 ms and are off under `prefers-reduced-motion`.
+The theme uses soft, low-saturation tones. Light: an `#f5f6fa` page, white cards with a 1 px
+`#e6e8f0` border and a very soft two-layer shadow, `#1f2433` text and `#656c7f` muted text. Dark:
+`#0e1117` page, `#161a22` cards, `#252b36` borders, `#e6e8ee` text, `#9aa3b2` muted. One muted
+indigo accent (`#5457e0` light, `#a5a8ff` dark, tints `#eef0ff` / `#1e2140`) for links, focus
+rings and the logo. States are soft tints with deep text, never saturated fills: sage (done,
+healthy), sky (running), rose (needs you, down) and sand (waiting, a warning). 12 px card and
+8 px chip corners, an 8 px spacing grid, the system UI font stack (no web fonts), big numbers at
+34 px, weight 600, tabular figures. Text, muted text and accent links are at 4.5:1 or more on
+every surface and tint in both themes, and focus rings and icons at 3:1 or more. Hover and focus
+transitions take 150 ms and are off under `prefers-reduced-motion`.
 
 Top to bottom:
 
-- **Header:** the data's age ("12s ago", tooltip: when it was checked, API requests left,
-  token, factory version), Refresh, Theme and Settings, then the **status line**:
-  "✓ Healthy · idle · nothing needs you". The health chip (rule below), then the state in plain
-  words (`statusParts()`): the worst health problem ("last check-in 9h ago", "the audit log
-  failed its integrity check", …), else "switched off" (the kill switch, a neutral grey), else the
-  pause reason ("daily AI budget reached"), else "working on 2 tasks: X, Y" (linked to their
+- **Header bar:** left, the logo, "Factory" and a muted "chrono-node → Rust"; right, the
+  **status pill**, "updated 12s ago" (tooltip: where the data comes from and API requests left)
+  and the Refresh, Theme and Settings icon buttons. The pill is one soft pill,
+  "● Healthy · idle · nothing needs you", tinted by the worst part (sage; sand for a warning;
+  rose when something is down or needs you; neutral while loading or switched off), with the
+  text in the text colour and a coloured icon per part. The health part (rule below), then the
+  state in plain words (`statusParts()`): the worst health problem ("last check-in 9h ago", "the
+  audit log failed its integrity check", …), else "switched off" (the kill switch, muted), else
+  the pause reason ("daily AI budget reached"), else "working on 2 tasks: X, Y" (linked to their
   issues), else "idle"; then what needs you: "nothing needs you", or "2 tasks need you: #28,
   #33" (linked, after the closed rule), "checking reviews…" or "review list unavailable".
-  "Dry run" and "Sample" chips show when they apply.
-- **Scoreboard** (the hero card: an accent hairline on top, a faint accent wash, a 3 + 2 grid at
-  desktop widths, one column on phones): five sentences, each with one big number:
-  1. "Shipped: 26 of 26 tasks", under it "18 routine + 8 core" and the gh-aw Outcomes result for
-     real work, "gh-aw Outcomes: 26 PRs accepted, 1 rejected, 0 pending" (else "gh-aw Outcomes
-     not available yet");
-  2. "Speed: about 10 min per task", under it the first and last finish dates ("Oct 22 → 27");
-  3. "Total cost: about $1,126", under it "= $1,110 one-time build + $16.32 running" and the run
-     split "$11.84 tasks + $4.47 drills · about $0.46 per accepted PR";
-  4. "Hands-off: 25 of 26 PRs merged with no human edits (gh-aw zero-touch)", under it "2 manual
-     steps after go-live" (ours: steps outside the PR), linked to the list in Details;
-  5. "Quality: 0 reverts · reviewer blocked 1 change · 12 safety drills passed (6 defects
-     fixed)", real work only, the drills linked to the build journal.
+  "Dry run" and "Sample" tags show at the end when they apply.
+- **KPI cards** (five equal cards in one row; three, two, then one per row on narrower
+  screens). Each has a small icon in a soft tinted circle, a muted label, the big number in the
+  text colour and one or two muted caption lines (`shippedItem()` … `qualityItem()` in `lib.js`):
+  1. **Shipped** "26/26 tasks", "18 routine · 8 core" and the gh-aw Outcomes result for real
+     work, "gh-aw: 26 accepted · 1 rejected" (pending only when there are some; else "gh-aw
+     Outcomes not available yet");
+  2. **Speed** "10 min", "per task · Oct 22 → 27" (the first and last finish dates);
+  3. **Total cost** "$1,331", "$1,315 build + $16.32 run" and "$0.46 per accepted PR" (real
+     tasks only; without the build cost the card is "Running cost", split into tasks and drills);
+  4. **Hands-off** "25/26", "PRs with no human edits" (gh-aw zero-touch) and "2 manual steps"
+     after go-live (ours: steps outside the PR), linked to the list in Details;
+  5. **Quality** "0 reverts", "1 change blocked · 12 drills passed" (real work only; the drills
+     linked to the build journal, their defects in Details).
 
-  The wording is tight because of the 140-word fold budget; the tooltips and Details carry the
+  The wording is tight because of the fold budget; the tooltips and Details carry the
   qualifiers (real work only, before merge, ported from JavaScript to Rust).
-- **Task board:** under the Tasks heading, a one-line caption says what a task is: "Task = one
-  chrono-node parser or refiner, in Rust. One contract, one issue, one PR." (a task is one
-  upstream chrono-node step ported to one Rust file, with one contract `contracts/<id>.yaml`, one
-  issue labelled `factory:task` and normally one agent PR; safety drills and infrastructure PRs
-  aren't tasks; the info tooltip, the Shipped tooltip and Details, "What's a task", say so too).
-  Then one tile per task of the task map, grouped by its contract area, with a state
-  colour bar and icon (✓ done, ▶ running, ⚠ needs you, ⧗ waiting); a legend shows when more than one
-  state is present. A tile links to its issue; its tooltip has the task id, tier, state and since
-  when.
+- **Tasks** (one card): the heading with a state legend when more than one state is present, a
+  one-line caption saying what a task is: "Task = one chrono-node parser or refiner, in Rust. One
+  contract, one issue, one PR." (a task is one upstream chrono-node step ported to one Rust file,
+  with one contract `contracts/<id>.yaml`, one issue labelled `factory:task` and normally one agent
+  PR; safety drills and infrastructure PRs aren't tasks; the info tooltip, the Shipped tooltip
+  and Details, "What's a task", say so too), then the overall progress, "26 of 26 done", with a
+  soft sage bar (`boardProgress()`). Below it, one small sub-card per contract area, in balanced
+  columns: the area name, its "n/n" count and a thin progress bar, then the tasks as small chips
+  that wrap. A chip has a state icon and colour (✓ done on a neutral chip; ▶ running, ⚠ needs you
+  and ⧗ waiting on their soft tints) and the short name; it links to its issue, and its tooltip
+  has the task id, tier, state and since when.
 - **Details** (one fold, closed): how these numbers work (the definitions and the data scope),
   Outcomes (gh-aw: the per-status table for real work and drills, last evaluated, the agent-only
   vs full-cost note, `gh aw outcomes <run-id>` to reproduce with one agent run id, and the agent
@@ -146,22 +155,24 @@ the macOS app. Without one it's skipped locally and fails when `CI` is set. It s
 `dashboard/` on an ephemeral local port, opens both `?fixture=1` and `?fixture=quiet` at
 1440×900 and 390×844 and checks these budgets on each:
 
-- at most 140 visible words above the fold at 1440×900 (it was 80, then 150 for the earlier
-  one-screen layout, then 120 for the owner's results scoreboard; 140 adds the owner's
-  "what's a task" caption, and Details and the footer now fit above the fold on the live page);
+- at most 135 visible words above the fold at 1440×900 (it was 80, then 150 for the earlier
+  one-screen layout, then 120 for the owner's results scoreboard, then 140 for the owner's
+  "what's a task" caption; the KPI cards say the same in fewer words, so it's now 135, with
+  the whole live page, footer included, above the fold);
 - at most 250 visible words in total (closed `<details>`, hidden elements and tooltips
   don't count);
-- no visible sentence longer than 8 words. The scoreboard sentences are longer, so each number
-  and link is its own inline-block run and clauses are split by "·"; every run fits.
+- no visible sentence longer than 8 words. Each KPI card's number, unit and captions are
+  separate runs and clauses are split by "·"; every run fits.
 
 A word is a whitespace-separated token with a letter or digit, so icons, "·" and "—" aren't
 words; a sentence ends at a "·", "|", ".", "!" or "?", a line break or the edge of its
 element. The exact rules are on `measureGlance()` in `test/glance-measure.mjs`. The test
-also checks the layout (the status line and the five sentences above the fold, then the board,
-then one closed Details fold), the exact status line and sentences of both samples, that an
+also checks the layout (the status pill and five equal KPI cards in one row above the fold, then
+the Tasks card, then one closed Details fold), the exact status pill and cards of both samples, that an
 invalid build cost or drill record drops only its part with the reason in the tooltip, that the
 "manual steps" link opens Details at the list, that no raw ISO time or jargon is visible, that
-sample mode makes no GitHub request, the task board's state icons, colours, links and tooltips,
+sample mode makes no GitHub request, the task chips' state icons, colours, links and tooltips,
+the overall and per-area progress, that chips are quiet (not full-width bars),
 both themes (and their contrast, focus rings and reduced motion), the task caption, tooltips on keyboard focus, "View all" with Enter and Space, focus surviving a
 re-render, no link text starting with "Open", nothing red or amber while the sample is held back,
 the liveness and health tooltips' observed cadence, and a clean console. On failure it prints the
