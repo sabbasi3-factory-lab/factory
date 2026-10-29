@@ -494,3 +494,16 @@ test('lifetime: after an idle fortnight the run cost, speed, go-live and human s
   assert.equal(h.total, 1);
   assert.equal(text(handsOffItem(null, h))[2], '1 manual step');
 });
+
+test('cost: the Total-cost card and the money table use the same exact build basis (no rounding drift)', () => {
+  // usd 1315 is ai_units 131487 rounded; with a 1,655-unit run the exact total is $1,331.42,
+  // while rounded usd * 100 would give $1,331.55 → $1,332.
+  const b = validateBuildCost({ ai_units: 131487, usd: 1315, as_of: '2026-10-28', source: 'journal',
+    breakdown: [{ who: 'Research', ai_units: 20460 }, { who: 'Coordinator', ai_units: 48151 }, { who: 'Build session', ai_units: 62876 }],
+    tokens: { input: 1, output: 1, calls: 1 }, model: 'm' });
+  const card = text(costItem({ build: b, cost: cost({ total: 1655 }), acceptedPrs: 26 }));
+  const table = moneyTable(b, 1655);
+  assert.equal(card[0], 'Total cost: $1,331');
+  assert.equal(`$${Math.round(table.total / 100).toLocaleString('en-US')}`, '$1,331');
+  assert.equal(card[1], '$1,315 build + $16.55 run');
+});

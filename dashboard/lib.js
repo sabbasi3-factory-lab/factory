@@ -2371,11 +2371,13 @@ function dateSpan(a, b) {
  */
 export function costItem({ build = null, cost = null, acceptedPrs = null } = {}) {
   const b = build?.ok ? build.value : null;
+  // The exact AI units, the same basis as the money table (usd is rounded and only cross-checked).
+  const bAic = b ? b.aiUnits : null;
   const card = (label, big, subs, perPr = null) => ({ key: 'cost', label, main: [BIG(big)], subs, perPr });
   if (cost?.spend === 'missing') {
     // Real agent runs but no spend measurement yet: unavailable, never a $0.00 run cost.
     return b
-      ? card('Total cost', formatUsd(b.usd * 100), [[NUM(formatUsd(b.usd * 100)), T('build'), SEP, T('run cost not available yet')]])
+      ? card('Total cost', formatUsd(bAic), [[NUM(formatUsd(bAic)), T('build'), SEP, T('run cost not available yet')]])
       : card('Running cost', '—', [[T('not available yet')]]);
   }
   const run = cost ? cost.total : null;
@@ -2384,8 +2386,8 @@ export function costItem({ build = null, cost = null, acceptedPrs = null } = {})
   const perPr = cost?.known && acceptedPrs ? real / acceptedPrs : null;
   const known = cost?.known && cost.measuredRuns;
   const per = perPr != null ? [[NUM(formatUsd(perPr)), T('per accepted PR')]] : [];
-  if (b && run != null) return card('Total cost', formatUsd(b.usd * 100 + run), [[NUM(formatUsd(b.usd * 100)), T('build +'), NUM(formatUsd(run)), T('run')], ...per], perPr);
-  if (b) return card('Total cost', formatUsd(b.usd * 100), [[NUM(formatUsd(b.usd * 100)), T('build'), SEP, T('run cost not available right now')]], perPr);
+  if (b && run != null) return card('Total cost', formatUsd(bAic + run), [[NUM(formatUsd(bAic)), T('build +'), NUM(formatUsd(run)), T('run')], ...per], perPr);
+  if (b) return card('Total cost', formatUsd(bAic), [[NUM(formatUsd(bAic)), T('build'), SEP, T('run cost not available right now')]], perPr);
   if (run != null) {
     const split = known ? [[NUM(formatUsd(real)), T('tasks'), ...(drills > 0 ? [T('+'), NUM(formatUsd(drills)), T('drills')] : [])]] : [[T('agent runs')]];
     return card('Running cost', formatUsd(run), [...split, ...per], perPr);
