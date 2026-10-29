@@ -14,7 +14,11 @@
 // scoreboard on top (a status line and five plain sentences, each with one big number) and fewer
 // words above the fold. The requested sentences are longer than 8 words; each number and link is
 // its own inline-block run (and clauses are split by "·"), so every run still fits sentenceWords.
-export const BUDGETS = Object.freeze({ foldWords: 120, totalWords: 250, sentenceWords: 8, foldY: 900 });
+// Then 140: the owner asked for the page to say what a task is, so a one-line caption (14 words)
+// sits under the Tasks heading; nothing else was trimmed to make room. 135 would fit the caption
+// alone, but the "modern product look" theme also brings Details and the footer (6 words) above
+// the fold on the live page (26 tasks): 120 + 14 + 6 = 140.
+export const BUDGETS = Object.freeze({ foldWords: 140, totalWords: 250, sentenceWords: 8, foldY: 900 });
 
 /** Truthy once the dashboard has rendered its data (app.js sets data-ready="1"). */
 export const READY_EXPR = "document.documentElement.dataset.ready === '1'";

@@ -1154,8 +1154,12 @@ function scoreSig(v) {
 }
 
 function scoreItem(item, tipText) {
+  // The sentence's leading label ("Shipped:") is muted, so the big number stands out.
+  const main = segNodes(item.main);
+  const label = typeof main[0] === 'string' ? main[0].match(/^[^:]+:/) : null;
+  if (label) main.splice(0, 1, h('span', { class: 'lbl' }, label[0]), main[0].slice(label[0].length));
   return tip(h('li', { class: `score-item score--${item.key}`, 'data-row-key': item.key },
-    h('p', { class: 'score-main' }, segNodes(item.main)),
+    h('p', { class: 'score-main' }, main),
     item.subs.map((sub) => h('p', { class: 'score-sub' }, segNodes(sub)))), tipText);
 }
 
@@ -1175,9 +1179,9 @@ function renderScore(v) {
   const drills = st.drills;
   const partial = state.partialHistory ? `Only the last ${DAYS} days of the audit log could be loaded.` : null;
   const os = v.outcomesSum;
-  const stale = outcomesStale(v.outcomes, now()) ? `gh-aw Outcomes last evaluated ${relativeTime(v.outcomes.generatedAt, now())}, so they may be out of date.` : null;
+  const stale = outcomesStale(v.outcomes, now()) ? `gh-aw Outcomes last evaluated ${relativeTime(v.outcomes.generatedAt, now())}, may be stale.` : null;
   replaceSection('score',
-    scoreItem(shippedItem(b, os), `${state.taskIssues.map && !state.taskIssues.error ? 'Tasks ported from JavaScript to Rust whose issue is closed as completed.' : "Tasks merged per the audit log; the task-issue list couldn't be read."} ${stale ?? (os ? 'gh-aw Outcomes judges each agent PR; real work only, drills separate.' : 'gh-aw Outcomes, which judges each agent PR, is not available yet.')}`),
+    scoreItem(shippedItem(b, os), `Task = one chrono-node parser or refiner in Rust; ${state.taskIssues.map && !state.taskIssues.error ? 'done when its issue closes as completed.' : 'done per audit-log merges (issues unreadable).'} ${stale ?? (os ? 'gh-aw Outcomes judges each agent PR; real work only.' : "gh-aw Outcomes, which judges agent PRs, isn't available yet.")}`),
     scoreItem(speedItem({ medianMs: itm.medianMs, count: itm.count, firstAt: v.doneSpan?.[0], lastAt: v.doneSpan?.[1], done: doneReal }),
       itm.count ? `Median time from a task's start to its merge, over ${itm.count} of ${doneReal} done tasks. ${partial ?? 'Dates are the first and last finishes.'}`
         : `Start and merge times for these tasks aren't in the audit log. ${partial ?? 'Details explains how speed is measured.'}`),
@@ -1216,9 +1220,12 @@ function renderAbout(v) {
   replaceSection('about', h('dl', { class: 'about' },
     state.partialHistory ? entry('Scope', `The audit tree couldn't be listed, so only the last ${DAYS} days were loaded: every number here covers that window, not the whole log.`)
       : entry('Scope', `Every number on the scoreboard covers the whole audit log (${state.records.length.toLocaleString('en-US')} events, all verified), not a window. Details lists the last ${DAYS} days.`),
+    entry("What's a task", 'A task is one upstream chrono-node step, a parser or a refiner, ported to one Rust file.',
+      `Each has one contract (contracts/<id>.yaml), one GitHub issue labelled factory:task and normally one agent PR; there are ${b.total}: ${b.byTier.auto?.total ?? 0} routine (English) and ${b.byTier['auto-strict']?.total ?? 0} core (shared).`,
+      'Safety drills and plain infrastructure PRs are not tasks.'),
     entry('Shipped', 'A task is done when its issue is closed as completed; while its issue is open, when the controller closes it after the merge; without the issue list, when the audit log shows the merge.',
       `Routine tasks (tier auto) merge by themselves once their checks pass; core tasks (tier auto-strict) also need the reviewer agent and the strict gates.`,
-      `Now: ${Object.entries(b.byTier).map(([k, x]) => `${k} ${x.done} of ${x.total}`).join(', ')}.`, 'Safety drills (drill/*) are not tasks.', 'The tasks port chrono\'s JavaScript parsers and refiners to Rust.', taskIssuesLine(),
+      `Now: ${Object.entries(b.byTier).map(([k, x]) => `${k} ${x.done} of ${x.total}`).join(', ')}.`, 'Safety drills (drill/*) are not tasks.', taskIssuesLine(),
       v.outcomesSum ? `gh-aw Outcomes: how gh-aw judged each real coder PR (${OUTCOME_STATUSES.slice(0, 3).join(', ')}); drills are counted apart, in Outcomes (gh-aw).` : 'gh-aw Outcomes: not available yet.'),
     entry('Speed', `The median time from a task's start (its first auto_ready, else its first agent run) to its merge, over ${itm.count} of ${b.counts.done} done tasks whose start and merge are in the log.`,
       v.doneSpan ? `First finish ${iso(v.doneSpan[0])}, last ${iso(v.doneSpan[1])}.` : null, 'Minutes up to 90, then hours.'),
@@ -1334,7 +1341,7 @@ function renderBoard(v) {
   // labels carry the state either way.
   const present = TASK_STATES.filter((st) => b.counts[st]);
   legend.replaceChildren(...(state.loaded && present.length > 1 ? present.map((st) => h('span', { class: `lg lg--${st}` }, icon(STATE_ICON[st]), `${b.counts[st]} ${TASK_STATE_LABELS[st]}`)) : []));
-  setTip('board-info', 'One tile per task, grouped by area; colour and icon show its state. Select a tile to view its issue.');
+  setTip('board-info', "One task = one chrono-node parser or refiner in Rust; drills and infrastructure PRs aren't tasks. Select a tile to view its issue; icons show state.");
   if (!state.loaded) {
     replaceSection('board', empty('… Loading'));
     return;
