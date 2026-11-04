@@ -38,7 +38,7 @@ As of 2026-11-04, from the [control room](https://sabbasi3-factory-lab.github.io
 - **Tasks merged:** 47 of 47 planned tasks (39 routine, 8 core), Oct 22 – Nov 3: the common code plus English, German and French. 0 reverts.
 - **First try:** 45 of 47 merged without a repair run. Of the other 2, the repair agent fixed 1 and handed 1 to a person.
 - **Speed:** median 13 min from a task's start to its merge.
-- **Cost:** $40.12 of agent runs ($0.76 per accepted PR), plus $1,417 one-time to build the factory (as of Oct 30, from the [build journal](docs/JOURNAL.md)).
+- **Cost:** $40.12 of agent runs ($0.76 per accepted PR), plus $1,417 one-time to build the factory (as of Oct 30, from [dashboard/build-cost.json](dashboard/build-cost.json)).
 
 ## More
 
