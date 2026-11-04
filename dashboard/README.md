@@ -17,7 +17,7 @@ no runtime dependencies. All data comes from GitHub; there is no OpenTelemetry.
 | `drills.json` | The safety-drill record from the build journal: `{ "as_of", "source", "defects_found_and_fixed", "runs": [{ "id", "result": "pass" or "fail", "note"? }] }`. Deployed with the page and read same-origin |
 | `test/lib.test.mjs`, `test/v2.test.mjs`, `test/verifier.test.mjs`, `test/drop-closed.test.mjs`, `test/dispatch-banner.test.mjs`, `test/redesign.test.mjs`, `test/scoreboard.test.mjs` | Tests for `lib.js` (`redesign.test.mjs`: the task board and its progress, cost join, medians, quality, liveness, recent activity and the closed rule; `scoreboard.test.mjs`: the status line, the five KPI cards, the two JSON files and the human-steps rule) |
 | `test/make-fixture.mjs` | Generates the sample audit logs with real hashes and the verifier anchors over them: `test/fixtures/sample.jsonl` and `anchors.jsonl` (`?fixture=1`, a busy factory), and `quiet.jsonl` and `quiet-anchors.jsonl` (`?fixture=quiet`, a quiet factory with every task done), plus `sample-meta.json` and `quiet-meta.json`: the task map, contracts, task issues, build cost and drill record each sample uses instead of GitHub. It also writes `outcomes.json`, the busy sample's gh-aw Outcomes file (read same-origin; the quiet sample has none, to show the fallback). `outcomes-live-sample.json` is a real file from the source repo, for the parser test |
-| `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
+| `watchdog.mjs` | Liveness watchdog scheduled hourly by `.github/workflows/heartbeat-watchdog.yml`: keeps one "Factory liveness alert" issue (label `heartbeat-alert`) open while the heartbeat is over 12 h old, missing or unreadable, or `audit-verify` hasn't succeeded in 26 h, or a scheduled chrono-node-rs workflow failed twice in a row, opening it only after two failing runs in a row (see [Watchdog](#watchdog)). Try it read-only with `GITHUB_REPOSITORY=<owner>/<repo> WATCHDOG_DRY_RUN=1 node dashboard/watchdog.mjs` |
 | `test/watchdog.test.mjs` | Tests for the watchdog and for workflow permissions and action pins |
 | `test/glance.test.mjs` | The 5-second glance test: word budgets, layout, tooltips and keyboard behaviour, measured on the rendered `?fixture=1` and `?fixture=quiet` pages in headless Chrome |
 | `test/glance-measure.mjs`, `test/headless.mjs` | The in-page word and layout measurements, and a dependency-free headless-Chrome driver (static server, DevTools protocol over Node's `WebSocket`). Also a CLI that measures the live page |
@@ -346,7 +346,7 @@ Drill tasks (`drill/*`, the factory's own fire drills) are left out of every tas
 
 ## Watchdog
 
-`watchdog.mjs` is scheduled hourly (GitHub runs it every few hours) and checks two things,
+`watchdog.mjs` is scheduled hourly (GitHub runs it every few hours) and checks three things,
 failing closed:
 
 - **Heartbeat** (reason codes `heartbeat-fresh`, `heartbeat-too-old`, `no-heartbeat`,
@@ -360,6 +360,14 @@ failing closed:
   needs `actions: read`) must have started at most 26 h ago. Its time is `run_started_at`,
   which is fixed once the run starts and never later than the verification, so it can't make
   a run look newer than it was. A 404, an API error, or no successful run ever alerts.
+- **Scheduled workflows** (`scheduled-workflows-ok`, `scheduled-workflow-failing`,
+  `scheduled-workflow-missing`, `scheduled-workflow-unreadable`): for each of chrono-node-rs's
+  `SCHEDULED_WORKFLOWS` (`outcomes.yml`, `monitor.yml`, `onboard.yml`, `upstream-sync.yml`,
+  `drills.yml`), the two newest *decisive* completed runs on main (success, failure,
+  timed_out or startup_failure; skipped and cancelled runs don't count) must not both have
+  failed. Fewer than two decisive runs never alert. Read with this repo's token
+  (`GET /repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/<file>/runs?branch=main&status=completed&per_page=20`;
+  the repo is public). Added after `outcomes.yml` failed every run for ~5 h on 2026-11-04 without an alert.
 
 There's one issue, found by its `heartbeat-alert` label (so an open issue with the earlier
 title "Controller heartbeat stale" is reused). It's titled "Factory liveness alert" and
@@ -369,7 +377,7 @@ never opens it on its own. The previous run's verdict is read from a marker step
 run's `watchdog` job, through the Actions jobs API: the step runs only when a run is
 failing, so "success" means the previous run failed and "skipped" means it was healthy (an
 unknown previous verdict counts as failing). While the issue is open it gets a comment on
-each failing run, and it's closed on the first healthy run, when both checks pass.
+each failing run, and it's closed on the first healthy run, when every check passes.
 `WATCHDOG_DRY_RUN=1` reads everything and prints the plan without writing.
 
 ## Deploy

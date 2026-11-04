@@ -1,7 +1,9 @@
 name: heartbeat-watchdog
 
 # Alerts when the chrono-node-rs controller's heartbeat is more than 12 hours old, missing or
-# unreadable, or the factory's audit-verify hasn't succeeded for 26 hours (DESIGN §11). It opens
+# unreadable, the factory's audit-verify hasn't succeeded for 26 hours, or one of chrono-node-rs's
+# scheduled workflows (outcomes, monitor, onboard, upstream-sync, drills) failed its two newest
+# runs on main (DESIGN §11). It opens
 # one issue labelled `heartbeat-alert` only after TWO failing runs in a row (the previous run's
 # verdict is the marker step below, read through the jobs API), comments on it while the
 # problem lasts, and closes it on the first healthy run. Scheduled hourly; GitHub runs it every
