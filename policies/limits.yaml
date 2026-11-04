@@ -8,7 +8,13 @@ wip:
     pause_dispatch_when_busy_jobs_over: 14   # running + queued Actions jobs
   core_area: 1             # auto-strict paths are serialized
 ci:
-  max_jobs_per_pr: 2       # keep CI fan-out small so more tasks fit
+  # checks + gates + CodeQL default setup's 3 Analyze jobs (actions, JS/TS, Rust). Was 2 before CodeQL
+  # (2026-11-04); the planner's busy-jobs estimate uses it, so it must count what really runs.
+  # Coordinator decision 2026-11-04 (keep JS/TS scanning: the controller is TypeScript).
+  max_jobs_per_pr: 5
+  # The main ruleset requires code scanning results; GitHub checks that at enqueue, so the merge stage
+  # waits for CodeQL's check on the head (one re-run of a failed analysis, then a person).
+  wait_for_code_scanning: true
 task:
   max_attempts: 1          # first implementation attempt
   max_repairs: 2           # Evergreen repairs after the first attempt
