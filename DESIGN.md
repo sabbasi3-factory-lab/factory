@@ -111,11 +111,16 @@ Loops 0–2 are inner loops. Loops 3–4 are outer loops. Change loop 4 slowly, 
   2. It writes `contracts/*.yaml` in **one PR you review**.
   3. After that merges, it creates one GitHub issue per contract. Each issue has labels, dependency links and a hidden marker `<!-- factory-task: en/weekday-parser -->`, so re-runs update issues instead of duplicating them.
 - **New work while running:**
-  - **Nightly monitor:** files mismatch bugs, deduplicated by signature and capped per run.
-  - **Version sync:** re-run the seed script when chrono-node releases.
+  - **Nightly monitor** (`monitor.yml`, plain code): compares 20,000 seeded random phrases per language between `main` and the pinned chrono-node, with a fresh seed recorded in the run and in each issue. Each new mismatch signature (configuration + the steps chrono-node used) becomes one `factory:bug` issue with a minimal repro. At most 3 a night; an open factory-created issue with the same signature dedupes it.
+  - **Bug intake** (`intake.yml`, plain code): a `factory:bug` report from the monitor or from someone with write access is re-run through both implementations.
+    - **They disagree:** a PR adding a **fix case** (chrono-node's own output, under `tests/golden/fixes/`) and its generated **fix contract**. A fix case is pending until the fix declares `// factory-fix: <id>`; after that it's checked on every PR.
+    - **They agree:** "not a port bug", and a claim that chrono-node itself is wrong goes to you.
+    - **Not ported yet:** reported and closed.
+    Intake PRs that only add those files, pass CI (which regenerates the case through chrono-node byte for byte and checks the contract against the seed script) and stay within 3 a day are merged without you (`tiers.yaml` `intake_fixes`). After merge the task issue is created and the controller takes it.
+  - **Version sync** (`upstream-sync.yml`, plain code, daily): a new chrono-node release becomes one `upstream` issue mapping the upstream diff to tasks, new and removed steps, configurations, core and golden areas. Labelling it `upstream:bump` drafts the bump PR (re-copy `upstream/`, regenerate golden data, re-seed contracts) for your review.
   - **Agent proposals:** labelled `proposed`; they need your `factory:ready`.
   - **You:** through an issue template that requires a contract.
-  - **Loop 4:** opens PRs, not issues.
+  - **Loop 4:** a report issue with proposals; you turn the ones you accept into PRs.
 - **Rule:** the controller only picks issues that are labelled `factory:ready` **and** have a contract on `main`. Agents can't create work for themselves.
 
 ### Contract example
@@ -188,8 +193,12 @@ Side states: `repairing`, `stale-contract`, `needs-human`, `blocked`, `cancelled
 |---|---|---|---|
 | `implement` | Copilot, **one pinned coding model** (never `auto`) | dispatch | `create-pull-request` (max 1), `add-comment` |
 | `repair` (Evergreen) | same pinned model | dispatch by the controller, plus a 15-min safety schedule | push to the PR branch, `add-comment` |
-| `factory-review` (Loop 4) | pinned reasoning model | every 3 days | draft PR to `factory` policy or prompts, `create-discussion` report |
-| `monitor` | **plain code, no AI** | nightly | `create-issue` from a script |
+| `improve`: the factory review (Loop 4) | one pinned model | every 3 days | `create-issue` (max 1): a report with at most 3 evidence-backed proposals. Prompt changes as gh-aw `experiments:` blocks, policy changes as exact YAML diffs. Nothing is applied. No App writes to the factory repo, and none can push under `.github/workflows/`. |
+| `monitor` | **plain code, no AI** | nightly | issues from a script (controller App) |
+| `intake` | **plain code, no AI** | `factory:bug` labelled | fix PR (contract + golden case) or a fixed comment (controller App) |
+| `upstream-sync` | **plain code, no AI** | daily; `upstream:bump` | one issue per release; draft bump PR (controller App) |
+| `dependency-steward` | **plain code, no AI** | `dependency-request` labelled; hourly sweep | dependency PR or a fixed comment (controller App) |
+| `release` | **plain code, no AI** | by hand | draft GitHub Release after your approval (`release` environment); crates.io publishing disabled |
 | `daily-digest` | plain code (optional cheap model for the summary) | daily | `create-discussion` or an issue comment: yesterday's merged and failed tasks, `needs-human`, spend vs. budget, drills, anomalies |
 | `outcomes-collector` | plain code (`gh aw outcomes`) | daily | updates the dashboard data; re-checks `pending` items |
 
@@ -203,7 +212,7 @@ Side states: `repairing`, `stale-contract`, `needs-human`, `blocked`, `cancelled
   - vendored crates plus offline docs (`cargo doc --offline`), built in custom `steps:` that run outside the firewall
   - `upstream/`
 - **Blocked:** crates.io, docs.rs, the web, other repos, web search.
-- **New dependency:** the agent files a request issue, and you approve it.
+- **New dependency:** the agent files a `dependency-request` issue (`create-issue` safe output, max 1). The dependency steward decides by policy; only borderline requests come to you.
 
 **Other agent guardrails**
 
@@ -252,7 +261,7 @@ The core is bootstrapped by hand in Stage 0, so later core changes are small and
 
 **Dependency steward (automatic, no per-request review)**
 
-Agents can't edit `Cargo.toml`. When an agent needs a crate, it files a `dependency-request` issue (crate, version, reason, task). A deterministic workflow then checks it against the policy in `factory/policy/dependencies.yaml`:
+Agents can't edit `Cargo.toml`. When an agent needs a crate, it files a `dependency-request` issue (crate, version, kind, reason, task). A deterministic workflow (`dependency-steward.yml`, `harness/steward/`) then checks it against the pinned `policies/dependencies.yaml`:
 
 1. **Licence** is on the allowlist (MIT, Apache-2.0, BSD, ISC, Unicode), checked by `cargo deny`.
 2. **No known advisories** (RustSec, through `cargo deny` or `cargo audit`); not yanked.
@@ -261,13 +270,13 @@ Agents can't edit `Cargo.toml`. When an agent needs a crate, it files a `depende
 5. **Not on the denylist:** competing natural-language date crates (`chrono-english`, `interim`, `whichtime`, `natural-date-parser`, `two_timer` and similar) are always rejected, to prevent contamination.
 6. **Small footprint:** at most 5 new transitive crates, and no build script that uses the network.
 
-**Pass:** the controller opens a PR that updates `Cargo.toml` and `Cargo.lock`, vendors the crate and adds it to the offline docs. That PR goes through the auto-strict gates. Agents can use the crate from the next run.
+**Pass:** the steward (controller App) opens a PR that adds exactly the checked crate to `Cargo.toml` and `Cargo.lock`. It's auto-strict: the strict gates are enforced on it as on a factory PR, and the steward queues it once `ci` (including the full regression) and `gates` are green on its head. Agents' setup steps vendor the crate and build its offline docs from the next run.
 
 **Fail:** the request is closed with the reasons, and the agent must solve the problem with what's already approved.
 
-**Borderline** (for example, only the download threshold fails): `needs-human`.
+**Borderline** (every hard check passes, a soft one doesn't): `needs-human`. A person with write access can add `dependency:approved`. Otherwise it's rejected after 24 hours (`limits.yaml` `borderline_dependency`).
 
-Every decision and its evidence go into the audit log. A fire drill requests a look-alike crate and a competing port, and both must be rejected.
+Every decision and its evidence are on the request issue (fixed-template comment and labels) and in the workflow run. The audit log keeps a single writer, the controller, so the steward doesn't write there. Drill (local, live crates.io): `dateparser` and `two-timer` (denylisted), `serde_jsn` and `rgex` (look-alikes) and two crates with disallowed licences were rejected; a days-old crate was borderline; preapproved crates passed.
 
 **Hotspots:** parser registration uses auto-registration (or generated code), so parallel tasks don't edit the same `lib.rs` lines.
 
@@ -276,10 +285,12 @@ Every decision and its evidence go into the audit log. A fire drill requests a l
 - **Pages:**
   - a WebAssembly playground ("type a phrase, see the date") that redeploys on every merge
   - `cargo doc` output
-- **Releases:**
-  - tag `v0.x` after each completed language
-  - changelog generated from PR titles
-  - no crates.io publishing until you decide to
+- **Releases** (`release.yml`, by hand):
+  - `0.x` while languages are incomplete. A minor bump when a language is added or the public API breaks (`cargo semver-checks` against the last release); otherwise a patch.
+  - `cargo package`, `cargo publish --dry-run`, and a changelog from merged PRs (GitHub's generated release notes).
+  - A **draft** GitHub Release after you approve the `release` environment. Publishing the draft (which creates the tag) is a second step for you.
+  - The tag is the version's source of truth. `main` keeps `Cargo.toml` at `0.0.0` with `publish = false`, and the version is stamped on the runner only.
+  - No crates.io publishing until you decide to. The repo has no crates.io token, and the `publish` job is disabled.
 
 ## 11. Observability and audit
 
@@ -465,8 +476,8 @@ The repo is public, so the audit log, Actions logs, run artifacts (prompts, agen
 | 0 · Setup | Org settings; two Apps; secrets; repos; `upstream/` pinned; golden generator and comparison harness; core types and 2–3 parsers ported by hand; `PORTING.md`; CI gates; ruleset and merge queue; controller v1 (with dry-run); seed script; dashboard v1; model smoke test | A hand-made PR passes every gate and appears in the audit log and the dashboard |
 | 1 · Agents propose, you merge | ~10 English parsers; measure the baseline; compare the two models | 10 merged; the baseline is recorded |
 | 2 · Auto-merge tier | Merge queue auto-merge for `tier: auto`; WIP 3; Evergreen repair; reverts; fire drills; lessons inbox (gh-aw ledger) | Zero-touch ≥ 80% over 20 tasks; all fire drills caught |
-| 3 · Close the delivery loop | Pages deploy on merge; nightly monitor; daily outcomes; alerts | One monitor-found bug fixed end to end with no human involved |
-| 4 · Improve and scale | Factory review every 3 days; more languages, one batch at a time; scenarios 2 and 3 | Owner decision |
+| 3 · Close the delivery loop | Pages deploy on merge; nightly monitor and bug intake; upstream sync; dependency steward; release pipeline (publishing gated); daily outcomes; alerts | One monitor-found bug fixed end to end with no human involved |
+| 4 · Improve and scale | Factory review every 3 days (report with measured proposals); more languages, one batch at a time; scenarios 2 and 3 | Owner decision |
 
 ## 17. Open decisions and risks
 

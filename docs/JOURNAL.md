@@ -118,6 +118,30 @@ identifiers, and scrubbing after every install.
   - *Lesson:* the merge stage is mostly about saying no: 10 conditions around one GraphQL call.
     Make "refused" and "transient" different outcomes. Cost: ~380 AI units.
 
+## Phase 5: closing the loop at both ends (Nov 4)
+
+- **chrono-node-rs#211, monitor and bug intake** (plain code):
+  - The monitor compares random phrases nightly with a fresh, recorded seed and opens one issue per mismatch signature.
+  - The intake re-runs each report through both implementations. A real mismatch becomes a fix-case PR plus a contract.
+  - *Finding:* the triage needs no model. A bug report is a request that can be re-run, so "port bug or not" is a comparison.
+  - *Decision:* a known-bug golden case is gated by a `// factory-fix: <id>` marker. It stays pending until the fix lands, then it's checked forever, with no "graduate the case" PR per bug.
+- **#212, release:**
+  - 0.x versions; `cargo package`, `cargo publish --dry-run` and a semver check; a draft GitHub Release behind the `release` environment. Publishing stays off.
+  - *Finding:* `cargo semver-checks` exits 1 both for a violation and for a tool error. Only its "Summary semver requires new …" line means a violation.
+- **#214, upstream sync:**
+  - One issue per chrono-node release maps the diff to tasks, steps and golden areas. A person's `upstream:bump` label drafts the bump PR.
+  - *Decision:* no automatic bump. Moving the pin makes every in-flight contract stale.
+- **#249, dependency steward:**
+  - Policy-checked dependency requests: hard checks reject, soft checks go to the owner (auto-rejected after 24 h), and a pass becomes an auto-strict PR.
+  - *Finding:* gh-aw v1.0.1 compiles `create-issue.allowed-labels` but doesn't enforce it. So no consumer may trust a label without checking who added it.
+- **#250 + factory#36, intake fixes merge without the owner:**
+  - Max 3 a day, only for PRs that purely add files, with chrono-node as the oracle.
+  - Owner-approved: "intake fix PRs merge without the owner's approval".
+- **#256, factory review (Loop 4):**
+  - A report every 3 days with at most 3 evidence-backed proposals. Spend runs inside the controller, and the review counts toward no task.
+  - *Finding:* no factory App can push under `.github/workflows/` (that needs the `workflows` permission), and the factory repo stays agent-free. So the review proposes in a report, and a person adopts.
+- *Lesson:* every new writer reused an existing App. The real work was making each writer safe while tokens exist: tokens minted after third-party code, artifacts re-validated in the write job, and labels trusted only by who added them.
+
 ---
 
 ## Decisions
