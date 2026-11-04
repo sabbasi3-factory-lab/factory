@@ -6,6 +6,10 @@ per_run:                  # gh-aw frontmatter max-ai-credits
   repair: 300
   reviewer_agent: 200
   factory_review: 500
+  # needs-human pre-triage (chrono-node-rs triage.md): read-only, one advisory comment per hand-off.
+  # Present = on (the controller dispatches it and counts it); absent = off. Coordinator decision
+  # 2026-11-04, pending owner review. A run is reserved at 150 + threat_detection + 2 x margin.
+  needs_human_triage: 150
   threat_detection: 400   # gh-aw default; pinned in each workflow's safe-outputs.threat-detection
   # max-ai-credits is NOT a strict hard stop. It's "stop after the response that crosses the cap":
   # gh-aw's firewall checks the total already recorded before each request
@@ -32,6 +36,7 @@ per_workflow_per_day:     # gh-aw frontmatter max-daily-ai-credits
   repair: 1500
   reviewer_agent: 1000
   factory_review: 1000
+  needs_human_triage: 600   # 4 triages a day at the per-run cap; gh-aw max-daily-ai-credits
 per_task:
   max_aic: 1000           # all attempts, repairs and detection for one task
 factory_per_day:          # enforced by the controller across all workflows
