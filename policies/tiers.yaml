@@ -36,6 +36,22 @@ tiers:
       - "tests/golden/**"
       - "upstream/**"
       - "NOTICE"
+# Bug-intake fix PRs (chrono-node-rs harness/feedback): when the monitor or a person with write
+# access reports a phrase where the port and the pinned chrono-node disagree, the intake opens a PR
+# that ADDS a fix case (chrono-node's own output) and its generated fix contract. The controller
+# queues it without the owner only if every one of these holds (otherwise needs-human):
+#   - opened by the controller App, on branch factory/intake/<lang>-fix-<hash>;
+#   - it only adds exactly contracts/<lang>/fix-<hash>.yaml, harness/golden/fixes/<lang>-fix-<hash>.json
+#     and tests/golden/fixes/<lang>-fix-<hash>.json (no edit, delete or rename of anything);
+#   - ci passes, which regenerates the case through the pinned chrono-node byte for byte
+#     (the oracle, not the reporter) and checks the contract against the seed script; gates pass;
+#   - fewer than max_per_day intake fixes merged or were queued today (UTC).
+# A report claiming chrono-node itself is wrong is never automatic: it goes to the owner.
+# Owner-approved 2026-11-04 ("intake fix PRs merge without the owner's approval").
+intake_fixes:
+  auto_merge: true
+  max_per_day: 3
+
 protected_from_agents:   # agents' changes to these paths are rejected outright
   - ".github/**"
   - "contracts/**"
