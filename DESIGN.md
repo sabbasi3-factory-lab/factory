@@ -83,6 +83,13 @@ NOTICE               attribution to chrono-node
 | `sabbasi3-factory-agent[bot]` (GitHub App) | Agent PRs, pushes and comments; Evergreen repairs | gh-aw `safe-outputs.github-app`. CI triggers normally, with no empty commit. |
 | `sabbasi3` (you) | Contracts, human reviews, kill switch, approvals | Your account |
 
+**Who approves human-tier changes** (owner decision, 2026-11-04): the coordinator. There is no general
+code-owner review: in a one-owner repo the controls are the tiers, the gates, the merge queue and the
+policy-gated auto-merges. `.github/CODEOWNERS` requests the owner's review and documents the human
+tier. A small break-glass set may later require a code-owner review: the kill switch, the audit
+verifier, the rulesets and the spend caps. A build App is planned for attribution and least privilege,
+not for approvals.
+
 | Secret or variable | Purpose | Rotation |
 |---|---|---|
 | `COPILOT_GITHUB_TOKEN` | Copilot inference, billed to the owner's Copilot seat. Fine-grained PAT with Copilot Requests: Read. | **It expires.** The controller alerts 14 days before expiry. |
