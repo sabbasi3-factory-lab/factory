@@ -6,6 +6,11 @@ tiers:
       - "src/locales/*/parsers/**"
       - "src/locales/*/refiners/**"
       - "tests/locales/**"
+      # Generated locales' constants (chrono-node-rs harness/onboard): acceptance is unit cases
+      # recorded from the pinned chrono-node, the same oracle as the goldens, and every step that
+      # imports it is golden-gated. Coordinator decision 2026-11-04 under the owner's goal
+      # ("automate as much as we can ... with good quality checks and guardrails"); pending owner review.
+      - "src/locales/*/constants.rs"
   auto-strict:     # merge queue after the standard gates plus the strict gates
     paths:
       - "src/core/**"
@@ -14,6 +19,11 @@ tiers:
       - "Cargo.toml"     # only through the dependency steward's PRs
       - "Cargo.lock"
       - "vendor/**"
+      # A generated locale's shared parser base: every parser of that locale depends on it, so it
+      # gets the strict gates, the reviewer and auto-revert. Coordinator decision 2026-11-04 (as above);
+      # pending owner review. Note: the controller's strict lane is factory-wide (one auto-strict task in
+      # flight at a time), so these serialize with core work and across languages.
+      - "src/locales/*/abstract_*.rs"
     strict_gates:
       - full_regression           # golden + held-out comparison across every ported language
       - semver_checks             # no public API break
