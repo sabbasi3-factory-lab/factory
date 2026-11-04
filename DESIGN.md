@@ -208,7 +208,7 @@ Side states: `repairing`, `stale-contract`, `needs-human`, `blocked`, `cancelled
 **Other agent guardrails**
 
 - **Threat detection:** **strict** (gh-aw's default is warn). A flagged run produces nothing.
-- **Caps:** `max-ai-credits: 500` (implement), `max-daily-ai-credits: 3000`. Detection is capped at 400 AIC by default.
+- **Caps:** `max-ai-credits: 500` (implement; gh-aw v1.0.1's evals job inherits it), `max-daily-ai-credits: 6000` (raised from 3000 on 2026-11-04). Detection is capped at 400 AIC by default.
 - **Protected paths:** `.github/**`, `contracts/**`, `Cargo.toml`, `Cargo.lock`, `upstream/**`, `tests/golden/**`.
 
 ## 9. Gates (CI on `pull_request` and `merge_group`)

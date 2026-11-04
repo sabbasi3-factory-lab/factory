@@ -1,7 +1,7 @@
 # Bounds for every loop. Exceeding a bound gives an explicit state; nothing fails silently.
 version: 1
 wip:
-  start: 3                 # tasks in flight at once
+  start: 5                 # tasks in flight at once; owner raised 3 -> 5 on 2026-11-04 (wave 1)
   max: 10                  # adaptive ceiling
   adaptive:
     org_concurrent_job_limit: 20     # Free plan, whole org

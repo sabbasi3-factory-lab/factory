@@ -200,7 +200,7 @@ test('fixture metrics: tiles', () => {
   assert.equal(m.running.count, 2);
   assert.deepEqual(m.running.rows.map((r) => r.key).sort(), ['en/casual-date#a1', 'en/month-parser#a2']);
   assert.equal(m.running.dryRunPlanned, 1);
-  assert.equal(m.running.wipLimit, 3);
+  assert.equal(m.running.wipLimit, 5);
   // PR 9: queued, dequeued, queued again. PRs 5, 6 and 7 were merged.
   assert.equal(m.queue.count, 1);
   assert.deepEqual(m.queue.items.map((q) => q.pr), [9]);
@@ -328,14 +328,14 @@ test('needs-you items close when the task moves again; kill switch and budget le
     ev('needs_human', '2026-10-16T08:01:00Z', { task: 't/b', issue: 2, reason: 'r', effect: 'label' }),
     ev('stale_contract', '2026-10-16T08:02:00Z', { task: 't/c', issue: 3, reason: 'contract-changed', effect: 'hold' }),
     ev('dispatched', '2026-10-16T09:00:00Z', { task: 't/a', issue: 1, attempt: 2, reason: 'retry', effect: 'dispatch' }),
-    ev('run_finished', '2026-10-16T09:30:00Z', { task: 't/a', attempt: 2, aic: 8500 }),
+    ev('run_finished', '2026-10-16T09:30:00Z', { task: 't/a', attempt: 2, aic: 17000 }),
     ev('heartbeat', '2026-10-16T10:00:00Z', { factory_enabled: false }),
   ];
   const m = deriveMetrics(events, { now: at('2026-10-16T10:05:00Z') });
   assert.deepEqual(m.needsYou.items.map((i) => i.task), ['t/b', 't/c']);
   assert.equal(m.killSwitch.enabled, false);
   assert.equal(m.running.count, 0);
-  assert.equal(m.aicToday.total, 8500);
+  assert.equal(m.aicToday.total, 17000);
   assert.equal(m.aicToday.level, 'warn');
   assert.equal(deriveMetrics(events, { now: at('2026-10-17T00:00:01Z') }).aicToday.total, 0);
 });

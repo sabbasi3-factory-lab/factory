@@ -4,8 +4,8 @@
 export const EVENT_FIELDS = ['id', 'parents', 'payload', 'sha', 'timestamp', 'type', 'version'];
 
 export const DEFAULTS = Object.freeze({
-  wipLimit: 3, // policies/limits.yaml wip.start
-  aicBudget: 10000, // policies/budgets.yaml factory_per_day.max_aic
+  wipLimit: 5, // policies/limits.yaml wip.start
+  aicBudget: 20000, // policies/budgets.yaml factory_per_day.max_aic
   aicAlertPct: 80,
   // The controller is scheduled hourly, but GitHub's cron on a Free-plan org runs it only
   // every 2 to 8 h (measured: median gap 2.4 h, p90 4.4 h, worst 7.6 h), so the limits
