@@ -270,7 +270,7 @@ Agents can't edit `Cargo.toml`. When an agent needs a crate, it files a `depende
 5. **Not on the denylist:** competing natural-language date crates (`chrono-english`, `interim`, `whichtime`, `natural-date-parser`, `two_timer` and similar) are always rejected, to prevent contamination.
 6. **Small footprint:** at most 5 new transitive crates, and no build script that uses the network.
 
-**Pass:** the steward (controller App) opens a PR that adds exactly the checked crate to `Cargo.toml` and `Cargo.lock`. It's auto-strict: the strict gates are enforced on it as on a factory PR, and the steward queues it once `ci` (including the full regression) and `gates` are green on its head. Agents' setup steps vendor the crate and build its offline docs from the next run.
+**Pass:** the steward (controller App) opens a PR that adds exactly the checked crate to `Cargo.toml` and `Cargo.lock`. It's auto-strict in its CI checks: the full regression, semver, mutation, performance and code-health gates are enforced on it as on a factory PR, and the steward queues it once `ci` and `gates` are green on its head. Not yet covered: the controller's one-at-a-time core lane (`serialize_area`), the reviewer agent, and automatic revert don't apply to steward PRs; the controller doesn't know about them yet. Agents' setup steps vendor the crate and build its offline docs from the next run.
 
 **Fail:** the request is closed with the reasons, and the agent must solve the problem with what's already approved.
 
@@ -463,11 +463,11 @@ The repo is public, so the audit log, Actions logs, run artifacts (prompts, agen
 - Quality metrics on the dashboard: clippy pedantic count, function size, duplication.
 - **Cadence:** data is collected **daily** (outcomes collector and daily digest). The factory review runs **every 3 days**. It always looks at a rolling 7-day window, and proposes a change to an area only if at least 15 tasks have finished since that area last changed. Otherwise it reports "no change". This avoids chasing noise, because outcomes arrive days late. Tightening (pausing an area, lowering WIP) is automatic and immediate at any time.
 - **Factory review every 3 days (Loop 4):**
-  - proposes cleanup tasks and changes to prompts, gates and budgets, as draft PRs
-  - you approve
+  - files one report issue (`improve`): at most 3 proposals for cleanup tasks, prompts (as gh-aw `experiments:` blocks), gates and budgets (as exact YAML diffs), each with its evidence
+  - you decide; an adopted proposal becomes a person's PR (no App writes policies or workflow files)
   - later, a change is promoted only if it beats the current version on held-out tasks (the "ratchet")
 - **A monthly human architecture review** of `src/core/**`.
-- **Lessons inbox (planned, Stage 2):** parallel agents append candidate lessons to a gh-aw **ledger** (many writers, validated and size-limited safe outputs). The factory review curates the good ones into `PORTING.md` through a PR you approve. The inbox is never a source of truth. It exercises a real gh-aw feature where several writers is the right fit.
+- **Lessons inbox (planned, Stage 2):** parallel agents append candidate lessons to a gh-aw **ledger** (many writers, validated and size-limited safe outputs). The factory review proposes the good ones for `PORTING.md` in its report; an adopted one becomes a person's PR. The inbox is never a source of truth. It exercises a real gh-aw feature where several writers is the right fit.
 
 ## 16. Stages
 
