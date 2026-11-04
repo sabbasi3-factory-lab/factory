@@ -15,6 +15,7 @@ Agents can never edit this repo.
 | [`dependencies.yaml`](dependencies.yaml) | The dependency steward's hard checks, soft checks, allowlist and denylist |
 | [`network.yaml`](network.yaml) | What agents can and can't reach |
 | [`cadence.yaml`](cadence.yaml) | When scheduled jobs run |
+| [`onboarding.yaml`](onboarding.yaml) | Which languages the onboarding pipeline adds, in what order, and when it stops |
 
 **Changing a policy:**
 
