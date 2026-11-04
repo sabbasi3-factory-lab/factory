@@ -13,11 +13,13 @@ per_run:                  # gh-aw frontmatter max-ai-credits
   # `maxExceeded: roundedTotalAiCredits >= config.max`), so the response admitted just under the
   # cap is billed in full, and requests in flight together can each overshoot. The controller
   # counts a completed run whose usage is unreadable at
-  #   max-ai-credits + threat_detection + 2 x overshoot_margin   (agent job + detection job)
+  #   its caps + one overshoot_margin per AI job: repair and review cap + threat_detection + 2 x margin
+  #   (agent + detection job); implement 500 + 400 + 500 + 3 x margin = 2600 (agent + detection + evals:
+  #   gh-aw v1.0.1's evals job inherits max-ai-credits; chrono-node-rs #207, 2026-11-04)
   # and reverts to "unknown" (blocks, and raises factory:alert) if a readable run ever shows more
   # concurrency or a larger single response than assumed here, or can't be checked. Owner-set 2026-10-26.
   # Where the margin applies (coordinator decision B1, 2026-10-26):
-  #   - the DAILY total (factory_per_day): runs in flight are reserved at cap + detection + 2 x margin,
+  #   - the DAILY total (factory_per_day): runs in flight are reserved at that bound,
   #     and the fallback bound above uses it too: the worst case;
   #   - the PER-TASK repair gate (per_task.max_aic) does NOT: it counts a repair at its caps
   #     (repair + threat_detection), an expected-cost guard. With the margin a repair's worst case
@@ -26,13 +28,17 @@ per_run:                  # gh-aw frontmatter max-ai-credits
   overshoot_assumed_max_response_aic: 100   # ~10x the largest seen (10.14 AIC, Oct 2026, 68 responses)
   overshoot_assumed_max_concurrency: 4      # 4x the largest seen (1); nothing in gh-aw caps it
 per_workflow_per_day:     # gh-aw frontmatter max-daily-ai-credits
-  implement: 3000
+  implement: 6000         # owner raised 3000 -> 6000 on 2026-11-04 (wave 1 at WIP 5)
   repair: 1500
   reviewer_agent: 1000
   factory_review: 1000
 per_task:
   max_aic: 1000           # all attempts, repairs and detection for one task
 factory_per_day:          # enforced by the controller across all workflows
-  max_aic: 10000          # about $100/day during the test week; reset from week-1 data
+  # Owner raised 10000 -> 20000 on 2026-11-04 ("okay feel free to increase the WIP to 5 or higher.
+  # and the daily cap"). This total counts in-flight runs at their bound (5 implements = 13000),
+  # so 10000 would pause dispatch before much real spend. Real spend stays bounded by the
+  # per-workflow daily caps above (6000 + 1500 + 1000 + 1000 = 9500).
+  max_aic: 20000
   alert_at_pct: 80
   pause_at_pct: 100
