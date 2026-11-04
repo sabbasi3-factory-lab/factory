@@ -200,7 +200,7 @@ test('fixture metrics: tiles', () => {
   assert.equal(m.running.count, 2);
   assert.deepEqual(m.running.rows.map((r) => r.key).sort(), ['en/casual-date#a1', 'en/month-parser#a2']);
   assert.equal(m.running.dryRunPlanned, 1);
-  assert.equal(m.running.wipLimit, 3);
+  assert.equal(m.running.wipLimit, 5);
   // PR 9: queued, dequeued, queued again. PRs 5, 6 and 7 were merged.
   assert.equal(m.queue.count, 1);
   assert.deepEqual(m.queue.items.map((q) => q.pr), [9]);

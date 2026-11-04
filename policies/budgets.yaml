@@ -37,8 +37,10 @@ per_task:
 factory_per_day:          # enforced by the controller across all workflows
   # Owner raised 10000 -> 20000 on 2026-11-04 ("okay feel free to increase the WIP to 5 or higher.
   # and the daily cap"). This total counts in-flight runs at their bound (5 implements = 13000),
-  # so 10000 would pause dispatch before much real spend. Real spend stays bounded by the
-  # per-workflow daily caps above (6000 + 1500 + 1000 + 1000 = 9500).
+  # so 10000 would pause dispatch before much real spend. The per-workflow daily caps above add
+  # up to 9500 (6000 + 1500 + 1000 + 1000), but they are admission thresholds, not a hard ceiling
+  # on billed spend: gh-aw checks completed usage when a run starts, so runs already in flight can
+  # finish above them, and each response can overshoot its per-run cap (overshoot_margin).
   max_aic: 20000
   alert_at_pct: 80
   pause_at_pct: 100
