@@ -10,12 +10,16 @@ heartbeat_alert_after_hours: 12   # dashboard red; heartbeat-watchdog alert (fac
 liveness_alert_consecutive_runs: 2  # the watchdog opens an issue only after 2 failing runs in a row
 outcomes_collector: daily # gh aw outcomes + gh aw logs -> acceptance, zero-touch, cost per merged PR -> audit log + dashboard
 daily_digest: daily       # one-page summary mentioning the owner: merged/failed, needs-you, spend, drills, anomalies
-monitor: nightly          # plain code: random phrases compared with chrono-node
+monitor: nightly          # plain code (monitor.yml): fresh-seed random phrases compared with chrono-node; issues for new mismatches
+intake: on_label          # plain code (intake.yml): factory:bug reports re-run through both implementations
+upstream_sync: daily      # plain code (upstream-sync.yml): new chrono-node releases → one issue each
+dependency_steward_sweep: hourly   # plain code: rejects borderline requests 24 h after the verdict (limits.yaml)
+release: manual           # plain code (release.yml): draft release after the owner approves; no crates.io publishing
 audit_chain_verifier: hourly  # factory repo, audit-verify: verifies the whole log, then appends one anchor (GitHub delivers ~every 2-5 h)
 audit_chain_verifier_warn_after_hours: 8    # dashboard amber
 audit_chain_verifier_alert_after_hours: 26  # dashboard red; heartbeat-watchdog alert
-factory_review:
-  every_days: 3           # proposes factory changes as draft PRs; the owner approves
+factory_review:           # improve.md (gh-aw): one report issue with at most 3 proposals; the owner decides
+  every_days: 3
   data_window_days: 7     # always a rolling 7-day window
   min_tasks_since_last_change_in_area: 15   # otherwise "no change"
 fire_drills: "weekly, at random times, from Stage 2; and after every factory change (dry-run first)"
