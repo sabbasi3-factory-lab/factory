@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalize } from '../lib.js';
 import {
-  LABEL, MARKER_STEP, MAX_AGE_MIN, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, describe, main, newestHeartbeat, planIssueActions, readPreviousVerdict,
-  readAudit, readVerifier, syncIssue,
+  LABEL, MARKER_STEP, MAX_AGE_MIN, SCHEDULED_WORKFLOWS, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, decideWorkflows, describe, main, newestHeartbeat,
+  planIssueActions, readPreviousVerdict, readAudit, readVerifier, readWorkflows, syncIssue,
 } from '../watchdog.mjs';
 
 const NOW = Date.parse('2026-10-16T12:00:00Z');
@@ -343,6 +343,7 @@ test('main checks the heartbeat and the verifier, in dry-run mode without writin
     [`/${SHA}/${YESTERDAY}`, { status: 404 }],
     ['/issues?state=open', { body: [{ number: 3, title: 'Controller heartbeat stale' }] }],
     ...(verifierRoute ? [[RUNS, verifierRoute]] : []),
+    ['/chrono-node-rs/actions/workflows/', { body: { workflow_runs: [wfRun(1, 'success')] } }],
   ];
   const env = { GITHUB_REPOSITORY: repo, WATCHDOG_DRY_RUN: '1' };
   const calls = [];
@@ -437,4 +438,80 @@ test('main writes failing=true|false for the marker step', async () => {
   assert.equal(r.liveness.alert, true);
   assert.equal(readFileSync(out, 'utf8'), 'failing=true\n');
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- scheduled workflows of chrono-node-rs (outcomes.yml failed ~5 h unnoticed, 2026-11-04) ----
+
+const wfRun = (id, conclusion, over = {}) => ({ id, status: 'completed', conclusion, head_branch: 'main', html_url: `https://github.com/sabbasi3-factory-lab/chrono-node-rs/actions/runs/${id}`, ...over });
+const allOk = (over = {}) => SCHEDULED_WORKFLOWS.map((workflow) => ({ workflow, status: 'ok', runs: [wfRun(9, 'success')], ...(over[workflow] ?? {}) }));
+
+test('scheduled workflows: two decisive failures in a row alert; skipped, cancelled and a single failure don\'t', () => {
+  assert.deepEqual(SCHEDULED_WORKFLOWS, ['outcomes.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml']);
+  const ok = decideWorkflows(allOk(), NOW);
+  assert.deepEqual([ok.alert, ok.reason], [false, 'scheduled-workflows-ok']);
+  const twice = decideWorkflows(allOk({ 'outcomes.yml': { runs: [wfRun(4, 'failure'), wfRun(3, 'cancelled'), wfRun(2, 'timed_out'), wfRun(1, 'success')] } }), NOW);
+  assert.deepEqual([twice.alert, twice.reason], [true, 'scheduled-workflow-failing']);
+  assert.deepEqual(twice.workflows.find((w) => w.workflow === 'outcomes.yml').last.map((r) => r.id), [4, 2]);
+  for (const runs of [
+    [wfRun(3, 'failure'), wfRun(2, 'success'), wfRun(1, 'failure')], // not in a row
+    [wfRun(3, 'skipped'), wfRun(2, 'cancelled'), wfRun(1, 'failure')], // only one decisive failure
+    [wfRun(3, 'success'), wfRun(2, 'failure'), wfRun(1, 'failure')], // recovered
+    [], // never ran (onboard.yml before its first schedule)
+  ]) {
+    assert.equal(decideWorkflows(allOk({ 'monitor.yml': { runs } }), NOW).alert, false, JSON.stringify(runs.map((r) => r.conclusion)));
+  }
+  assert.equal(decideWorkflows(allOk({ 'drills.yml': { runs: [wfRun(2, 'startup_failure'), wfRun(1, 'failure')] } }), NOW).alert, true);
+});
+
+test('scheduled workflows fail closed: unreadable, unexpected or missing alerts', () => {
+  assert.equal(decideWorkflows(allOk({ 'onboard.yml': { status: 'error', detail: 'HTTP 503' } }), NOW).reason, 'scheduled-workflow-unreadable');
+  assert.equal(decideWorkflows(allOk({ 'onboard.yml': { status: 'missing' } }), NOW).reason, 'scheduled-workflow-missing');
+  assert.equal(decideWorkflows(allOk({ 'onboard.yml': { runs: [wfRun(1, 'success', { head_branch: 'feature' })] } }), NOW).reason, 'scheduled-workflow-unreadable');
+  assert.equal(decideWorkflows(allOk().slice(1), NOW).reason, 'scheduled-workflow-unreadable', 'a workflow not read at all');
+});
+
+test('readWorkflows reads chrono-node-rs main runs per workflow; one bad read is that workflow\'s only', async () => {
+  const calls = [];
+  const fetch = fakeFetch([
+    ['/workflows/outcomes.yml/runs', { body: { workflow_runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }],
+    ['/workflows/monitor.yml/runs', { status: 503 }],
+    ['/workflows/onboard.yml/runs', () => new Error('reset')],
+    ['/workflows/upstream-sync.yml/runs', { body: { nope: 1 } }],
+    ['/workflows/drills.yml/runs', { body: { workflow_runs: [] } }],
+  ], calls);
+  const reads = await readWorkflows({ fetch, token: 't' });
+  assert.deepEqual(reads.map((r) => [r.workflow, r.status]), [['outcomes.yml', 'ok'], ['monitor.yml', 'error'], ['onboard.yml', 'error'], ['upstream-sync.yml', 'error'], ['drills.yml', 'ok']]);
+  assert.ok(calls.every((c) => c.url.startsWith('https://api.github.com/repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/') && c.url.endsWith('/runs?branch=main&status=completed&per_page=20')));
+});
+
+test('one issue covers a failing scheduled workflow too, and closes only when every check is healthy', () => {
+  const hbFresh = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(3)))), NOW);
+  const vFresh = verifierAt(30);
+  const failing = decideWorkflows(allOk({ 'outcomes.yml': { runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }), NOW);
+  const [create] = planIssueActions(combine(hbFresh, vFresh, failing), []);
+  assert.equal(create.op, 'create');
+  assert.match(create.body, /Failing: `scheduled-workflow-failing`\n/);
+  assert.match(create.body, /#### Scheduled workflows \(sabbasi3-factory-lab\/chrono-node-rs\)\n- `outcomes\.yml`: \*\*failing\*\* \(newest decisive runs: \[failure\]\(https:\/\/github\.com\/sabbasi3-factory-lab\/chrono-node-rs\/actions\/runs\/2\)/);
+  // A new issue still needs two failing watchdog runs in a row.
+  assert.deepEqual(planIssueActions(combine(hbFresh, vFresh, failing), [], null, 'healthy').map((a) => a.op), ['pending']);
+  const closing = planIssueActions(combine(hbFresh, vFresh, decideWorkflows(allOk(), NOW)), [{ number: 7 }]);
+  assert.deepEqual(closing.map((a) => a.op), ['comment', 'close']);
+  assert.match(closing[0].body, /^Heartbeat, audit verifier and scheduled workflows all healthy again/);
+});
+
+test('main checks the scheduled workflows (dry run)', async () => {
+  const routes = (wf) => [
+    ['/branches/audit', { body: { commit: { sha: SHA } } }],
+    [`/${SHA}/${TODAY}`, { body: line('heartbeat', minutesAgo(20)) }],
+    [`/${SHA}/${YESTERDAY}`, { status: 404 }],
+    ['/issues?state=open', { body: [] }],
+    [RUNS, { body: { workflow_runs: [run(50)] } }],
+    ['/chrono-node-rs/actions/workflows/', wf],
+  ];
+  const env = { GITHUB_REPOSITORY: 'example/factory', WATCHDOG_DRY_RUN: '1' };
+  const healthy = await main(env, fakeFetch(routes({ body: { workflow_runs: [wfRun(1, 'success')] } })), NOW);
+  assert.deepEqual([healthy.workflows.reason, healthy.liveness.alert], ['scheduled-workflows-ok', false]);
+  const broken = await main(env, fakeFetch(routes({ body: { workflow_runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } })), NOW);
+  assert.deepEqual([broken.workflows.reason, broken.liveness.failing], ['scheduled-workflow-failing', ['scheduled-workflow-failing']]);
+  assert.deepEqual(broken.actions.map((a) => a.op), ['create']);
 });

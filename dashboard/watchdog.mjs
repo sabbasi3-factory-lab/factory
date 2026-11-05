@@ -2,7 +2,9 @@
 //  - the controller's heartbeat is more than 12 hours old, missing, or can't be read
 //    (DESIGN §11), or
 //  - the factory's audit-verify workflow (independent audit-chain verifier) hasn't
-//    succeeded in 26 hours, has never succeeded, or its runs can't be read,
+//    succeeded in 26 hours, has never succeeded, or its runs can't be read, or
+//  - one of chrono-node-rs's scheduled workflows (SCHEDULED_WORKFLOWS) failed its two newest
+//    decisive runs on main in a row, or its runs can't be read,
 // on TWO consecutive watchdog runs. GitHub runs the "hourly" schedules of a Free-plan org
 // only every ~2–8 h (measured), so the limits are set from that, and one bad run (a slow
 // scheduler, a transient read error) never opens an issue on its own.
@@ -26,6 +28,12 @@ export const VERIFIER_WORKFLOW = 'audit-verify.yml'; // in the repo that holds t
 export const VERIFIER_MAX_AGE_MIN = 26 * 60; // alert after 26 h without a success
 export const WATCHDOG_WORKFLOW = 'heartbeat-watchdog.yml';
 export const WATCHDOG_JOB = 'watchdog';
+// chrono-node-rs's scheduled factory workflows: each alerts when its two newest decisive runs on
+// main (success or a failure; skipped and cancelled runs don't count) both failed. outcomes.yml
+// failed every run for ~5 h on 2026-11-04 with nobody told; its data feeds onboarding's stop rules.
+export const SCHEDULED_WORKFLOWS = ['outcomes.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml'];
+export const WORKFLOW_FAILURES_IN_A_ROW = 2;
+const DECISIVE = new Set(['success', 'failure', 'timed_out', 'startup_failure']);
 // Name of the workflow step that runs only when this run's verdict is "failing". The next run
 // reads it from the jobs API: success = the previous run was failing, skipped = it was healthy.
 export const MARKER_STEP = 'Liveness failing (marker for the next run)';
@@ -153,10 +161,47 @@ export function describeVerifier(v, runUrl = null) {
   return lines.join('\n');
 }
 
-/** Both checks together; the alert lasts while either fails. */
-export function combine(heartbeat, verifier) {
-  const failing = [heartbeat, verifier].filter((d) => d.alert).map((d) => d.reason);
-  return { status: failing.length ? 'alert' : 'ok', alert: failing.length > 0, failing, heartbeat, verifier };
+/**
+ * The scheduled workflows' state. reads: [{ workflow, status: 'ok' | 'missing' | 'error', runs?, detail? }],
+ * runs newest first as the API lists them. A workflow is failing when its WORKFLOW_FAILURES_IN_A_ROW
+ * newest decisive runs all failed; fewer decisive runs than that never alert (a new or rarely run
+ * workflow). Unreadable or missing alerts (fail closed), like the other checks.
+ */
+export function decideWorkflows(reads, now) {
+  const base = { checkedAt: new Date(now).toISOString().slice(0, 19) + 'Z', repo: SOURCE_REPO, inARow: WORKFLOW_FAILURES_IN_A_ROW };
+  const workflows = SCHEDULED_WORKFLOWS.map((workflow) => {
+    const r = (reads || []).find((x) => x?.workflow === workflow);
+    if (!r || r.status === 'error') return { workflow, status: 'unknown', detail: r?.detail ?? 'not read' };
+    if (r.status === 'missing') return { workflow, status: 'missing' };
+    const valid = (x) => Number.isSafeInteger(x?.id) && x.id > 0 && x.status === 'completed' && x.head_branch === 'main' && typeof x.conclusion === 'string';
+    if (!Array.isArray(r.runs) || !r.runs.every(valid)) return { workflow, status: 'unknown', detail: 'unexpected workflow runs response' };
+    const decisive = r.runs.filter((x) => DECISIVE.has(x.conclusion)).slice(0, WORKFLOW_FAILURES_IN_A_ROW);
+    const last = decisive.map((x) => ({ id: x.id, conclusion: x.conclusion, url: typeof x.html_url === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+$/.test(x.html_url) ? x.html_url : null }));
+    const failing = decisive.length === WORKFLOW_FAILURES_IN_A_ROW && decisive.every((x) => x.conclusion !== 'success');
+    return { workflow, status: failing ? 'failing' : 'ok', last };
+  });
+  const bad = workflows.filter((w) => w.status !== 'ok');
+  const has = (status) => bad.some((w) => w.status === status);
+  const reason = !bad.length ? 'scheduled-workflows-ok' : has('failing') ? 'scheduled-workflow-failing' : has('missing') ? 'scheduled-workflow-missing' : 'scheduled-workflow-unreadable';
+  return { ...base, status: bad.length ? 'alert' : 'ok', alert: bad.length > 0, reason, workflows };
+}
+
+export function describeWorkflows(w, runUrl = null) {
+  const runText = (x) => (x.url ? `[${x.conclusion}](${x.url})` : x.conclusion);
+  const lines = w.workflows.map((x) => {
+    if (x.status === 'unknown') return `- \`${x.workflow}\`: **unknown** (runs couldn't be read${x.detail ? `: ${x.detail}` : ''})`;
+    if (x.status === 'missing') return `- \`${x.workflow}\`: **missing** (HTTP 404)`;
+    return `- \`${x.workflow}\`: **${x.status}**${x.last.length ? ` (newest decisive runs: ${x.last.map(runText).join(', ')})` : ' (no decisive run yet)'}`;
+  });
+  lines.push(`- Checked: ${w.checkedAt}, ${w.repo} on main; alert after ${w.inARow} failures in a row`);
+  if (runUrl) lines.push(`- Watchdog run: ${runUrl}`);
+  return lines.join('\n');
+}
+
+/** Every check together; the alert lasts while any fails. `workflows` is optional (older callers). */
+export function combine(heartbeat, verifier, workflows = null) {
+  const failing = [heartbeat, verifier, workflows].filter((d) => d && d.alert).map((d) => d.reason);
+  return { status: failing.length ? 'alert' : 'ok', alert: failing.length > 0, failing, heartbeat, verifier, workflows };
 }
 
 // A bare heartbeat decision (from decide()) is still accepted and covers the heartbeat only.
@@ -173,6 +218,7 @@ export function describeLiveness(decision, runUrl = null) {
     '',
     `#### Audit verifier (\`${live.verifier.workflow}\`)`,
     describeVerifier(live.verifier),
+    ...(live.workflows ? ['', `#### Scheduled workflows (${live.workflows.repo})`, describeWorkflows(live.workflows)] : []),
     ...(runUrl ? ['', `Watchdog run: ${runUrl}`] : []),
   ].join('\n');
 }
@@ -197,11 +243,14 @@ export function planIssueActions(decision, openIssues, runUrl = null, previous =
       '',
       details,
       '',
+      ...(live.workflows ? [`It also checks ${SOURCE_REPO}'s scheduled workflows (${SCHEDULED_WORKFLOWS.map((w) => `\`${w}\``).join(', ')}): one fails the check when its ${WORKFLOW_FAILURES_IN_A_ROW} newest runs that succeeded or failed on main all failed.`, ''] : []),
       `The controller writes a \`heartbeat\` event about every hour, and \`${VERIFIER_WORKFLOW}\` verifies the audit log about every hour, but GitHub runs these schedules only every ~2–8 h on this plan. So the watchdog alerts after ${MAX_AGE_MIN / 60} h without a heartbeat or ${VERIFIER_MAX_AGE_MIN / 60} h without a verification, and only when two watchdog runs in a row agree. This issue is updated by the watchdog and closed automatically when every check is healthy again.`,
     ].join('\n');
     return [{ op: 'create', title: TITLE, body, labels: [LABEL] }];
   }
-  const recovered = live.verifier ? 'Heartbeat and audit verifier both healthy again. Closing.' : 'Heartbeat fresh again. Closing.';
+  const recovered = live.workflows
+    ? 'Heartbeat, audit verifier and scheduled workflows all healthy again. Closing.'
+    : live.verifier ? 'Heartbeat and audit verifier both healthy again. Closing.' : 'Heartbeat fresh again. Closing.';
   return open.flatMap((i) => [
     { op: 'comment', number: i.number, body: `${recovered}\n\n${details}` },
     { op: 'close', number: i.number },
@@ -286,6 +335,27 @@ export async function readVerifier({ fetch, token = null, repo }) {
 }
 
 /**
+ * The newest completed runs on main of each scheduled workflow in `repo` (chrono-node-rs, public:
+ * read with this repo's token). One failed read is that workflow's 'error', never the others'.
+ */
+export async function readWorkflows({ fetch, token = null, repo = SOURCE_REPO }) {
+  return Promise.all(
+    SCHEDULED_WORKFLOWS.map(async (workflow) => {
+      try {
+        const res = await fetch(`${API}/repos/${repo}/actions/workflows/${workflow}/runs?branch=main&status=completed&per_page=20`, { headers: apiHeaders(token) });
+        if (res.status === 404) return { workflow, status: 'missing' };
+        if (!res.ok) return { workflow, status: 'error', detail: `HTTP ${res.status}` };
+        const body = await res.json().catch(() => null);
+        if (!body || !Array.isArray(body.workflow_runs)) return { workflow, status: 'error', detail: 'unexpected workflow runs response' };
+        return { workflow, status: 'ok', runs: body.workflow_runs };
+      } catch (err) {
+        return { workflow, status: 'error', detail: `network: ${err?.message ?? err}` };
+      }
+    }),
+  );
+}
+
+/**
  * The verdict of the previous completed watchdog run on main (not this one): 'failing' when
  * its marker step ran, 'healthy' only when the marker step was skipped AND the job succeeded,
  * 'unknown' otherwise (the job failed or was cancelled, no earlier run, an older run without
@@ -356,13 +426,14 @@ export async function main(env = process.env, fetchImpl = globalThis.fetch, now 
   const audit = await readAudit({ fetch: fetchImpl, now, token });
   const decision = decide(audit, now);
   const verifier = decideVerifier(await readVerifier({ fetch: fetchImpl, token, repo }), now);
-  const liveness = combine(decision, verifier);
+  const workflows = decideWorkflows(await readWorkflows({ fetch: fetchImpl, token }), now);
+  const liveness = combine(decision, verifier, workflows);
   const previous = await readPreviousVerdict({ fetch: fetchImpl, token, repo, currentRunId: env.GITHUB_RUN_ID ?? null });
   const actions = await syncIssue({ fetch: fetchImpl, token, repo, decision: liveness, runUrl, dryRun, previous });
   // The workflow's marker step runs only when this run is failing; the next run reads it.
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `failing=${liveness.alert ? 'true' : 'false'}\n`);
   const summary = [
-    `### Liveness watchdog: ${liveness.status} (heartbeat ${decision.status}, verifier ${verifier.status})`,
+    `### Liveness watchdog: ${liveness.status} (heartbeat ${decision.status}, verifier ${verifier.status}, scheduled workflows ${workflows.status})`,
     '',
     describeLiveness(liveness, runUrl),
     '',
@@ -370,7 +441,7 @@ export async function main(env = process.env, fetchImpl = globalThis.fetch, now 
   ].join('\n');
   console.log(summary);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, summary + '\n');
-  return { decision, verifier, liveness, actions, previous };
+  return { decision, verifier, workflows, liveness, actions, previous };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
