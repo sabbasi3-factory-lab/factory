@@ -5,10 +5,12 @@
 # issue; loosening any rule is the owner's decision (a reviewed PR here).
 version: 1
 # Owner-approved waves 2-3 (2026-11-04). Finnish first, as the pipeline's proof. Italian and
-# Vietnamese are left out for now: the generator refuses them (steps no upstream test or generated
-# phrase reaches: ITMergeRelativeAfterDateRefiner, ITUnlikelyFormatFilter,
-# VIMergeWeekdayComponentRefiner), so they need a hand decision first.
-languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant]
+# Vietnamese last (2026-11-06, owner: "keep running 24/7 until everything has been ported over"):
+# chrono-node-rs harness/onboard/hints.yaml covers the three steps the generator used to refuse
+# (trace-checked seeds for ITMergeRelativeAfterDateRefiner; ITUnlikelyFormatFilter and
+# VIMergeWeekdayComponentRefiner verified unreachable, ported against unit cases). Until that
+# generator change is pinned on main, onboarding them fails closed in the generate job.
+languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant, it, vi]
 # A language with open task issues counts as in flight, and so does one with a contract that has no
 # task issue yet (past 2 h after its onboarding PR merged, that stops: alert).
 max_languages_in_flight: 1
