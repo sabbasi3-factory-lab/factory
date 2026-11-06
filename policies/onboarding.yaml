@@ -1,20 +1,25 @@
 # Language onboarding (chrono-node-rs harness/onboard, .github/workflows/onboard.yml). Plain code
-# reads this; nothing here is AI-decided. The scheduled pipeline onboards the next language of
-# `languages` that isn't onboarded yet, one at a time, and stops on the rules below. A stop opens a
-# factory:alert issue; loosening any rule is the owner's decision (a reviewed PR here).
+# reads this; nothing here is AI-decided. The pipeline onboards the next language of `languages` that
+# isn't onboarded yet, one at a time, and stops on the rules below. It decides when a task issue
+# closes (a language's last task starts the next one) and hourly. A stop opens a factory:alert
+# issue; loosening any rule is the owner's decision (a reviewed PR here).
 version: 1
 # Owner-approved waves 2-3 (2026-11-04). Finnish first, as the pipeline's proof. Italian and
 # Vietnamese are left out for now: the generator refuses them (steps no upstream test or generated
 # phrase reaches: ITMergeRelativeAfterDateRefiner, ITUnlikelyFormatFilter,
 # VIMergeWeekdayComponentRefiner), so they need a hand decision first.
 languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant]
-max_languages_in_flight: 1   # a language with open task issues counts as in flight
+# A language with open task issues counts as in flight, and so does one with a contract that has no
+# task issue yet (past 2 h after its onboarding PR merged, that stops: alert).
+max_languages_in_flight: 1
 stop:
-  # AI Credits spent by all agent runs (implement, repair, review) on generated locales' tasks,
-  # from gh-aw Outcomes (outcomes.json). Waves 2-3 total.
+  # AI Credits spent by all agent runs (implement, repair, triage, review) on generated locales'
+  # tasks: each run's full cost (agent, threat detection, evals) from the controller's audit log
+  # (run_spend). Waves 2-3 total.
   budget_aic: 10000
   # First-try merges / merged tasks of generated locales (first try: one implement run, no repair,
-  # PR accepted zero-touch), once at least min_sample tasks merged.
+  # PR merged zero-touch: no comment, review or commit by a person), once at least min_sample tasks
+  # merged.
   min_first_try_merge_rate: 0.8
   min_sample: 5
   # Open needs-human task issues of generated locales (a cluster).

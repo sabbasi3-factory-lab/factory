@@ -68,9 +68,13 @@ intake_fixes:
 # files are exactly that output, ci and gates are green, and fewer than max_per_day merged or were
 # queued today (UTC); otherwise the owner decides. Coordinator decision 2026-11-04 under the owner's
 # goal ("automate as much as we can ... with good quality checks and guardrails"); pending owner review.
+# max_per_day 1 -> 4 (2026-11-06), owner: "keep running 24/7 until everything has been ported over".
+# Onboarding now decides when a language's last task closes (one language in flight at a time, about
+# 3 h each), so 4 allows back-to-back languages; with 6 left, a higher cap would never bind, and 4
+# stays a backstop if the in-flight check were ever wrong.
 onboarding:
   auto_merge: true
-  max_per_day: 1
+  max_per_day: 4
 
 protected_from_agents:   # agents' changes to these paths are rejected outright
   - ".github/**"
