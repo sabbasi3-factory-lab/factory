@@ -10,11 +10,12 @@ version: 1
 # (trace-checked seeds for ITMergeRelativeAfterDateRefiner; ITUnlikelyFormatFilter and
 # VIMergeWeekdayComponentRefiner verified unreachable, ported against unit cases). Until that
 # generator change is pinned on main, onboarding them fails closed in the generate job.
-languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant, it, vi]
+# vi ported outside the factory as an A/B experiment (owner, 2026-11-09).
+languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant, it]
 # A language with open task issues counts as in flight, and so does one with a contract that has no
 # task issue yet (past 2 h after its onboarding PR merged, that stops: alert).
 # 5 (was 1): the owner's decision of 2026-11-09 ("take that guardrail out"). It covers every language
-# left (ar, zh-hans, zh-hant, it, vi), so it never binds; onboarding PRs still go one at a time, at
+# left (ar, zh-hans, zh-hant, it), so it never binds; onboarding PRs still go one at a time, at
 # most tiers.yaml onboarding.max_per_day a day, and the stop rules below are unchanged.
 max_languages_in_flight: 5
 stop:
