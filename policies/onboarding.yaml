@@ -11,16 +11,18 @@ version: 1
 # VIMergeWeekdayComponentRefiner verified unreachable, ported against unit cases). Until that
 # generator change is pinned on main, onboarding them fails closed in the generate job.
 # vi ported outside the factory as an A/B experiment (owner, 2026-11-09).
-languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant, it]
+# it is the factory v2 pilot (owner, 2026-11-09).
+languages: [fi, id, nl, ru, uk, ar, zh-hans, zh-hant]
 # vi ported outside the factory as an A/B experiment (owner, 2026-11-09). An external locale may be
 # generated on main (its oracle, golden cases and code, so CI checks it), but the factory never runs
 # it: no onboarding decision picks it, no task issues are created for it, the controller dispatches
 # nothing for it, and the onboarding stop rules and in-flight count leave it out.
-external_locales: [vi]
+# it is the factory v2 pilot (owner, 2026-11-09).
+external_locales: [vi, it]
 # A language with open task issues counts as in flight, and so does one with a contract that has no
 # task issue yet (past 2 h after its onboarding PR merged, that stops: alert).
 # 5 (was 1): the owner's decision of 2026-11-09 ("take that guardrail out"). It covers every language
-# left (ar, zh-hans, zh-hant, it), so it never binds; onboarding PRs still go one at a time, at
+# left (ar, zh-hans, zh-hant, it at the time), so it never binds; onboarding PRs still go one at a time, at
 # most tiers.yaml onboarding.max_per_day a day, and the stop rules below are unchanged.
 max_languages_in_flight: 5
 stop:
