@@ -121,6 +121,14 @@ test('cost: build sessions plus agent runs, bounded runs at what they recorded a
   assert.deepEqual([c.v1_aic, c.v1_bounded_runs, c.v1_bounded_aic, c.v1_bounded_cap_aic, c.v1_unknown, c.v2_aic, c.v2_unknown, c.runs_aic], [42, 1, 4, 2600, 1, 384, 1, 427]);
 });
 
+test('build-cost.json: the breakdown adds up to the total, and no token counts without a source', () => {
+  const build = JSON.parse(readFileSync(new URL('../build-cost.json', import.meta.url), 'utf8'));
+  assert.equal(build.breakdown.reduce((n, b) => n + b.ai_units, 0), build.ai_units);
+  assert.match(build.as_of, /^\d{4}-\d{2}-\d{2}$/);
+  // Session usage checkpoints give AIC only: token and call counts stopped on 2026-10-30.
+  assert.equal(build.tokens, undefined);
+});
+
 test('drills: the journal record and the canary (only live checks and failures count; dry and cancelled runs aside)', () => {
   const record = JSON.parse(readFileSync(new URL('../drills.json', import.meta.url), 'utf8'));
   const d = drills(record, [

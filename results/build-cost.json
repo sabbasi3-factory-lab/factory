@@ -1,13 +1,12 @@
 {
-  "ai_units": 141720,
-  "usd": 1417,
-  "as_of": "2026-10-30",
-  "source": "build journal (coordinator + build sessions)",
+  "ai_units": 255474,
+  "usd": 2555,
+  "as_of": "2026-11-10",
+  "source": "build journal (coordinator + all factory build sessions, from session usage checkpoints)",
   "breakdown": [
     { "who": "Research (gh-aw deep dive, deck, audits)", "ai_units": 20460 },
-    { "who": "Coordinator: planning, reviews, merges, deck & journal", "ai_units": 51323 },
-    { "who": "Build session: wrote the factory (87 PRs)", "ai_units": 69937 }
+    { "who": "Coordinator: planning, reviews, merges, deck & journal", "ai_units": 109883 },
+    { "who": "Build sessions: wrote and ran the factory (18 sessions)", "ai_units": 125131 }
   ],
-  "tokens": { "input": 2423700000, "output": 6557000, "calls": 6407 },
   "model": "claude-opus-5.5"
 }
