@@ -1,0 +1,16 @@
+:root { color-scheme: light dark; --bg: #f5f6fa; --card: #fff; --line: #e6e8f0; --text: #1f2433; --muted: #5d6476; --accent: #4b4ed6; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0e1117; --card: #161a22; --line: #252b36; --text: #e6e8ee; --muted: #9aa3b2; --accent: #a5a8ff; } }
+body { margin: 0 auto; max-width: 1100px; padding: 24px; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 28px 0 8px; }
+.muted { color: var(--muted); font-weight: 400; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.label { font-size: 13px; color: var(--muted); }
+.big { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+th, td { padding: 7px 12px; border-bottom: 1px solid var(--line); text-align: left; }
+thead th { font-size: 13px; color: var(--muted); font-weight: 500; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+footer { margin-top: 28px; font-size: 13px; }

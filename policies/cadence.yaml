@@ -5,10 +5,11 @@ heartbeat: hourly         # proves the controller is alive; no-change polls are 
 # and "hourly" crons ran every 2-8 h (heartbeat gaps: median 2.4 h, p90 4.4 h, max 7.6 h).
 # Liveness limits are set from that, so a slow scheduler isn't an outage. Loosening them is a
 # human decision (the factory never loosens its own alerts).
-heartbeat_warn_after_hours: 8     # dashboard amber
-heartbeat_alert_after_hours: 12   # dashboard red; heartbeat-watchdog alert (factory repo)
+heartbeat_warn_after_hours: 8     # warning level (CAO shows operations; no dashboard since 2026-11-10)
+heartbeat_alert_after_hours: 12   # heartbeat-watchdog alert (factory repo)
 liveness_alert_consecutive_runs: 2  # the watchdog opens an issue only after 2 failing runs in a row
-outcomes_collector: daily # gh aw outcomes + gh aw logs -> acceptance, zero-touch, cost per merged PR -> audit log + dashboard
+# outcomes_collector: retired 2026-11-10. CAO (sabbasi3-factory-lab/cao-control) covers agent operations;
+# the factory review reads `gh aw logs --outcomes`; the results page (results/) shows delivery.
 daily_digest: daily       # one-page summary mentioning the owner: merged/failed, needs-you, spend, drills, anomalies
 monitor: nightly          # plain code (monitor.yml): fresh-seed random phrases compared with chrono-node; issues for new mismatches
 intake: on_label          # plain code (intake.yml): factory:bug reports re-run through both implementations
@@ -16,8 +17,8 @@ upstream_sync: daily      # plain code (upstream-sync.yml): new chrono-node rele
 dependency_steward_sweep: hourly   # plain code: rejects borderline requests 24 h after the verdict (limits.yaml)
 release: manual           # plain code (release.yml): draft release after the owner approves; no crates.io publishing
 audit_chain_verifier: hourly  # factory repo, audit-verify: verifies the whole log, then appends one anchor (GitHub delivers ~every 2-5 h)
-audit_chain_verifier_warn_after_hours: 8    # dashboard amber
-audit_chain_verifier_alert_after_hours: 26  # dashboard red; heartbeat-watchdog alert
+audit_chain_verifier_warn_after_hours: 8    # warning level
+audit_chain_verifier_alert_after_hours: 26  # heartbeat-watchdog alert
 factory_review:           # improve.md (gh-aw): one report issue with at most 3 proposals; the owner decides
   every_days: 3
   data_window_days: 7     # always a rolling 7-day window

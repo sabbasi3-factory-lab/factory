@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { canonicalize } from '../lib.js';
+import { canonicalize } from '../audit.mjs';
 import {
   LABEL, MARKER_STEP, MAX_AGE_MIN, SCHEDULED_WORKFLOWS, TITLE, VERIFIER_MAX_AGE_MIN, combine, decide, decideVerifier, decideWorkflows, describe, main, newestHeartbeat,
   planIssueActions, readPreviousVerdict, readAudit, readVerifier, readWorkflows, syncIssue,
@@ -426,7 +426,7 @@ test('readPreviousVerdict: the marker step of the previous completed run on main
 test('the workflow\'s marker step matches MARKER_STEP and runs only when failing', () => {
   const wf = readFileSync(new URL('../../.github/workflows/heartbeat-watchdog.yml', import.meta.url), 'utf8');
   assert.ok(wf.includes(`- name: ${MARKER_STEP}\n        if: steps.watch.outputs.failing == 'true'`));
-  assert.match(wf, /id: watch\n\s+run: node dashboard\/watchdog\.mjs/);
+  assert.match(wf, /id: watch\n\s+run: node watchdog\/watchdog\.mjs/);
 });
 
 test('main writes failing=true|false for the marker step', async () => {
@@ -440,18 +440,18 @@ test('main writes failing=true|false for the marker step', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-// --- scheduled workflows of chrono-node-rs (outcomes.yml failed ~5 h unnoticed, 2026-11-04) ----
+// --- scheduled workflows of chrono-node-rs (outcomes.yml failed ~5 h unnoticed, 2026-11-04; retired 2026-11-10) ----
 
 const wfRun = (id, conclusion, over = {}) => ({ id, status: 'completed', conclusion, head_branch: 'main', html_url: `https://github.com/sabbasi3-factory-lab/chrono-node-rs/actions/runs/${id}`, ...over });
 const allOk = (over = {}) => SCHEDULED_WORKFLOWS.map((workflow) => ({ workflow, status: 'ok', runs: [wfRun(9, 'success')], ...(over[workflow] ?? {}) }));
 
 test('scheduled workflows: two decisive failures in a row alert; skipped, cancelled and a single failure don\'t', () => {
-  assert.deepEqual(SCHEDULED_WORKFLOWS, ['outcomes.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml']);
+  assert.deepEqual(SCHEDULED_WORKFLOWS, ['watchdog.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml']);
   const ok = decideWorkflows(allOk(), NOW);
   assert.deepEqual([ok.alert, ok.reason], [false, 'scheduled-workflows-ok']);
-  const twice = decideWorkflows(allOk({ 'outcomes.yml': { runs: [wfRun(4, 'failure'), wfRun(3, 'cancelled'), wfRun(2, 'timed_out'), wfRun(1, 'success')] } }), NOW);
+  const twice = decideWorkflows(allOk({ 'watchdog.yml': { runs: [wfRun(4, 'failure'), wfRun(3, 'cancelled'), wfRun(2, 'timed_out'), wfRun(1, 'success')] } }), NOW);
   assert.deepEqual([twice.alert, twice.reason], [true, 'scheduled-workflow-failing']);
-  assert.deepEqual(twice.workflows.find((w) => w.workflow === 'outcomes.yml').last.map((r) => r.id), [4, 2]);
+  assert.deepEqual(twice.workflows.find((w) => w.workflow === 'watchdog.yml').last.map((r) => r.id), [4, 2]);
   for (const runs of [
     [wfRun(3, 'failure'), wfRun(2, 'success'), wfRun(1, 'failure')], // not in a row
     [wfRun(3, 'skipped'), wfRun(2, 'cancelled'), wfRun(1, 'failure')], // only one decisive failure
@@ -473,25 +473,25 @@ test('scheduled workflows fail closed: unreadable, unexpected or missing alerts'
 test('readWorkflows reads chrono-node-rs main runs per workflow; one bad read is that workflow\'s only', async () => {
   const calls = [];
   const fetch = fakeFetch([
-    ['/workflows/outcomes.yml/runs', { body: { workflow_runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }],
+    ['/workflows/watchdog.yml/runs', { body: { workflow_runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }],
     ['/workflows/monitor.yml/runs', { status: 503 }],
     ['/workflows/onboard.yml/runs', () => new Error('reset')],
     ['/workflows/upstream-sync.yml/runs', { body: { nope: 1 } }],
     ['/workflows/drills.yml/runs', { body: { workflow_runs: [] } }],
   ], calls);
   const reads = await readWorkflows({ fetch, token: 't' });
-  assert.deepEqual(reads.map((r) => [r.workflow, r.status]), [['outcomes.yml', 'ok'], ['monitor.yml', 'error'], ['onboard.yml', 'error'], ['upstream-sync.yml', 'error'], ['drills.yml', 'ok']]);
+  assert.deepEqual(reads.map((r) => [r.workflow, r.status]), [['watchdog.yml', 'ok'], ['monitor.yml', 'error'], ['onboard.yml', 'error'], ['upstream-sync.yml', 'error'], ['drills.yml', 'ok']]);
   assert.ok(calls.every((c) => c.url.startsWith('https://api.github.com/repos/sabbasi3-factory-lab/chrono-node-rs/actions/workflows/') && c.url.endsWith('/runs?branch=main&status=completed&per_page=20')));
 });
 
 test('one issue covers a failing scheduled workflow too, and closes only when every check is healthy', () => {
   const hbFresh = decide(audit(ok(TODAY, line('heartbeat', minutesAgo(3)))), NOW);
   const vFresh = verifierAt(30);
-  const failing = decideWorkflows(allOk({ 'outcomes.yml': { runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }), NOW);
+  const failing = decideWorkflows(allOk({ 'watchdog.yml': { runs: [wfRun(2, 'failure'), wfRun(1, 'failure')] } }), NOW);
   const [create] = planIssueActions(combine(hbFresh, vFresh, failing), []);
   assert.equal(create.op, 'create');
   assert.match(create.body, /Failing: `scheduled-workflow-failing`\n/);
-  assert.match(create.body, /#### Scheduled workflows \(sabbasi3-factory-lab\/chrono-node-rs\)\n- `outcomes\.yml`: \*\*failing\*\* \(newest decisive runs: \[failure\]\(https:\/\/github\.com\/sabbasi3-factory-lab\/chrono-node-rs\/actions\/runs\/2\)/);
+  assert.match(create.body, /#### Scheduled workflows \(sabbasi3-factory-lab\/chrono-node-rs\)\n- `watchdog\.yml`: \*\*failing\*\* \(newest decisive runs: \[failure\]\(https:\/\/github\.com\/sabbasi3-factory-lab\/chrono-node-rs\/actions\/runs\/2\)/);
   // A new issue still needs two failing watchdog runs in a row.
   assert.deepEqual(planIssueActions(combine(hbFresh, vFresh, failing), [], null, 'healthy').map((a) => a.op), ['pending']);
   const closing = planIssueActions(combine(hbFresh, vFresh, decideWorkflows(allOk(), NOW)), [{ number: 7 }]);
