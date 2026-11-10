@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { cost, drills, languages, prLanguage, summarize, v1Spend, zeroTouch } from '../lib.mjs';
+import { cost, drills, languages, prLanguage, summarize, v1Spend, v2RunUsage, zeroTouch } from '../lib.mjs';
 
 const paths = [
   'src/locales/en/mod.rs', 'src/locales/ar/locale.json', 'src/locales/ar/mod.rs', 'src/locales/zh_hans/locale.json',
@@ -38,12 +38,18 @@ test('prLanguage: task, v2 and external PR titles', () => {
   assert.equal(prLanguage('README: status before 0.1.0'), null);
 });
 
-test('summarize: per-language work, hands-off and time; drills left out; reverts listed', () => {
-  const langs = languages(paths).filter((l) => l.code !== 'zh-hans');
+test('summarize: per-language work, hands-off and time; drills left out; cancelled tasks never shipped; shared core counted; reverts listed', () => {
+  const langs = languages(paths);
   const issues = [
-    { title: 'ar/a: Port A', state: 'closed', closed_at: '2026-11-07T09:00:00Z' },
-    { title: 'ar/b: Port B', state: 'closed', closed_at: '2026-11-07T10:00:00Z' },
+    { title: 'ar/a: Port A', state: 'closed', state_reason: 'completed', closed_at: '2026-11-07T09:00:00Z' },
+    { title: 'ar/b: Port B', state: 'closed', state_reason: 'completed', closed_at: '2026-11-07T10:00:00Z' },
+    // Cancelled after the last completed task: neither shipped nor the end of ar's time.
+    { title: 'ar/c: Port C', state: 'closed', state_reason: 'not_planned', closed_at: '2026-11-08T10:00:00Z' },
     { title: 'en/x: Port X', state: 'open', created_at: '2026-10-20T00:00:00Z', closed_at: null },
+    // A language whose only task was cancelled isn't shipped.
+    { title: 'zh-hans/a: Port A', state: 'closed', state_reason: 'not_planned', created_at: '2026-11-01T00:00:00Z', closed_at: '2026-11-02T00:00:00Z' },
+    { title: 'common/overlap-removal-refiner: Port', state: 'closed', state_reason: 'completed', closed_at: '2026-10-21T00:00:00Z' },
+    { title: 'common/cancelled: Port', state: 'closed', state_reason: 'not_planned', closed_at: '2026-10-21T00:00:00Z' },
     { title: 'drill/activation-canary: canary', state: 'closed', closed_at: '2026-11-01T01:00:00Z' },
   ];
   const merged = [
@@ -66,32 +72,63 @@ test('summarize: per-language work, hands-off and time; drills left out; reverts
   ];
   const s = summarize({ langs, issues, merged, agentPrs });
   const row = (c) => s.rows.find((r) => r.code === c);
-  assert.deepEqual(row('ar'), { code: 'ar', method: 'v1 (generated onboarding)', steps: 2, tasks: 2, tasks_done: 2, prs: 2, agent_prs: 2, hands_off: 1, finished: true, hours: 4 });
-  assert.deepEqual([row('en').finished, row('en').hours], [false, null]);
+  assert.deepEqual(row('ar'), { code: 'ar', method: 'v1 (generated onboarding)', steps: 2, tasks: 3, tasks_done: 2, tasks_cancelled: 1, prs: 2, agent_prs: 2, hands_off: 1, hands_off_known: 2, finished: true, hours: 4 });
+  assert.deepEqual([row('zh-hans').tasks_done, row('zh-hans').tasks_cancelled, row('zh-hans').finished, row('zh-hans').hours], [0, 1, false, null]);
+  // en/y's zero-touch is unknown: in neither the hands-off count nor its known denominator.
+  assert.deepEqual([row('en').finished, row('en').hours, row('en').agent_prs, row('en').hands_off, row('en').hands_off_known], [false, null, 1, 0, 0]);
   assert.deepEqual([row('it').prs, row('it').hands_off, row('it').hours, row('it').finished], [1, 1, 1.6, true]);
   // vi: from its oracle's merge (22:03) to its last port merge (22:31); not agent PRs.
   assert.deepEqual([row('vi').prs, row('vi').agent_prs, row('vi').hours], [2, 0, 0.5]);
-  assert.deepEqual(s.totals, { languages: 4, finished: 3, tasks_done: 2, agent_prs: 4, hands_off: 2, hands_off_known: 3, reverts: 1, drill_reverts: 1 });
+  assert.deepEqual(s.totals, { languages: 5, finished: 3, tasks_done: 3, core_tasks_done: 1, agent_prs: 4, hands_off: 2, hands_off_known: 3, reverts: 1, drill_reverts: 1 });
   assert.deepEqual(s.reverts, [
     { number: 130, title: 'Revert #129', merged_at: '2026-10-28T10:00:00Z', drill: false },
     { number: 126, title: 'Revert #125 (factory auto-revert)', merged_at: '2026-10-27T16:18:48Z', drill: true },
   ]);
 });
 
-test('cost: build sessions plus measured runs (final run_spend per run; dry runs never count)', () => {
-  const ev = (run_id, aic, dry_run = false) => ({ type: 'run_spend', payload: { run_id, aic, dry_run } });
-  const v1 = v1Spend([ev(1, 10), ev(1, 12), ev(2, 30.4), ev(3, 99, true), { type: 'spend_snapshot', payload: { dry_run: false, runs: [{ run_id: 4, aic: 2600 }] } }]);
-  assert.deepEqual(v1, { runs: 2, aic: 42.4 });
+test('v1Spend: newest final run_spend per run, else its newest snapshot (no reservations); bounded at what it recorded', () => {
+  const ev = (run_id, aic, extra = {}) => ({ type: 'run_spend', payload: { run_id, aic, dry_run: false, status: 'measured', ...extra } });
+  const snapshot = (dry_run, runs) => ({ type: 'spend_snapshot', payload: { dry_run, runs } });
+  const v1 = v1Spend([
+    snapshot(false, [{ run_id: 1, status: 'reserved', aic: 2600 }, { run_id: 5, status: 'reserved', aic: 2600 }, { run_id: 6, status: 'measured', aic: 3 }]),
+    ev(1, 10), ev(1, 12), ev(2, 30.4),
+    ev(3, 99, { dry_run: true }),
+    ev(4, 2600, { status: 'bounded', reason: 'usage_file_missing', readable_aic: 59.5, observed_aic: 46.5 }),
+    ev(7, 2600, { status: 'bounded', reason: 'rerun' }),
+    ev(8, 0, { status: 'no_inference' }),
+    // Run 5 finished before run_spend existed: its newest snapshot counts; run 6's measurement too.
+    snapshot(true, [{ run_id: 5, status: 'measured', aic: 20 }, { run_id: 9, status: 'bounded', aic: 2600, readable_aic: 1, observed_aic: 4 }]),
+  ]);
+  assert.deepEqual(v1, { runs: 7, aic: 12 + 30.4 + 59.5 + 0 + 20 + 3 + 4, measured_runs: 5, from_snapshots: 3, bounded_runs: 2, bounded_aic: 63.5, bounded_cap_aic: 5200, unknown: 1 });
+});
+
+test('v2RunUsage: every AI job that ran needs its usage; incomplete or malformed is unknown, never 0', () => {
+  const line = (v, t) => JSON.stringify({ ai_credits_this_response: v, ...(t === undefined ? {} : { ai_credits_total: t }) });
+  const files = { agent: `${line(100, 100)}\n${line(81, 181)}\n`, detection: line(11.5), evals: line(1.25) };
+  assert.equal(v2RunUsage(files, ['agent', 'detection', 'evals']), 193.75);
+  assert.equal(v2RunUsage({ agent: files.agent }, ['agent', 'detection']), null);
+  assert.equal(v2RunUsage({ ...files, detection: '' }, ['agent', 'detection']), null);
+  assert.equal(v2RunUsage({ agent: `${line(100, 100)}\n${line(81, 300)}` }, ['agent']), null);
+  assert.equal(v2RunUsage({ agent: '{bad' }, ['agent']), null);
+  assert.equal(v2RunUsage({ agent: line(-1) }, ['agent']), null);
+});
+
+test('cost: build sessions plus agent runs, bounded runs at what they recorded and caps beside them', () => {
+  const v1 = { runs: 3, aic: 42.4, bounded_runs: 1, bounded_aic: 4, bounded_cap_aic: 2600, unknown: 1 };
   const build = JSON.parse(readFileSync(new URL('../build-cost.json', import.meta.url), 'utf8'));
   const c = cost(build, v1, { runs: 2, aic: 384.25, unknown: 1 });
   assert.equal(c.total_aic, Math.round(build.ai_units + 42.4 + 384.25));
-  assert.deepEqual([c.v1_aic, c.v2_aic, c.v2_unknown, c.runs_aic], [42, 384, 1, 427]);
+  assert.deepEqual([c.v1_aic, c.v1_bounded_runs, c.v1_bounded_aic, c.v1_bounded_cap_aic, c.v1_unknown, c.v2_aic, c.v2_unknown, c.runs_aic], [42, 1, 4, 2600, 1, 384, 1, 427]);
 });
 
-test('drills: the journal record and the canary (cancelled runs aside)', () => {
+test('drills: the journal record and the canary (only live checks and failures count; dry and cancelled runs aside)', () => {
   const record = JSON.parse(readFileSync(new URL('../drills.json', import.meta.url), 'utf8'));
-  const d = drills(record, [{ conclusion: 'success' }, { conclusion: 'failure' }, { conclusion: 'cancelled' }]);
-  assert.deepEqual([d.fire_drills_passed, d.fire_drills, d.canary_passed, d.canary_runs], [record.runs.filter((r) => r.result === 'pass').length, record.runs.length, 1, 2]);
+  const d = drills(record, [
+    { conclusion: 'success', checked: true }, { conclusion: 'failure', checked: null }, { conclusion: 'cancelled', checked: null },
+    { conclusion: 'success', checked: false }, { conclusion: 'success', checked: false }, { conclusion: 'success', checked: null },
+  ]);
+  assert.deepEqual([d.fire_drills_passed, d.fire_drills], [record.runs.filter((r) => r.result === 'pass').length, record.runs.length]);
+  assert.deepEqual([d.canary_passed, d.canary_runs, d.canary_dry, d.canary_unknown], [1, 2, 2, 1]);
 });
 
 test('the page links CAO for operations and loads only same-origin data under a strict CSP', () => {

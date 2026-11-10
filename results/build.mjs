@@ -1,14 +1,16 @@
 // Results page data: reads what chrono-node-rs already records and writes data.json for the page.
 // Plain code, Node built-ins only, read-only token (the source repo is public).
 //
-//   GH_TOKEN=... node results/build.mjs --out site/data.json [--v2 v2-runs.json]
+//   GH_TOKEN=... node results/build.mjs --out site/data.json [--v2 DIR]
 //
 // Sources: the repo tree (languages, contracts), factory:task issues, merged PRs, the agent PRs'
 // comments, reviews and commits (GraphQL: hands-off), the controller's audit log (`run_spend`: v1
-// agent-run cost), the v2 runs' usage (--v2, from the workflow step), agentic-canary runs, and this
+// agent-run cost), the v2 runs' usage artifacts (--v2 DIR: runs.json plus one usage directory per
+// run, downloaded by the workflow step), agentic-canary runs and their jobs, and this
 // directory's build-cost.json and drills.json.
-import { readFileSync, writeFileSync } from 'node:fs';
-import { SOURCE_REPO, CAO_URL, cost, drills, languages, summarize, v1Spend, zeroTouch } from './lib.mjs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { SOURCE_REPO, CAO_URL, cost, drills, languages, summarize, v1Spend, v2RunUsage, zeroTouch } from './lib.mjs';
 
 const API = 'https://api.github.com';
 const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
@@ -45,7 +47,7 @@ const langs = languages(tree.tree.map((t) => t.path));
 
 const issues = (await pages(`${R}/issues?labels=factory:task&state=all`))
   .filter((i) => !i.pull_request)
-  .map((i) => ({ title: i.title, state: i.state, created_at: i.created_at, closed_at: i.closed_at }));
+  .map((i) => ({ title: i.title, state: i.state, state_reason: i.state_reason, created_at: i.created_at, closed_at: i.closed_at }));
 
 const merged = (await pages(`${R}/pulls?state=closed`))
   .filter((p) => p.merged_at)
@@ -72,16 +74,45 @@ for (const t of auditTree.tree.filter((t) => t.type === 'blob' && /^audit\/\d{4}
   for (const line of (await api(`${R}/contents/${t.path}?ref=audit`, { raw: true })).split('\n')) if (line.trim()) events.push(JSON.parse(line));
 }
 
-// v2 runs (their usage, read by the workflow step); a run whose usage expired or can't be read is
-// counted as unknown, never as zero.
-const v2Runs = opt('--v2') ? JSON.parse(readFileSync(opt('--v2'), 'utf8')) : [];
-const v2 = {
-  runs: v2Runs.filter((r) => Number.isFinite(r.aic)).length,
-  aic: v2Runs.reduce((n, r) => n + (Number.isFinite(r.aic) ? r.aic : 0), 0),
-  unknown: v2Runs.filter((r) => !Number.isFinite(r.aic)).length,
-};
+// v2 runs: every completed run (runs.json, paginated by the step) and its `usage` artifact, read
+// as v2's router reads it: each AI job that ran (Actions jobs API) needs its usage file. A run
+// whose artifact expired, is missing a job or is malformed is unknown, never zero.
+const AI_JOBS = ['agent', 'detection', 'evals'];
+const v2 = { runs: 0, aic: 0, unknown: 0 };
+if (opt('--v2')) {
+  for (const r of JSON.parse(readFileSync(join(opt('--v2'), 'runs.json'), 'utf8'))) {
+    const dir = join(opt('--v2'), String(r.run_id));
+    let aic = null;
+    if (existsSync(dir)) {
+      const files = {};
+      for (const job of readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)) {
+        const f = join(dir, job, 'token_usage.jsonl');
+        if (existsSync(f)) files[job] = readFileSync(f, 'utf8');
+      }
+      const jobs = await pages(`${R}/actions/runs/${r.run_id}/jobs`, (d) => d.jobs);
+      aic = v2RunUsage(files, jobs.filter((j) => AI_JOBS.includes(j.name) && j.started_at && j.conclusion !== 'skipped').map((j) => j.name));
+    }
+    if (aic === null) v2.unknown++;
+    else {
+      v2.runs++;
+      v2.aic += aic;
+    }
+  }
+}
 
-const canary = (await api(`${R}/actions/workflows/agentic-canary.yml/runs?status=completed&per_page=100`)).workflow_runs;
+// Agentic canary: every finished run; whether it checked anything (its live-only steps ran) or was
+// a dry run (FACTORY_ENABLED not "true": those steps skipped, the run still succeeds).
+const LIVE_STEP = /^Dispatch and check/;
+const canary = [];
+for (const run of await pages(`${R}/actions/workflows/agentic-canary.yml/runs?status=completed`, (d) => d.workflow_runs)) {
+  let checked = null;
+  if (run.conclusion === 'success') {
+    const steps = (await pages(`${R}/actions/runs/${run.id}/jobs`, (d) => d.jobs)).flatMap((j) => j.steps || []);
+    const step = steps.find((x) => LIVE_STEP.test(x.name));
+    checked = step ? step.conclusion === 'success' || step.conclusion === 'failure' : null;
+  }
+  canary.push({ conclusion: run.conclusion, checked });
+}
 const local = (f) => JSON.parse(readFileSync(new URL(f, import.meta.url), 'utf8'));
 
 const data = {
