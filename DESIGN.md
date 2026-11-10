@@ -50,7 +50,7 @@ Pause and rethink if any of these is true after two weeks of running:
 
 | Repo | Visibility | Purpose |
 |---|---|---|
-| `factory` | Public | The machinery and rules: templates (controller, agent workflows, CI gates), policy and this design. It also hosts the **control-room dashboard** on its Pages. Templates are copied into product repos with `gh aw add`. Every change is a reviewed PR. |
+| `factory` | Public | The machinery and rules: templates (controller, agent workflows, CI gates), policy and this design. It also hosts the **results page** on its Pages (agent operations are on CAO). Templates are copied into product repos with `gh aw add`. Every change is a reviewed PR. |
 | `chrono-node-rs` | Public | The product. It runs its own controller, agents, CI, merge queue and playground on Pages, because GitHub events only fire inside their own repo. |
 | `factory-ops` | **Private** | **The fire-drill catalog only**, so agents can't read upcoming drills. |
 
@@ -207,7 +207,7 @@ Side states: `repairing`, `stale-contract`, `needs-human`, `blocked`, `cancelled
 | `dependency-steward` | **plain code, no AI** | `dependency-request` labelled; hourly sweep | dependency PR or a fixed comment (controller App) |
 | `release` | **plain code, no AI** | by hand | draft GitHub Release after your approval (`release` environment); crates.io publishing disabled |
 | `daily-digest` | plain code (optional cheap model for the summary) | daily | `create-discussion` or an issue comment: yesterday's merged and failed tasks, `needs-human`, spend vs. budget, drills, anomalies |
-| `outcomes-collector` | plain code (`gh aw outcomes`) | daily | updates the dashboard data; re-checks `pending` items |
+| `outcomes-collector` | retired 2026-11-10 | | CAO shows agent operations; the factory review reads `gh aw logs --outcomes` |
 
 **Models:** a Stage 0 smoke test confirms which models your Copilot seat can use. In week 1, run 10 tasks on each of two candidate coding models. Keep the one with the better acceptance rate and cost per merged PR. Record the model actually used from `aw_info.json`.
 
@@ -327,7 +327,7 @@ Task and attempt IDs travel in:
 3. **An append-only log** on a protected `audit` branch (`audit/YYYY/MM/DD.jsonl`).
    - Only `sabbasi3-factory-controller[bot]` can push to it; no force-push and no deletion.
    - Every event is a commit with its own SHA.
-4. **A dashboard timeline,** plus daily `gh aw outcomes`.
+4. **CAO** for agent operations (runs, cost, failures), and the results page for delivery (since 2026-11-10; it replaced the dashboard timeline and the daily Outcomes collector).
 
 ### What counts as an event
 
@@ -395,25 +395,16 @@ The audit log is **never compacted or rewritten.** It matches the gh-aw ledger's
 
 A daily collector copies run summaries into the audit log before Actions artifacts expire.
 
-### Control room (dashboard)
+### Results page (replaced the control room, 2026-11-10)
 
-A static page on the factory repo's GitHub Pages (`dashboard/`). There's no server-side data build step in v1: the browser reads the public audit log directly.
-
-- **Live tiles:** agents running vs. WIP limit, merge queue, merged today, zero-touch rate, AIC today vs. budget, needs-you count, kill-switch state, factory version, heartbeat age, dry-run mode.
-- **Tables and charts:**
-  - running now (task, attempt, step, model, elapsed, tokens, AIC)
-  - tokens per task and in total
-  - time per stage per task, from event times
-  - latest check results, and recent events with their canonical JSON
-  - flow (time from issue to live, throughput) and quality (golden pass %, repairs per task, escaped bugs): later, once the events exist
-- **Where the time goes:** a stacked bar per task, plus a 7-day average, showing queue wait, run setup, agent work, detection, CI, merge queue, deploy and time waiting for you.
-- **A timeline for each task.**
-- **Integrity:** the browser recomputes every event's SHA-256 and checks the hash chain across the loaded window.
-- **Data and refresh:**
-  - It polls the `audit` branch head on api.github.com with an ETag (`If-None-Match`). When the head changes, it fetches the last 7 days of `audit/YYYY/MM/DD.jsonl` from raw.githubusercontent.com, pinned to that commit.
-  - Unauthenticated by default. GitHub allows 60 API requests an hour per IP, and unauthenticated 304s still count, so the page spreads its requests over the rate-limit window: about one check a minute. It shows the requests left.
-  - An optional read-only token raises the limit (30 s polls). It stays in the browser's `localStorage` and is sent only to api.github.com.
-  - The status line reports data freshness and controller liveness together, so it never reads as healthy while the heartbeat is late.
+The control-room dashboard (live tiles, task board, timelines, in-browser chain check) was retired once CAO,
+GitHub Next's Central Agentic Ops, covered agent operations: runs, AI cost per run and workflow, failure
+streaks, firewall, MCP and model views, and gh-aw version drift ([CAO](https://sabbasi3-factory-lab.github.io/cao-control/),
+monitoring only). The factory repo's Pages now show only what CAO doesn't: a small results page
+(`results/`, rebuilt daily by `pages.yml` from task issues, merged PRs, the audit log's `run_spend` and run
+usage) with languages and tasks shipped, the hands-off rate, reverts, time per language, total cost and
+drills. The chain check stays with the independent verifier (`audit-verify`) and liveness with
+`heartbeat-watchdog`.
 
 **No OpenTelemetry (decision):** all data stays in GitHub.
 

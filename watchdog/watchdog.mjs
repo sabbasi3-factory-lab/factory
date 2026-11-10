@@ -10,14 +10,14 @@
 // scheduler, a transient read error) never opens an issue on its own.
 // Runs from .github/workflows/heartbeat-watchdog.yml; the pure parts are unit-tested.
 //
-//   GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/factory node dashboard/watchdog.mjs
+//   GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/factory node watchdog/watchdog.mjs
 //   WATCHDOG_DRY_RUN=1 prints the plan without writing anything.
 //
 // Fails closed: anything unreadable is "unknown" and alerts; only a heartbeat or a
 // verifier run that was actually read and is recent enough counts as "fresh".
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { DEFAULTS, dayPaths, formatAge, parseJsonl, parseTime, parseUtcSeconds, validateEvent } from './lib.js';
+import { DEFAULTS, dayPaths, formatAge, parseJsonl, parseTime, parseUtcSeconds, validateEvent } from './audit.mjs';
 
 export const SOURCE_REPO = 'sabbasi3-factory-lab/chrono-node-rs';
 export const AUDIT_BRANCH = 'audit';
@@ -29,9 +29,10 @@ export const VERIFIER_MAX_AGE_MIN = 26 * 60; // alert after 26 h without a succe
 export const WATCHDOG_WORKFLOW = 'heartbeat-watchdog.yml';
 export const WATCHDOG_JOB = 'watchdog';
 // chrono-node-rs's scheduled factory workflows: each alerts when its two newest decisive runs on
-// main (success or a failure; skipped and cancelled runs don't count) both failed. outcomes.yml
-// failed every run for ~5 h on 2026-11-04 with nobody told; its data feeds onboarding's stop rules.
-export const SCHEDULED_WORKFLOWS = ['outcomes.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml'];
+// main (success or a failure; skipped and cancelled runs don't count) both failed (outcomes.yml
+// failed every run for ~5 h on 2026-11-04 with nobody told; it's retired since 2026-11-10, CAO covers
+// agent operations). watchdog.yml is chrono-node-rs's own stall watchdog: if it breaks, this says so.
+export const SCHEDULED_WORKFLOWS = ['watchdog.yml', 'monitor.yml', 'onboard.yml', 'upstream-sync.yml', 'drills.yml'];
 export const WORKFLOW_FAILURES_IN_A_ROW = 2;
 const DECISIVE = new Set(['success', 'failure', 'timed_out', 'startup_failure']);
 // Name of the workflow step that runs only when this run's verdict is "failing". The next run

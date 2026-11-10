@@ -1,11 +1,17 @@
 name: pages
 
+# The factory's results page (results/): what the factory delivered, which CAO (agent operations:
+# https://sabbasi3-factory-lab.github.io/cao-control/) doesn't show. Built from data chrono-node-rs
+# already records, with a read-only token, and refreshed daily.
 on:
   push:
     branches: [main]
     paths:
-      - "dashboard/**"
+      - "results/**"
+      - "watchdog/**"
       - ".github/workflows/pages.yml"
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 # Nothing by default; each job grants only what it needs.
@@ -27,8 +33,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Test the dashboard
-        run: node --test "dashboard/test/*.test.mjs"
+      - name: Test the results page and the watchdog
+        run: node --test "results/test/*.test.mjs" "watchdog/test/*.test.mjs"
 
   deploy:
     needs: test
@@ -44,9 +50,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The v2 runs' measured usage (agent, threat detection, evals) from their `usage` artifacts, as
+      # v2's router reads it. A run whose artifact can't be read is listed as unknown, never zero.
+      - name: v2 run usage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: sabbasi3-factory-lab/chrono-node-rs
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          for w in v2-port v2-repair; do
+            gh api "repos/$R/actions/workflows/$w.lock.yml/runs?status=completed&per_page=100" --jq '.workflow_runs[].id' | while read -r id; do
+              d="u-$id"
+              if gh run download "$id" -R "$R" -n usage -D "$d" > /dev/null 2>&1; then
+                a=$(jq '.ai_credits // 0' "$d/agent_usage.json" 2>/dev/null || echo 0)
+                o=$(find "$d" -name token_usage.jsonl -not -path "$d/agent/*" -exec cat {} + | jq -s 'map(.ai_credits_this_response // 0) | add // 0')
+                jq -nc --argjson id "$id" --arg w "$w" --argjson a "$a" --argjson o "$o" '{run_id: $id, workflow: $w, aic: ($a + $o)}'
+              else
+                jq -nc --argjson id "$id" --arg w "$w" '{run_id: $id, workflow: $w, aic: null}'
+              fi
+            done
+          done | jq -s . > v2-runs.json
+      - name: Build the page data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site
+          cp results/index.html results/page.js results/style.css site/
+          node results/build.mjs --out site/data.json --v2 "$RUNNER_TEMP/v2-runs.json"
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: dashboard
+          path: site
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
